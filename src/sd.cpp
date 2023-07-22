@@ -174,7 +174,7 @@ namespace ncnn // NOTE: some parts of this code are taken from the original NCNN
 
     public:
 
-        void substract_mean_normalize(const float* mean_vals, const float* norm_vals)
+        void subtract_mean_normalize(const float* mean_vals, const float* norm_vals)
         {
             for (size_t i = 0; i < c; i++)
             {
@@ -575,7 +575,7 @@ inline static ncnn::Mat decoder_solver(ncnn::Mat& sample)
     ncnn::Mat x_samples_ddim;
     {
         constexpr float factor[4] = { 5.48998f, 5.48998f, 5.48998f, 5.48998f };
-        sample.substract_mean_normalize(0, factor);
+        sample.subtract_mean_normalize(0, factor);
 
         {
 #if USE_NCNN
@@ -630,7 +630,7 @@ inline static ncnn::Mat decoder_solver(ncnn::Mat& sample)
 
         constexpr float _mean_[3] = { -1.0f, -1.0f, -1.0f };
         constexpr float _norm_[3] = { 127.5f, 127.5f, 127.5f };
-        x_samples_ddim.substract_mean_normalize(_mean_, _norm_);
+        x_samples_ddim.subtract_mean_normalize(_mean_, _norm_);
     }
     return x_samples_ddim;
 }
@@ -824,7 +824,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, ncnn::Mat& c, ncnn:
 
     sigma.push_back(0.f);
     float _norm_[4] = { sigma[0], sigma[0], sigma[0], sigma[0] };
-    x_mat.substract_mean_normalize(0, _norm_);
+    x_mat.subtract_mean_normalize(0, _norm_);
     // sample_euler_ancestral
     {
         for (int i = 0; i < static_cast<int>(sigma.size()) - 1; i++)
