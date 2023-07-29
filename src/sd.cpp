@@ -29,6 +29,7 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include <cstring>
 
 #if USE_NCNN
 #include "benchmark.h"
