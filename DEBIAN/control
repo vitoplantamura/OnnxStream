@@ -1,0 +1,7 @@
+Package: onnxstream
+Version: 0.0.1
+Section: graphics
+Priority: optional
+Architecture: arm64
+Maintainer: Daniel Playle <code@danplayle.com>
+Description: Low-memory AI image generator using OnnxStream

@@ -1,0 +1,61 @@
+name: Cross compile and publish ARM64 package
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out XNNPACK
+        uses: actions/checkout@v3
+        with:
+          repository: dp0/XNNPACK
+          path: XNNPACK
+          ref: 1004acaa3a5c0f515a3f7b229aef1dabe31472a4
+        
+      - name: Check out OnnxStream
+        uses: actions/checkout@v3
+        with:
+          path: OnnxStream
+    
+      - name: Install cross compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+
+      - name: Cross compile XNNPACK
+        run: |
+          mkdir XNNPACK/build && cd XNNPACK/build
+          cmake -DXNNPACK_BUILD_TESTS=OFF -DXNNPACK_BUILD_BENCHMARKS=OFF ..
+          cmake --build . --config Release
+
+      - name: Cross compile OnnxStream
+        run: |
+          mkdir OnnxStream/build && cd OnnxStream/build
+          cmake -DXNNPACK_DIR=../../XNNPACK ..
+          cmake --build . --config Release
+
+      - name: Extract version
+        id: control-version
+        run: |
+          version=$(grep '^Version:' OnnxStream/DEBIAN/control | cut -d ' ' -f 2)
+          echo "CONTROL_VERSION=$version" >> $GITHUB_OUTPUT
+
+      - name: Create Debian package
+        run: |
+          mkdir -p package/DEBIAN
+          cp -r OnnxStream/DEBIAN/* package/DEBIAN/
+          mkdir -p package/usr/bin
+          cp OnnxStream/build/sd package/usr/bin/onnxstream
+          dpkg-deb --build package onnxstream_{{ steps.control_version.outputs.CONTROL_VERSION }}_arm64.deb
+
+          
+      - name: Create release and upload package
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create v{{ steps.control_version.outputs.CONTROL_VERSION }} onnxstream_{{ steps.control_version.outputs.CONTROL_VERSION }}_arm64.deb --title "Release v{{ steps.control_version.outputs.CONTROL_VERSION }}"
