@@ -137,7 +137,7 @@ Some things must be considered when exporting a Pytorch `nn.Module` (in our case
 1. When calling `torch.onnx.export`, `dynamic_axes` should be left empty, since OnnxStream doesn't support inputs with a dynamic shape.
 2. It is strongly recommended to run the excellent [ONNX Simplifier](https://github.com/daquexian/onnx-simplifier) on the exported ONNX file before its conversion to a `model.txt` file.
 
-# How to Build the Stable Diffusion example on Linux/Mac/Windows
+# How to Build the Stable Diffusion example on Linux/Mac/Windows/Termux
 
 - **Windows only**: start the following command prompt: `Visual Studio Tools` > `x64 Native Tools Command Prompt`.
 - **Mac only**: make sure to install cmake: `brew install cmake`.

@@ -8,7 +8,7 @@ if(NOT XNNPACK_DIR)
 	message(FATAL_ERROR "Please specify XNNPACK_DIR.")
 endif()
 
-if(UNIX) # includes APPLE
+if(UNIX) # includes APPLE and ANDROID (ie Termux)
 
 	include_directories("${XNNPACK_DIR}/include")
 	include_directories("${XNNPACK_DIR}/build/pthreadpool-source/include")
@@ -16,6 +16,10 @@ if(UNIX) # includes APPLE
 	link_libraries("${XNNPACK_DIR}/build/pthreadpool/libpthreadpool.a")
 	link_libraries("${XNNPACK_DIR}/build/cpuinfo/libcpuinfo.a")
 	link_libraries("pthread")
+
+	if(ANDROID)
+		link_libraries("log")
+	endif()
 
 elseif(WIN32)
 
