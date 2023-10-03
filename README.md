@@ -8,7 +8,7 @@ Generally major machine learning frameworks and libraries are focused on minimiz
 
 OnnxStream is based on the idea of decoupling the inference engine from the component responsible of providing the model weights, which is a class derived from `WeightsProvider`. A `WeightsProvider` specialization can implement any type of loading, caching and prefetching of the model parameters. For example a custom `WeightsProvider` can decide to download its data from an HTTP server directly, without loading or writing anything to disk (hence the word "Stream" in "OnnxStream"). Two default `WeightsProviders` are available: `DiskNoCache` and `DiskPrefetch`.
 
-**OnnxStream can consume even 55x less memory than OnnxRuntime while being only 0.5-2x slower** (on CPU, see the Performance section below).
+**OnnxStream can consume even 55x less memory than OnnxRuntime while being only 1.5-2x slower** (on CPU, see the Performance section below).
 
 # Stable Diffusion 1.5
 
@@ -93,7 +93,7 @@ This table shows the various inference times of the three models of Stable Diffu
 | FP32 VAE Dec / OnnxStream   | 1.004 GB - 20.9 secs | 1.004 GB - 20.6 secs | 1.004 GB - 21.2 secs |
 | FP32 VAE Dec / OnnxRuntime  | 1.330 GB - 11.2 secs | 2.026 GB - 10.1 secs | 2.026 GB - 11.1 secs |
 
-In the case of the UNET model (when run in FP16 precision, with FP16 arithmetic enabled in OnnxStream), OnnxStream can consume even 55x less memory than OnnxRuntime while being 0.5-2x slower.
+In the case of the UNET model (when run in FP16 precision, with FP16 arithmetic enabled in OnnxStream), OnnxStream can consume even 55x less memory than OnnxRuntime while being 1.5-2x slower.
 
 Notes:
 
