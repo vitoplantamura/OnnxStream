@@ -13,6 +13,7 @@
 #include <fstream>
 #include <optional>
 #include <set>
+#include <memory>
 
 namespace onnxstream {
 
@@ -265,6 +266,7 @@ public:
     std::string m_path;
 
     virtual void on_init(TensorDataType type, const std::string& name, size_t size) {}
+    virtual void on_restart() {}
 
     virtual tensor_vector<uint8_t> get_uint8(const std::string& name) = 0;
     virtual tensor_vector<uint16_t> get_float16(const std::string& name) = 0;
@@ -301,6 +303,11 @@ class DiskPrefetchWeightsProvider : public WeightsProvider
 {
 private:
 
+    size_t m_max_memory = 0;
+    bool m_limit_plus_one_file = false;
+
+private:
+
     struct Entry
     {
         TensorDataType m_type;
@@ -320,17 +327,52 @@ private:
         Entry() {}
     };
 
-    std::vector<Entry> m_entries;
+private:
 
-    size_t m_max_memory = 0;
-    bool m_limit_plus_one_file = false;
+    std::vector<Entry> m_entries, m_entries_copy;
 
-    bool m_exit = false;
+    bool m_exit;
     std::string m_error;
 
-    std::thread* m_thread = nullptr;
-    std::condition_variable* m_cv = nullptr;
-    std::mutex* m_mutex = nullptr;
+    std::thread* m_thread;
+    std::condition_variable* m_cv;
+    std::mutex* m_mutex;
+
+    void init_members()
+    {
+        m_entries = m_entries_copy;
+
+        m_exit = false;
+        m_error = "";
+
+        m_thread = nullptr;
+        m_cv = nullptr;
+        m_mutex = nullptr;
+    }
+
+    void destructor()
+    {
+        if (m_thread)
+        {
+            {
+                std::lock_guard lock(*m_mutex);
+                m_exit = true;
+            }
+
+            m_cv->notify_one();
+
+            m_thread->join();
+        }
+
+        if (m_cv)
+            delete m_cv;
+        if (m_mutex)
+            delete m_mutex;
+        if (m_thread)
+            delete m_thread;
+    }
+
+private:
 
     void worker()
     {
@@ -445,7 +487,11 @@ private:
     {
         if (!m_thread)
         {
-            std::reverse(m_entries.begin(), m_entries.end());
+            if (m_entries_copy.size() == 0)
+            {
+                std::reverse(m_entries.begin(), m_entries.end());
+                m_entries_copy = m_entries;
+            }
 
             m_cv = new std::condition_variable();
             m_mutex = new std::mutex();
@@ -502,28 +548,14 @@ private:
 public:
 
     DiskPrefetchWeightsProvider(size_t max_memory = 1 * 1024 * 1024, bool limit_plus_one_file = true)
-        : m_max_memory(max_memory), m_limit_plus_one_file(limit_plus_one_file) {}
+        : m_max_memory(max_memory), m_limit_plus_one_file(limit_plus_one_file)
+    {
+        init_members();
+    }
 
     virtual ~DiskPrefetchWeightsProvider()
     {
-        if (m_thread)
-        {
-            {
-                std::lock_guard lock(*m_mutex);
-                m_exit = true;
-            }
-
-            m_cv->notify_one();
-
-            m_thread->join();
-        }
-
-        if (m_cv)
-            delete m_cv;
-        if (m_mutex)
-            delete m_mutex;
-        if (m_thread)
-            delete m_thread;
+        destructor();
     }
 
     virtual void on_init(TensorDataType type, const std::string& name, size_t size)
@@ -535,6 +567,137 @@ public:
             n = n.substr(0, pos) + "_nhwc.bin";
 
         m_entries.emplace_back(type, n, size);
+    }
+
+    virtual void on_restart()
+    {
+        destructor();
+        init_members();
+    }
+
+    virtual tensor_vector<uint8_t> get_uint8(const std::string& name)
+    {
+        return provide<uint8_t>(name);
+    }
+
+    virtual tensor_vector<uint16_t> get_float16(const std::string& name)
+    {
+        return provide<uint16_t>(name);
+    }
+
+    virtual tensor_vector<float> get_float32(const std::string& name)
+    {
+        return provide<float>(name);
+    }
+
+    virtual tensor_vector<int64_t> get_int64(const std::string& name)
+    {
+        return provide<int64_t>(name);
+    }
+};
+
+template <typename T>
+class RamWeightsProvider : public WeightsProvider
+{
+private:
+
+    std::shared_ptr<T> m_reader;
+
+private:
+
+    struct Entry
+    {
+        std::string m_name;
+
+        std::variant<
+            std::monostate,
+            tensor_vector<uint8_t>,
+            tensor_vector<uint16_t>,
+            tensor_vector<float>,
+            tensor_vector<int64_t>
+        > m_data;
+    };
+
+private:
+
+    std::vector<Entry> m_weights;
+    size_t m_index = 0;
+
+    bool m_path_set = false;
+
+private:
+
+    template <typename U>
+    tensor_vector<U> provide(const std::string& name)
+    {
+        if (m_reader)
+        {
+            if (!m_path_set)
+            {
+                m_reader->m_path = m_path;
+                m_path_set = true;
+            }
+
+            tensor_vector<U> v;
+
+            if constexpr (std::is_same<U, uint8_t>::value)
+                v = m_reader->get_uint8(name);
+            else if constexpr (std::is_same<U, uint16_t>::value)
+                v = m_reader->get_float16(name);
+            else if constexpr (std::is_same<U, float>::value)
+                v = m_reader->get_float32(name);
+            else if constexpr (std::is_same<U, int64_t>::value)
+                v = m_reader->get_int64(name);
+            else
+                throw std::invalid_argument("RamWeightsProvider::provide: invalid type.");
+
+            Entry e;
+            e.m_name = name;
+            e.m_data = v;
+            m_weights.push_back(std::move(e));
+
+            return v;
+        }
+        else
+        {
+            if (m_index >= m_weights.size())
+                throw std::invalid_argument("RamWeightsProvider::provide: invalid index.");
+
+            Entry& e = m_weights[m_index++];
+
+            if (name != e.m_name)
+                throw std::invalid_argument("RamWeightsProvider::provide: invalid name.");
+
+            if (!std::holds_alternative<tensor_vector<U>>(e.m_data))
+                throw std::invalid_argument("RamWeightsProvider::provide: invalid data type.");
+
+            return std::get<tensor_vector<U>>(e.m_data);
+        }
+    }
+
+public:
+
+    RamWeightsProvider(T&& reader)
+    {
+        m_reader = std::make_shared<T>(std::move(reader));
+    }
+
+    virtual ~RamWeightsProvider()
+    {
+    }
+
+    virtual void on_init(TensorDataType type, const std::string& name, size_t size)
+    {
+        if (m_reader)
+            m_reader->on_init(type, name, size);
+        else
+            throw std::invalid_argument("RamWeightsProvider::on_init: invalid call to on_init.");
+    }
+
+    virtual void on_restart()
+    {
+        m_reader.reset();
+        m_index = 0;
     }
 
     virtual tensor_vector<uint8_t> get_uint8(const std::string& name)
@@ -632,7 +795,7 @@ private:
 
     std::string m_path;
 
-    std::map<std::string, int> m_intermediate_refs;
+    std::map<std::string, int> m_intermediate_refs, m_intermediate_refs_copy;
 
     std::vector<Operation> m_ops_queue;
 

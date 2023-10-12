@@ -52,11 +52,11 @@ struct MainArgs
     std::string m_steps = "10";
     std::string m_save_latents = "";
     bool m_decoder_calibrate = false;
-    bool m_decoder_fp16 = false;
     bool m_rpi = false;
     bool m_xl = false;
     bool m_tiled = true;
     bool m_rpi_lowmem = false;
+    bool m_ram = false;
 };
 
 static MainArgs g_main_args;
@@ -599,7 +599,7 @@ inline static ncnn::Mat decoder_solver(ncnn::Mat& sample)
 
                 model.read_range_data((g_main_args.m_path_with_slash + "vae_decoder_qu8/range_data.txt").c_str());
                 
-                if (g_main_args.m_decoder_fp16)
+                if (!g_main_args.m_rpi_lowmem)
                     model.m_use_fp16_arithmetic = true;
                 else if (!g_main_args.m_decoder_calibrate)
                     model.m_use_uint8_arithmetic = true;
@@ -673,7 +673,7 @@ public:
     tensor_vector<float> m_pooled_prompt_embeds_neg;
 };
 
-static inline ncnn::Mat CFGDenoiser_CompVisDenoiser(ncnn::Net& net, float const* log_sigmas, ncnn::Mat& input, float sigma, const ncnn::Mat& cond, const ncnn::Mat& uncond, SDXLParams* sdxl_params)
+static inline ncnn::Mat CFGDenoiser_CompVisDenoiser(ncnn::Net& net, float const* log_sigmas, ncnn::Mat& input, float sigma, const ncnn::Mat& cond, const ncnn::Mat& uncond, SDXLParams* sdxl_params, Model& model)
 {
     int dim = sdxl_params ? 128 : 64;
 
@@ -711,7 +711,7 @@ static inline ncnn::Mat CFGDenoiser_CompVisDenoiser(ncnn::Net& net, float const*
     ncnn::Mat c_out_mat(1);
     c_out_mat[0] = c_out;
 
-    auto run_inference = [&net, &input, &t_mat, &c_in_mat, &c_out_mat, &sdxl_params, &dim, &cond, &uncond](ncnn::Mat& output, const ncnn::Mat& cond_mat) {
+    auto run_inference = [&net, &input, &t_mat, &c_in_mat, &c_out_mat, &sdxl_params, &dim, &cond, &uncond, &model](ncnn::Mat& output, const ncnn::Mat& cond_mat) {
 
 #if USE_NCNN
         ncnn::Extractor ex = net.create_extractor();
@@ -726,23 +726,8 @@ static inline ncnn::Mat CFGDenoiser_CompVisDenoiser(ncnn::Net& net, float const*
 
 #if USE_ONNXSTREAM
         {
-            Model model;
-
             if (!sdxl_params)
             {
-                model.m_ops_printf = g_main_args.m_ops_printf;
-
-                model.m_use_fp16_arithmetic = true;
-                model.m_fuse_ops_in_attention = true;
-
-                if (g_main_args.m_rpi)
-                {
-                    model.m_use_fp16_arithmetic = false;
-                    model.m_attention_fused_ops_parts = 16;
-                }
-
-                model.read_file((g_main_args.m_path_with_slash + UNET_MODEL("unet_fp16/model.txt", "anime_fp16/model.txt")).c_str());
-
                 tensor_vector<float> t_v({ t_mat[0] });
                 tensor_vector<float> x_v((float*)input, (float*)input + input.total());
                 tensor_vector<float> cc_v((const float*)cond_mat, (const float*)cond_mat + cond_mat.total());
@@ -771,35 +756,6 @@ static inline ncnn::Mat CFGDenoiser_CompVisDenoiser(ncnn::Net& net, float const*
             }
             else
             {
-                model.m_ops_printf = g_main_args.m_ops_printf;
-
-                model.m_use_fp16_arithmetic = true;
-                model.m_fuse_ops_in_attention = true;
-
-                if (g_main_args.m_rpi)
-                {
-                    model.m_use_fp16_arithmetic = false;
-                    model.m_attention_fused_ops_parts = 16;
-
-                    if (g_main_args.m_rpi_lowmem)
-                    {
-                        model.set_weights_provider(DiskNoCacheWeightsProvider());
-                        model.m_force_fp16_storage = true;
-                        model.m_force_uint8_storage_set =
-                            { "_2F_unet_2F_conv_5F_in_2F_Conv_5F_output_5F_0",
-                            "_2F_unet_2F_down_5F_blocks_2E_0_2F_resnets_2E_0_2F_Add_5F_1_5F_output_5F_0",
-                            "_2F_unet_2F_down_5F_blocks_2E_1_2F_attentions_2E_0_2F_Add_5F_output_5F_0",
-                            "_2F_unet_2F_down_5F_blocks_2E_0_2F_resnets_2E_1_2F_Add_5F_1_5F_output_5F_0",
-                            "_2F_unet_2F_down_5F_blocks_2E_0_2F_downsamplers_2E_0_2F_conv_2F_Conv_5F_output_5F_0",
-                            "_2F_unet_2F_down_5F_blocks_2E_1_2F_attentions_2E_1_2F_Add_5F_output_5F_0",
-                            "_2F_unet_2F_down_5F_blocks_2E_1_2F_downsamplers_2E_0_2F_conv_2F_Conv_5F_output_5F_0",
-                            "_2F_unet_2F_down_5F_blocks_2E_2_2F_attentions_2E_0_2F_Add_5F_output_5F_0",
-                            "_2F_unet_2F_up_5F_blocks_2E_0_2F_Concat_5F_output_5F_0" };
-                    }
-                }
-
-                model.read_file((g_main_args.m_path_with_slash + "sdxl_unet_fp16/model.txt").c_str());
-
                 tensor_vector<float> t_v({ t_mat[0] });
                 tensor_vector<float> t2_v = { 1024, 1024, 0, 0, 1024, 1024 };
                 tensor_vector<float> x_v((float*)input, (float*)input + input.total());
@@ -841,7 +797,9 @@ static inline ncnn::Mat CFGDenoiser_CompVisDenoiser(ncnn::Net& net, float const*
 
             model.run();
 
-            auto& output_vec = model.m_data[0].get_vector<float>();
+            tensor_vector<float> output_vec = std::move(model.m_data[0].get_vector<float>());
+
+            model.m_data.clear();
 
             float m = c_out_mat[0];
             float* pf = input;
@@ -920,11 +878,66 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
     x_mat.substract_mean_normalize(0, _norm_);
     // sample_euler_ancestral
     {
+#if USE_ONNXSTREAM
+        Model model;
+
+        if (g_main_args.m_rpi_lowmem)
+            model.set_weights_provider(DiskNoCacheWeightsProvider());
+        else if (g_main_args.m_ram)
+            model.set_weights_provider(RamWeightsProvider<DiskPrefetchWeightsProvider>(DiskPrefetchWeightsProvider()));
+
+        if (!sdxl_params)
+        {
+            model.m_ops_printf = g_main_args.m_ops_printf;
+
+            model.m_use_fp16_arithmetic = true;
+            model.m_fuse_ops_in_attention = true;
+
+            if (g_main_args.m_rpi)
+            {
+                model.m_use_fp16_arithmetic = false;
+                model.m_attention_fused_ops_parts = 16;
+            }
+
+            model.read_file((g_main_args.m_path_with_slash + UNET_MODEL("unet_fp16/model.txt", "anime_fp16/model.txt")).c_str());
+        }
+        else
+        {
+            model.m_ops_printf = g_main_args.m_ops_printf;
+
+            model.m_use_fp16_arithmetic = true;
+            model.m_fuse_ops_in_attention = true;
+
+            if (g_main_args.m_rpi)
+            {
+                model.m_use_fp16_arithmetic = false;
+                model.m_attention_fused_ops_parts = 16;
+
+                if (g_main_args.m_rpi_lowmem)
+                {
+                    model.m_force_fp16_storage = true;
+                    model.m_force_uint8_storage_set =
+                    { "_2F_unet_2F_conv_5F_in_2F_Conv_5F_output_5F_0",
+                    "_2F_unet_2F_down_5F_blocks_2E_0_2F_resnets_2E_0_2F_Add_5F_1_5F_output_5F_0",
+                    "_2F_unet_2F_down_5F_blocks_2E_1_2F_attentions_2E_0_2F_Add_5F_output_5F_0",
+                    "_2F_unet_2F_down_5F_blocks_2E_0_2F_resnets_2E_1_2F_Add_5F_1_5F_output_5F_0",
+                    "_2F_unet_2F_down_5F_blocks_2E_0_2F_downsamplers_2E_0_2F_conv_2F_Conv_5F_output_5F_0",
+                    "_2F_unet_2F_down_5F_blocks_2E_1_2F_attentions_2E_1_2F_Add_5F_output_5F_0",
+                    "_2F_unet_2F_down_5F_blocks_2E_1_2F_downsamplers_2E_0_2F_conv_2F_Conv_5F_output_5F_0",
+                    "_2F_unet_2F_down_5F_blocks_2E_2_2F_attentions_2E_0_2F_Add_5F_output_5F_0",
+                    "_2F_unet_2F_up_5F_blocks_2E_0_2F_Concat_5F_output_5F_0" };
+                }
+            }
+
+            model.read_file((g_main_args.m_path_with_slash + "sdxl_unet_fp16/model.txt").c_str());
+        }
+#endif
+
         for (int i = 0; i < static_cast<int>(sigma.size()) - 1; i++)
         {
             std::cout << "step:" << i << "\t\t";
             double t1 = ncnn::get_current_time();
-            ncnn::Mat denoised = CFGDenoiser_CompVisDenoiser(net, log_sigmas, x_mat, sigma[i], c, uc, sdxl_params);
+            ncnn::Mat denoised = CFGDenoiser_CompVisDenoiser(net, log_sigmas, x_mat, sigma[i], c, uc, sdxl_params, model);
             double t2 = ncnn::get_current_time();
             std::cout << t2 - t1 << "ms" << std::endl;
             float sigma_up = std::min(sigma[i + 1], std::sqrt(sigma[i + 1] * sigma[i + 1] * (sigma[i] * sigma[i] - sigma[i + 1] * sigma[i + 1]) / (sigma[i] * sigma[i])));
@@ -1236,6 +1249,8 @@ inline static ncnn::Mat prompt_solve(std::unordered_map<std::string, int>& token
                     }
                     else
                     {
+                        data[76] = 49407; // todo
+
                         Model model;
 
                         model.m_ops_printf = g_main_args.m_ops_printf;
@@ -1652,10 +1667,6 @@ int main(int argc, char** argv)
         {
             g_main_args.m_decoder_calibrate = true;
         }
-        else if (arg == "--decoder-fp16")
-        {
-            g_main_args.m_decoder_fp16 = true;
-        }
         else if (arg == "--rpi")
         {
             g_main_args.m_rpi = true;
@@ -1673,6 +1684,10 @@ int main(int argc, char** argv)
             g_main_args.m_rpi = true;
             g_main_args.m_rpi_lowmem = true;
         }
+        else if (arg == "--ram")
+        {
+            g_main_args.m_ram = true;
+        }
         else
         {
             printf(("Invalid command line argument: \"" + arg + "\".\n\n").c_str());
@@ -1687,10 +1702,10 @@ int main(int argc, char** argv)
             printf("--steps             Sets the number of diffusion steps.\n");
             printf("--save-latents      After the diffusion, saves the latents in the specified file.\n");
             printf("--decoder-calibrate (ONLY SD 1.5) Calibrates the quantized version of the VAE decoder.\n");
-            printf("--decoder-fp16      (ONLY SD 1.5) During inference, uses the FP16 version of the VAE decoder.\n");
             printf("--not-tiled         (ONLY SDXL 1.0) Don't use the tiled VAE decoder.\n");
+            printf("--ram               Uses the RAM WeightsProvider (Experimental).\n");
             printf("--rpi               Configures the models to run on a Raspberry Pi.\n");
-            printf("--rpi-lowmem        (ONLY SDXL 1.0) Configures the models to run on a Raspberry Pi Zero 2.\n");
+            printf("--rpi-lowmem        Configures the models to run on a Raspberry Pi Zero 2.\n");
 
             return -1;
         }

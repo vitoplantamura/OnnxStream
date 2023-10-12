@@ -2334,37 +2334,50 @@ void Model::write_range_data(const char* filename)
 
 void Model::run()
 {
-    m_pos = 0;
-
-    while (auto op = next_op())
+    if (m_intermediate_refs_copy.size() == 0)
     {
-        for (auto& input_tensor : op->m_input)
+        m_pos = 0;
+
+        while (auto op = next_op())
         {
-            if (input_tensor.m_name.size() != 0)
-                if (input_tensor.m_type == TensorDataType::none)
-                    m_intermediate_refs[input_tensor.m_name]++;
-                else
-                {
-                    size_t size = 1;
-                    for (auto& s : input_tensor.m_shape)
-                        size *= s;
-
-                    switch (input_tensor.m_type)
+            for (auto& input_tensor : op->m_input)
+            {
+                if (input_tensor.m_name.size() != 0)
+                    if (input_tensor.m_type == TensorDataType::none)
+                        m_intermediate_refs[input_tensor.m_name]++;
+                    else
                     {
-                    case TensorDataType::uint8: size *= sizeof(uint8_t); break;
-                    case TensorDataType::float16: size *= sizeof(uint16_t); break;
-                    case TensorDataType::float32: size *= sizeof(float); break;
-                    case TensorDataType::int64: size *= sizeof(int64_t); break;
-                    default: throw std::invalid_argument("Model::run: unable to calculate tensor size: invalid type.");
+                        size_t size = 1;
+                        for (auto& s : input_tensor.m_shape)
+                            size *= s;
+
+                        switch (input_tensor.m_type)
+                        {
+                        case TensorDataType::uint8: size *= sizeof(uint8_t); break;
+                        case TensorDataType::float16: size *= sizeof(uint16_t); break;
+                        case TensorDataType::float32: size *= sizeof(float); break;
+                        case TensorDataType::int64: size *= sizeof(int64_t); break;
+                        default: throw std::invalid_argument("Model::run: unable to calculate tensor size: invalid type.");
+                        }
+
+                        get_wp()->on_init(input_tensor.m_type, input_tensor.m_name, size);
                     }
-
-                    get_wp()->on_init(input_tensor.m_type, input_tensor.m_name, size);
-                }
+            }
         }
-    }
 
-    for (auto& name : m_extra_outputs)
-        m_intermediate_refs[name]++;
+        for (auto& name : m_extra_outputs)
+            m_intermediate_refs[name]++;
+
+        m_intermediate_refs_copy = m_intermediate_refs;
+    }
+    else
+    {
+        m_intermediate_refs = m_intermediate_refs_copy;
+
+        m_ops_printf_index = 0;
+
+        get_wp()->on_restart();
+    }
 
     m_pos = 0;
 
