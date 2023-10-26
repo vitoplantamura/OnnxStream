@@ -239,6 +239,95 @@ These are the command line options of the Stable Diffusion example:
 --rpi-lowmem        Configures the models to run on a Raspberry Pi Zero 2.
 ```
 
+# How to Convert and Run a Custom Stable Diffusion Model with OnnxStream
+
+This guide aims to assist you in converting a custom Stable Diffusion model for use with OnnxStream. Whether you're starting from `.safetensors` or `.onnx`, this guide has you covered.
+
+### Prerequisites
+
+- Python 3.x
+- ONNX
+- ONNX Simplifier
+- Linux environment (Ubuntu is highly recommended, Windows WSL also works)
+- Swap space (amount varies depending on your approach)
+
+### Why Specific Steps?
+
+#### Understanding Einsum and Other Operations
+
+The original Stable Diffusion model uses operations like Einsum, which are not supported by OnnxStream. Hence, it's advised to use the Hugging Face implementation, which is more compatible.
+
+### Optional: Converting .safetensors to ONNX
+
+If you're starting with a `.safetensors` file, you can convert it to `.onnx` using the tool available at [this GitHub repository](https://github.com/AUTOMATIC1111/stable-diffusion-webui-tensorrt).
+
+### Exporting Your Model
+
+#### Option A: Exporting from Hugging Face (Recommended)
+
+```python
+from diffusers import StableDiffusionPipeline
+import torch
+
+pipe = StableDiffusionPipeline.from_single_file("https://huggingface.co/YourUsername/YourModel/blob/main/Model.safetensors")
+
+dummy_input = (torch.randn(1, 4, 64, 64), torch.randn(1), torch.randn(1, 77, 768))
+input_names = ["sample", "timestep", "encoder_hidden_states"]
+output_names = ["out_sample"]
+
+torch.onnx.export(pipe.unet, dummy_input, "/path/to/save/unet_temp.onnx", verbose=False, input_names=input_names, output_names=output_names, opset_version=14, do_constant_folding=True, export_params=True)
+```
+
+#### Option B: Manually Fixing Input Shapes
+
+```bash
+python -m onnxruntime.tools.make_dynamic_shape_fixed --input_name sample --input_shape 1,4,64,64 model.onnx model_fixed1.onnx
+python -m onnxruntime.tools.make_dynamic_shape_fixed --input_name timestep --input_shape 1 model_fixed1.onnx model_fixed2.onnx
+python -m onnxruntime.tools.make_dynamic_shape_fixed --input_name encoder_hidden_states --input_shape 1,77,768 model_fixed2.onnx model_fixed3.onnx
+```
+
+### Running ONNX Simplifier
+
+```bash
+python -m onnx_simplifier model_fixed3.onnx model_simplified.onnx
+```
+
+**Note**: 
+- If you exported your model from Hugging Face, you'll need around 100GB of swap space. 
+- If you manually fixed the input shapes, 16GB of RAM should suffice.
+- The process may take some time; please be patient.
+
+### Final Steps and Running the Model
+
+Once you have the final model from `onnx2txt`, move it into the `unet_fp16` folder of the standard SD 1.5 model, which can be found in the Windows release of OnnxStream.
+
+The command to run the model might look like this:
+
+```bash
+./sd --models-path ./Converted/ --prompt "space landscape" --steps 28 --rpi
+```
+
+### Note on the "Shape" Operator
+
+If you see the "Shape" operator in the output of Onnx Simplifier or in `onnx2txt.ipynb`, it indicates that Onnx Simplifier may not be functioning as expected. This issue is often not caused by Onnx Simplifier itself but rather by Onnx's Shape Inference.
+
+#### Alternative Solution
+
+In such cases, you have the alternative to re-export the model by modifying the parameters of `torch.onnx.export`. Locate this file on your computer:
+
+[export_onnx.py from GitHub](https://github.com/AUTOMATIC1111/stable-diffusion-webui-tensorrt/blob/master/export_onnx.py)
+
+And make sure to:
+- Set `opset_version` to 14
+- Remove `dynamic_axes`
+
+After making these changes, you can rerun Onnx Simplifier and `onnx2txt`.
+
+### Conclusion
+
+This guide is designed to be a comprehensive resource for those looking to run a custom Stable Diffusion model with OnnxStream. Additional contributions are welcome!
+
+
 # Related Projects
 
 - [OnnxStreamGui](https://github.com/ThomAce/OnnxStreamGui) by @ThomAce: a web and desktop user interface for OnnxStream.
