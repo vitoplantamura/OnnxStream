@@ -239,7 +239,10 @@ These are the command line options of the Stable Diffusion example:
 --rpi-lowmem        Configures the models to run on a Raspberry Pi Zero 2.
 ```
 
-# How to Convert and Run a Custom Stable Diffusion Model with OnnxStream
+# How to Convert and Run a Custom Stable Diffusion 1.5 Model with OnnxStream (by @GaelicThunder)
+
+<details>
+<summary>Click to expand</summary>
 
 This guide aims to assist you in converting a custom Stable Diffusion model for use with OnnxStream. Whether you're starting from `.safetensors` or `.onnx`, this guide has you covered.
 
@@ -248,18 +251,20 @@ This guide aims to assist you in converting a custom Stable Diffusion model for 
 - Python 3.x
 - ONNX
 - ONNX Simplifier
-- Linux environment (Ubuntu is highly recommended, Windows WSL also works)
+- Linux environment (tested on Ubuntu, Windows WSL also works)
 - Swap space (amount varies depending on your approach)
 
 ### Why Specific Steps?
 
 #### Understanding Einsum and Other Operations
 
-The original Stable Diffusion model uses operations like Einsum, which are not supported by OnnxStream. Hence, it's advised to use the Hugging Face implementation, which is more compatible.
+AUTO1111's Stable Diffusion implementation uses operations like Einsum, which are not supported by OnnxStream (yet). Hence, it's advised to use the Hugging Face implementation, which is more compatible.
 
 ### Optional: Converting .safetensors to ONNX
 
 If you're starting with a `.safetensors` file, you can convert it to `.onnx` using the tool available at [this GitHub repository](https://github.com/AUTOMATIC1111/stable-diffusion-webui-tensorrt).
+
+However, it is recommended to follow the approach in section "Option A" below.
 
 ### Exporting Your Model
 
@@ -285,6 +290,8 @@ python -m onnxruntime.tools.make_dynamic_shape_fixed --input_name sample --input
 python -m onnxruntime.tools.make_dynamic_shape_fixed --input_name timestep --input_shape 1 model_fixed1.onnx model_fixed2.onnx
 python -m onnxruntime.tools.make_dynamic_shape_fixed --input_name encoder_hidden_states --input_shape 1,77,768 model_fixed2.onnx model_fixed3.onnx
 ```
+
+Note by Vito: This can be achieved simply by following the approach outlined in "Option A" above, which remains the recommended approach. Making the input shapes fixed might be useful if your starting point is already an ONNX file.
 
 ### Running ONNX Simplifier
 
@@ -323,10 +330,13 @@ And make sure to:
 
 After making these changes, you can rerun Onnx Simplifier and `onnx2txt`.
 
+Note by Vito: This solution, although working, generates ONNX files with Einsum operations. When OnnxStream supports the Einsum operator, this solution will become the recommended one.
+
 ### Conclusion
 
-This guide is designed to be a comprehensive resource for those looking to run a custom Stable Diffusion model with OnnxStream. Additional contributions are welcome!
+This guide is designed to be a comprehensive resource for those looking to run a custom Stable Diffusion 1.5 model with OnnxStream. Additional contributions are welcome!
 
+</details>
 
 # Related Projects
 
