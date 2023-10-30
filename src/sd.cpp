@@ -50,6 +50,7 @@ struct MainArgs
     std::string m_prompt = "a photo of an astronaut riding a horse on mars";
     std::string m_neg_prompt = "ugly, blurry";
     std::string m_steps = "10";
+    std::string m_seed = std::to_string(std::time(0) % 1024 * 1024);
     std::string m_save_latents = "";
     bool m_decoder_calibrate = false;
     bool m_rpi = false;
@@ -594,11 +595,12 @@ inline static ncnn::Mat decoder_solver(ncnn::Mat& sample)
                 Model model;
 
                 model.m_ops_printf = g_main_args.m_ops_printf;
-                
+
                 model.set_weights_provider(DiskNoCacheWeightsProvider());
 
                 model.read_range_data((g_main_args.m_path_with_slash + "vae_decoder_qu8/range_data.txt").c_str());
-                
+
+                //if (g_main_args.m_decoder_fp16)
                 if (!g_main_args.m_rpi_lowmem)
                     model.m_use_fp16_arithmetic = true;
                 else if (!g_main_args.m_decoder_calibrate)
@@ -650,9 +652,9 @@ static inline ncnn::Mat randn_4_dim_dim(int seed, int dim)
         std::normal_distribution<float> d{ 0.0f, 1.0f };
         arr.resize(dim * dim * 4);
         std::for_each(arr.begin(), arr.end(), [&](float& x)
-        {
-            x = d(gen);
-        });
+            {
+                x = d(gen);
+            });
     }
     ncnn::Mat x_mat(dim, dim, 4, reinterpret_cast<void*>(arr.data()));
 
@@ -675,6 +677,7 @@ public:
 
 static inline ncnn::Mat CFGDenoiser_CompVisDenoiser(ncnn::Net& net, float const* log_sigmas, ncnn::Mat& input, float sigma, const ncnn::Mat& cond, const ncnn::Mat& uncond, SDXLParams* sdxl_params, Model& model)
 {
+
     int dim = sdxl_params ? 128 : 64;
 
     // get_scalings
@@ -711,6 +714,8 @@ static inline ncnn::Mat CFGDenoiser_CompVisDenoiser(ncnn::Net& net, float const*
     ncnn::Mat c_out_mat(1);
     c_out_mat[0] = c_out;
 
+
+
     auto run_inference = [&net, &input, &t_mat, &c_in_mat, &c_out_mat, &sdxl_params, &dim, &cond, &uncond, &model](ncnn::Mat& output, const ncnn::Mat& cond_mat) {
 
 #if USE_NCNN
@@ -728,6 +733,8 @@ static inline ncnn::Mat CFGDenoiser_CompVisDenoiser(ncnn::Net& net, float const*
         {
             if (!sdxl_params)
             {
+                model.read_file((g_main_args.m_path_with_slash + UNET_MODEL("unet_fp16/model.txt", "anime_fp16/model.txt")).c_str());
+
                 tensor_vector<float> t_v({ t_mat[0] });
                 tensor_vector<float> x_v((float*)input, (float*)input + input.total());
                 tensor_vector<float> cc_v((const float*)cond_mat, (const float*)cond_mat + cond_mat.total());
@@ -798,13 +805,19 @@ static inline ncnn::Mat CFGDenoiser_CompVisDenoiser(ncnn::Net& net, float const*
             model.run();
 
             tensor_vector<float> output_vec = std::move(model.m_data[0].get_vector<float>());
-
             model.m_data.clear();
 
-            float m = c_out_mat[0];
+            const float m = c_out_mat[0];
             float* pf = input;
-            for (auto& f : output_vec)
-                f = f * m + *pf++;
+            float* f_ptr = output_vec.data();  // Assuming tensor_vector supports the data() method, similar to std::vector.
+            float* end = f_ptr + output_vec.size();
+
+            while (f_ptr != end)
+            {
+                *f_ptr = (*f_ptr * m) + *pf;
+                ++f_ptr;
+                ++pf;
+            }
 
             ncnn::Mat res(dim, dim, 1, 4);
             memcpy((float*)res, output_vec.data(), res.total() * sizeof(float));
@@ -814,7 +827,7 @@ static inline ncnn::Mat CFGDenoiser_CompVisDenoiser(ncnn::Net& net, float const*
             output = res;
         }
 #endif
-    };
+        };
 
     ncnn::Mat denoised_cond;
     run_inference(denoised_cond, cond);
@@ -822,16 +835,16 @@ static inline ncnn::Mat CFGDenoiser_CompVisDenoiser(ncnn::Net& net, float const*
     ncnn::Mat denoised_uncond;
     run_inference(denoised_uncond, uncond);
 
+    const int total_dim = dim * dim;
+
     for (int c = 0; c < 4; c++)
     {
         float* u_ptr = denoised_uncond.channel(c);
         float* c_ptr = denoised_cond.channel(c);
 
-        for (int hw = 0; hw < dim * dim; hw++)
+        for (int hw = 0; hw < total_dim; ++hw, ++u_ptr, ++c_ptr)
         {
-            (*u_ptr) = (*u_ptr) + 7 * ((*c_ptr) - (*u_ptr));
-            u_ptr++;
-            c_ptr++;
+            *u_ptr += 7 * (*c_ptr - *u_ptr);
         }
     }
 
@@ -861,16 +874,21 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
 
     ncnn::Mat x_mat = randn_4_dim_dim(seed % 1000, dim);
     // t_to_sigma
-    std::vector<float> sigma(step);
-    float delta = -999.0f / (step - 1);
 
-    for (int i = 0; i < step; i++)
+    std::vector<float> sigma;
+    sigma.reserve(step);  // Pre-allocate memory for 'step' number of elements.
+
+    float delta = -999.0f / (step - 1);
+    float t = 999.0;
+
+    for (int i = 0; i < step; i++, t += delta)
     {
-        float t = 999.0 + i * delta;
-        int low_idx = std::floor(t);
-        int high_idx = std::ceil(t);
+        int low_idx = static_cast<int>(std::floor(t));
+        int high_idx = low_idx + 1;  // Since `high_idx` is just the ceiling of t, and t is increasing by delta (which is less than 1), the next `high_idx` is just the previous `low_idx + 1`.
         float w = t - low_idx;
-        sigma[i] = std::exp((1 - w) * log_sigmas[low_idx] + w * log_sigmas[high_idx]);
+
+        float value = std::exp((1 - w) * log_sigmas[low_idx] + w * log_sigmas[high_idx]);
+        sigma.push_back(value);
     }
 
     sigma.push_back(0.f);
@@ -933,30 +951,45 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
         }
 #endif
 
-        for (int i = 0; i < static_cast<int>(sigma.size()) - 1; i++)
+        float dim_dim = dim * dim;
+        int sigma_size_minus_one = static_cast<int>(sigma.size()) - 1;
+
+        for (int i = 0; i < sigma_size_minus_one; i++)
         {
             std::cout << "step:" << i << "\t\t";
             double t1 = ncnn::get_current_time();
+
             ncnn::Mat denoised = CFGDenoiser_CompVisDenoiser(net, log_sigmas, x_mat, sigma[i], c, uc, sdxl_params, model);
             double t2 = ncnn::get_current_time();
             std::cout << t2 - t1 << "ms" << std::endl;
-            float sigma_up = std::min(sigma[i + 1], std::sqrt(sigma[i + 1] * sigma[i + 1] * (sigma[i] * sigma[i] - sigma[i + 1] * sigma[i + 1]) / (sigma[i] * sigma[i])));
-            float sigma_down = std::sqrt(sigma[i + 1] * sigma[i + 1] - sigma_up * sigma_up);
-            std::srand(std::time(NULL));
+
+            float sigma_i_sq = sigma[i] * sigma[i];
+            float sigma_i1_sq = sigma[i + 1] * sigma[i + 1];
+
+            float inside_sqrt = sigma_i1_sq * (sigma_i_sq - sigma_i1_sq) / sigma_i_sq;
+
+            float sigma_up = std::min(sigma[i + 1], std::sqrt(inside_sqrt));
+            float sigma_down = std::sqrt(sigma_i1_sq - sigma_up * sigma_up);
+
+            std::srand(seed++);
             ncnn::Mat randn = randn_4_dim_dim(rand() % 1000, dim);
+
+            float sigma_ratio = (sigma_down - sigma[i]) / sigma[i];
 
             for (int c = 0; c < 4; c++)
             {
                 float* x_ptr = x_mat.channel(c);
                 float* d_ptr = denoised.channel(c);
                 float* r_ptr = randn.channel(c);
-
-                for (int hw = 0; hw < dim * dim; hw++)
+                
+                for (int hw = 0; hw < dim_dim; hw++)
                 {
-                    *x_ptr = *x_ptr + ((*x_ptr - *d_ptr) / sigma[i]) * (sigma_down - sigma[i]) + *r_ptr * sigma_up;
-                    x_ptr++;
-                    d_ptr++;
-                    r_ptr++;
+                    float x_diff = *x_ptr - *d_ptr;
+                    *x_ptr += x_diff * sigma_ratio + *r_ptr * sigma_up;
+
+                    ++x_ptr;
+                    ++d_ptr;
+                    ++r_ptr;
                 }
             }
         }
@@ -1114,10 +1147,9 @@ inline static std::vector<std::string> split(std::string str)
 
 inline static ncnn::Mat prompt_solve(std::unordered_map<std::string, int>& tokenizer_token2idx, ncnn::Net& net, std::string prompt, tensor_vector<int64_t>* return_tokens = nullptr)
 {
-
-    // 重要度计算可以匹配“()”和“[]”，圆括号是加重要度，方括号是减重要度
+    // Importance calculation can match "()" and "[]", parentheses increase the importance, and square brackets decrease the importance.
     std::vector<std::pair<std::string, float>> parsed = parse_prompt_attention(prompt);
-    // token转ids
+    // token to ids
     std::vector<std::vector<int>> tokenized;
     {
         for (auto p : parsed)
@@ -1134,7 +1166,7 @@ inline static ncnn::Mat prompt_solve(std::unordered_map<std::string, int>& token
         }
     }
 
-    // 一些处理
+    // Processing
     std::vector<int> remade_tokens;
     std::vector<float> multipliers;
     {
@@ -1187,7 +1219,7 @@ inline static ncnn::Mat prompt_solve(std::unordered_map<std::string, int>& token
         std::vector<int> tmp_multipliers(tokens_to_add, 1.0f);
         multipliers.insert(multipliers.end(), tmp_multipliers.begin(), tmp_multipliers.end());
     }
-    // 切分
+    // Segmentation
     ncnn::Mat conds(768, 0);
     {
         while (remade_tokens.size() > 0)
@@ -1311,7 +1343,7 @@ inline static std::pair<ncnn::Mat, ncnn::Mat> prompt_solver(std::string const& p
     std::unordered_map<std::string, int> tokenizer_token2idx;
     ncnn::Net net;
     {
-        // 加载CLIP模型
+        // Load CLIP model
 #if USE_NCNN
         net.opt.use_vulkan_compute = false;
         net.opt.use_winograd_convolution = false;
@@ -1323,7 +1355,7 @@ inline static std::pair<ncnn::Mat, ncnn::Mat> prompt_solver(std::string const& p
         net.load_param("assets/FrozenCLIPEmbedder-fp16.param");
         net.load_model("assets/FrozenCLIPEmbedder-fp16.bin");
 #endif
-        // 读取tokenizer字典
+        // Read tokenizer dictionary
         std::ifstream infile;
         std::string pathname = g_main_args.m_path_with_slash + (!is_sdxl ? "tokenizer/vocab.txt" : "sdxl_tokenizer/vocab.txt");
         infile.open(pathname.data());
@@ -1343,18 +1375,51 @@ inline static std::pair<ncnn::Mat, ncnn::Mat> prompt_solver(std::string const& p
     return std::make_pair(prompt_solve(tokenizer_token2idx, net, prompt_positive, return_tokens), prompt_solve(tokenizer_token2idx, net, prompt_negative, return_tokens_neg));
 }
 
-inline void stable_diffusion(std::string positive_prompt = std::string{}, std::string output_png_path = std::string{}, int step = 30, int seed = 42, std::string negative_prompt = std::string{})
+void writeLog(std::string lines)
 {
+    try
+    {
+        std::ofstream fw("log.txt", std::ofstream::app);
+
+        if (fw.is_open())
+        {
+            fw << lines << "\n";
+            fw.close();
+        }
+        else std::cout << "Problem with opening file" << std::endl;
+    }
+    catch (char const* msg)
+    {
+        std::cout << msg << std::endl;
+    }
+}
+
+inline void stable_diffusion(std::string positive_prompt = std::string{}, std::string output_png_path = std::string{}, int steps = 30, int seed = 42, std::string negative_prompt = std::string{})
+{
+
     std::cout << "----------------[start]------------------" << std::endl;
+    writeLog("----------------[start]------------------");
     std::cout << "positive_prompt: " << positive_prompt << std::endl;
+    writeLog("positive_prompt: " + positive_prompt);
     std::cout << "negative_prompt: " << negative_prompt << std::endl;
+    writeLog("negative_prompt: " + negative_prompt);
     std::cout << "output_png_path: " << output_png_path << std::endl;
-    std::cout << "steps: " << step << std::endl;
-    //std::cout << "seed: " << seed << std::endl;
+    writeLog("output_png_path: " + output_png_path);
+    std::cout << "steps: " << steps << std::endl;
+    writeLog("steps: " + std::to_string(steps));
+    std::cout << "seed: " << seed << std::endl;
+    writeLog("seed: " + std::to_string(seed));
+
     std::cout << "----------------[prompt]------------------" << std::endl;
+    std::chrono::steady_clock::time_point begin = std::chrono::steady_clock::now();
+
     auto [cond, uncond] = prompt_solver(positive_prompt, negative_prompt);
+
+    std::chrono::steady_clock::time_point end = std::chrono::steady_clock::now();
+    std::cout << "DONE!		" + std::to_string(std::chrono::duration_cast<std::chrono::seconds>(end - begin).count()) + +"s" << std::endl;
+
     std::cout << "----------------[diffusion]---------------" << std::endl;
-    ncnn::Mat sample = diffusion_solver(seed, step, cond, uncond);
+    ncnn::Mat sample = diffusion_solver(seed, steps, cond, uncond);
     std::cout << "----------------[decode]------------------" << std::endl;
 
     if (g_main_args.m_save_latents.size())
@@ -1363,13 +1428,11 @@ inline void stable_diffusion(std::string positive_prompt = std::string{}, std::s
     }
 
     ncnn::Mat x_samples_ddim = decoder_solver(sample);
-    //std::cout << "----------------[4x]--------------------" << std::endl;
-    //x_samples_ddim = esr4x(x_samples_ddim);
+
     std::cout << "----------------[save]--------------------" << std::endl;
     {
         std::vector<std::uint8_t> buffer;
-        buffer.resize( 512 * 512 * 3 );
-        //buffer.resize(4 * 512 * 4 * 512 * 3);
+        buffer.resize(512 * 512 * 3);
         x_samples_ddim.to_pixels(buffer.data(), ncnn::Mat::PIXEL_RGB);
         save_png(buffer.data(), 512, 512, 0, output_png_path.c_str());
     }
@@ -1436,7 +1499,7 @@ void sdxl_decoder(ncnn::Mat& sample, const std::string& output_png_path, bool ti
             model.run();
 
             return std::move(model.m_data[0].get_vector<float>());
-        };
+            };
 
         auto blend = [&res](const tensor_vector<float>& v, int dx, int dy) {
 
@@ -1461,7 +1524,7 @@ void sdxl_decoder(ncnn::Mat& sample, const std::string& output_png_path, bool ti
                         d = s * f + d * (1 - f);
                     }
             }
-        };
+            };
 
         for (int y = 0; y <= 128 - 32; y += 24)
             for (int x = 0; x <= 128 - 32; x += 24)
@@ -1480,14 +1543,24 @@ void sdxl_decoder(ncnn::Mat& sample, const std::string& output_png_path, bool ti
     }
 }
 
-void stable_diffusion_xl(std::string positive_prompt, std::string output_png_path, int steps, std::string negative_prompt)
+void stable_diffusion_xl(std::string positive_prompt, std::string output_png_path, int steps, std::string negative_prompt, int seed)
 {
     std::cout << "----------------[start]------------------" << std::endl;
+    writeLog("----------------[start]------------------");
+    writeLog("Used diffusion: XL");
     std::cout << "positive_prompt: " << positive_prompt << std::endl;
+    writeLog("positive_prompt: " + positive_prompt);
     std::cout << "negative_prompt: " << negative_prompt << std::endl;
+    writeLog("negative_prompt: " + negative_prompt);
     std::cout << "output_png_path: " << output_png_path << std::endl;
+    writeLog("output_png_path: " + output_png_path);
     std::cout << "steps: " << steps << std::endl;
+    writeLog("steps: " + std::to_string(steps));
+    std::cout << "seed: " << seed << std::endl;
+    writeLog("seed: " + std::to_string(seed));
     std::cout << "----------------[prompt]------------------" << std::endl;
+
+    std::chrono::steady_clock::time_point begin = std::chrono::steady_clock::now();
 
     tensor_vector<int64_t> tokens, tokens_neg;
 
@@ -1513,7 +1586,7 @@ void stable_diffusion_xl(std::string positive_prompt, std::string output_png_pat
             ret.push_back(pad_value);
 
         return ret;
-    };
+        };
 
     tensor_vector<int64_t> te1_input = get_final_tokens(tokens, 49407);
     tensor_vector<int64_t> te1_input_neg = get_final_tokens(tokens_neg, 49407);
@@ -1541,7 +1614,7 @@ void stable_diffusion_xl(std::string positive_prompt, std::string output_png_pat
         model.run();
 
         return std::move(model.m_data);
-    };
+        };
 
     auto get_output = [](std::vector<Tensor>& data, const std::string& name) -> Tensor {
 
@@ -1550,7 +1623,7 @@ void stable_diffusion_xl(std::string positive_prompt, std::string output_png_pat
                 return std::move(t);
 
         throw std::invalid_argument("output of text encoder not found.");
-    };
+        };
 
     auto te1_output = run_te_model(1, te1_input);
     auto te1_output_neg = run_te_model(1, te1_input_neg);
@@ -1587,7 +1660,10 @@ void stable_diffusion_xl(std::string positive_prompt, std::string output_png_pat
         tensor_vector<float>().swap(second);
 
         return output;
-    };
+        };
+
+    std::chrono::steady_clock::time_point end = std::chrono::steady_clock::now();
+    std::cout << "DONE!		" + std::to_string(std::chrono::duration_cast<std::chrono::seconds>(end - begin).count()) + +"s" << std::endl;
 
     std::cout << "----------------[diffusion]---------------" << std::endl;
 
@@ -1597,7 +1673,7 @@ void stable_diffusion_xl(std::string positive_prompt, std::string output_png_pat
     params.m_pooled_prompt_embeds = std::move(pooled_prompt_embeds);
     params.m_pooled_prompt_embeds_neg = std::move(pooled_prompt_embeds_neg);
 
-    ncnn::Mat sample = diffusion_solver(std::time(0) % 1024 * 1024, steps, ncnn::Mat(), ncnn::Mat(), &params);
+    ncnn::Mat sample = diffusion_solver(/*std::time(0) % 1024 * 1024*/seed, steps, ncnn::Mat(), ncnn::Mat(), &params);
 
     if (g_main_args.m_save_latents.size())
     {
@@ -1667,6 +1743,10 @@ int main(int argc, char** argv)
         {
             g_main_args.m_decoder_calibrate = true;
         }
+        else if (arg == "--seed")
+        {
+            str = &g_main_args.m_seed;
+        }
         else if (arg == "--rpi")
         {
             g_main_args.m_rpi = true;
@@ -1700,10 +1780,11 @@ int main(int argc, char** argv)
             printf("--prompt            Sets the positive prompt.\n");
             printf("--neg-prompt        Sets the negative prompt.\n");
             printf("--steps             Sets the number of diffusion steps.\n");
+            printf("--seed              Sets specific seed number for diffusion.\n");
             printf("--save-latents      After the diffusion, saves the latents in the specified file.\n");
             printf("--decoder-calibrate (ONLY SD 1.5) Calibrates the quantized version of the VAE decoder.\n");
-            printf("--not-tiled         (ONLY SDXL 1.0) Don't use the tiled VAE decoder.\n");
             printf("--ram               Uses the RAM WeightsProvider (Experimental).\n");
+            printf("--not-tiled         (ONLY SDXL 1.0) Don't use the tiled VAE decoder.\n");
             printf("--rpi               Configures the models to run on a Raspberry Pi.\n");
             printf("--rpi-lowmem        Configures the models to run on a Raspberry Pi Zero 2.\n");
 
@@ -1723,6 +1804,7 @@ int main(int argc, char** argv)
     }
 
     trim(g_main_args.m_path_with_slash);
+
     if (g_main_args.m_path_with_slash.size() &&
         g_main_args.m_path_with_slash.find_last_of("/\\") != g_main_args.m_path_with_slash.size() - 1)
     {
@@ -1778,9 +1860,9 @@ int main(int argc, char** argv)
     try
     {
         if (!g_main_args.m_xl)
-            stable_diffusion(g_main_args.m_prompt, g_main_args.m_output, std::stoi(g_main_args.m_steps), std::time(0) % 1024 * 1024, g_main_args.m_neg_prompt);
+            stable_diffusion(g_main_args.m_prompt, g_main_args.m_output, std::stoi(g_main_args.m_steps), std::stoi(g_main_args.m_seed), g_main_args.m_neg_prompt);
         else
-            stable_diffusion_xl(g_main_args.m_prompt, g_main_args.m_output, std::stoi(g_main_args.m_steps), g_main_args.m_neg_prompt);
+            stable_diffusion_xl(g_main_args.m_prompt, g_main_args.m_output, std::stoi(g_main_args.m_steps), g_main_args.m_neg_prompt, std::stoi(g_main_args.m_seed));
     }
     catch (const std::exception& e)
     {
