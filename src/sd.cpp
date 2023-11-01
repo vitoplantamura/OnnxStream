@@ -600,7 +600,6 @@ inline static ncnn::Mat decoder_solver(ncnn::Mat& sample)
 
                 model.read_range_data((g_main_args.m_path_with_slash + "vae_decoder_qu8/range_data.txt").c_str());
 
-                //if (g_main_args.m_decoder_fp16)
                 if (!g_main_args.m_rpi_lowmem)
                     model.m_use_fp16_arithmetic = true;
                 else if (!g_main_args.m_decoder_calibrate)
@@ -733,8 +732,6 @@ static inline ncnn::Mat CFGDenoiser_CompVisDenoiser(ncnn::Net& net, float const*
         {
             if (!sdxl_params)
             {
-                model.read_file((g_main_args.m_path_with_slash + UNET_MODEL("unet_fp16/model.txt", "anime_fp16/model.txt")).c_str());
-
                 tensor_vector<float> t_v({ t_mat[0] });
                 tensor_vector<float> x_v((float*)input, (float*)input + input.total());
                 tensor_vector<float> cc_v((const float*)cond_mat, (const float*)cond_mat + cond_mat.total());
@@ -809,7 +806,7 @@ static inline ncnn::Mat CFGDenoiser_CompVisDenoiser(ncnn::Net& net, float const*
 
             const float m = c_out_mat[0];
             float* pf = input;
-            float* f_ptr = output_vec.data();  // Assuming tensor_vector supports the data() method, similar to std::vector.
+            float* f_ptr = output_vec.data();
             float* end = f_ptr + output_vec.size();
 
             while (f_ptr != end)
@@ -981,7 +978,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                 float* x_ptr = x_mat.channel(c);
                 float* d_ptr = denoised.channel(c);
                 float* r_ptr = randn.channel(c);
-                
+
                 for (int hw = 0; hw < dim_dim; hw++)
                 {
                     float x_diff = *x_ptr - *d_ptr;
@@ -1375,48 +1372,21 @@ inline static std::pair<ncnn::Mat, ncnn::Mat> prompt_solver(std::string const& p
     return std::make_pair(prompt_solve(tokenizer_token2idx, net, prompt_positive, return_tokens), prompt_solve(tokenizer_token2idx, net, prompt_negative, return_tokens_neg));
 }
 
-void writeLog(std::string lines)
-{
-    try
-    {
-        std::ofstream fw("log.txt", std::ofstream::app);
-
-        if (fw.is_open())
-        {
-            fw << lines << "\n";
-            fw.close();
-        }
-        else std::cout << "Problem with opening file" << std::endl;
-    }
-    catch (char const* msg)
-    {
-        std::cout << msg << std::endl;
-    }
-}
 
 inline void stable_diffusion(std::string positive_prompt = std::string{}, std::string output_png_path = std::string{}, int steps = 30, int seed = 42, std::string negative_prompt = std::string{})
 {
 
     std::cout << "----------------[start]------------------" << std::endl;
-    writeLog("----------------[start]------------------");
     std::cout << "positive_prompt: " << positive_prompt << std::endl;
-    writeLog("positive_prompt: " + positive_prompt);
     std::cout << "negative_prompt: " << negative_prompt << std::endl;
-    writeLog("negative_prompt: " + negative_prompt);
     std::cout << "output_png_path: " << output_png_path << std::endl;
-    writeLog("output_png_path: " + output_png_path);
     std::cout << "steps: " << steps << std::endl;
-    writeLog("steps: " + std::to_string(steps));
     std::cout << "seed: " << seed << std::endl;
-    writeLog("seed: " + std::to_string(seed));
 
     std::cout << "----------------[prompt]------------------" << std::endl;
-    std::chrono::steady_clock::time_point begin = std::chrono::steady_clock::now();
-
+    double begin = ncnn::get_current_time();
     auto [cond, uncond] = prompt_solver(positive_prompt, negative_prompt);
-
-    std::chrono::steady_clock::time_point end = std::chrono::steady_clock::now();
-    std::cout << "DONE!		" + std::to_string(std::chrono::duration_cast<std::chrono::seconds>(end - begin).count()) + +"s" << std::endl;
+    std::cout << "DONE!		" + std::to_string(ncnn::get_current_time() - begin) + +"ms" << std::endl;
 
     std::cout << "----------------[diffusion]---------------" << std::endl;
     ncnn::Mat sample = diffusion_solver(seed, steps, cond, uncond);
