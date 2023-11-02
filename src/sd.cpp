@@ -651,9 +651,9 @@ static inline ncnn::Mat randn_4_dim_dim(int seed, int dim)
 		std::normal_distribution<float> d{ 0.0f, 1.0f };
 		arr.resize(dim * dim * 4);
 		std::for_each(arr.begin(), arr.end(), [&](float& x)
-		{
-			x = d(gen);
-		});
+			{
+				x = d(gen);
+			});
 	}
 	ncnn::Mat x_mat(dim, dim, 4, reinterpret_cast<void*>(arr.data()));
 
