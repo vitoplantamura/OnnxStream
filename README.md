@@ -231,6 +231,7 @@ These are the command line options of the Stable Diffusion example:
 --prompt            Sets the positive prompt.
 --neg-prompt        Sets the negative prompt.
 --steps             Sets the number of diffusion steps.
+--seed              Sets the seed.
 --save-latents      After the diffusion, saves the latents in the specified file.
 --decoder-calibrate (ONLY SD 1.5) Calibrates the quantized version of the VAE decoder.
 --not-tiled         (ONLY SDXL 1.0) Don't use the tiled VAE decoder.

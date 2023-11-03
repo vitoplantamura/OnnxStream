@@ -50,6 +50,7 @@ struct MainArgs
     std::string m_prompt = "a photo of an astronaut riding a horse on mars";
     std::string m_neg_prompt = "ugly, blurry";
     std::string m_steps = "10";
+    std::string m_seed = std::to_string(std::time(0) % 1024 * 1024);
     std::string m_save_latents = "";
     bool m_decoder_calibrate = false;
     bool m_rpi = false;
@@ -942,7 +943,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
             std::cout << t2 - t1 << "ms" << std::endl;
             float sigma_up = std::min(sigma[i + 1], std::sqrt(sigma[i + 1] * sigma[i + 1] * (sigma[i] * sigma[i] - sigma[i + 1] * sigma[i + 1]) / (sigma[i] * sigma[i])));
             float sigma_down = std::sqrt(sigma[i + 1] * sigma[i + 1] - sigma_up * sigma_up);
-            std::srand(std::time(NULL));
+            std::srand(seed++);
             ncnn::Mat randn = randn_4_dim_dim(rand() % 1000, dim);
 
             for (int c = 0; c < 4; c++)
@@ -1350,7 +1351,7 @@ inline void stable_diffusion(std::string positive_prompt = std::string{}, std::s
     std::cout << "negative_prompt: " << negative_prompt << std::endl;
     std::cout << "output_png_path: " << output_png_path << std::endl;
     std::cout << "steps: " << step << std::endl;
-    //std::cout << "seed: " << seed << std::endl;
+    std::cout << "seed: " << seed << std::endl;
     std::cout << "----------------[prompt]------------------" << std::endl;
     auto [cond, uncond] = prompt_solver(positive_prompt, negative_prompt);
     std::cout << "----------------[diffusion]---------------" << std::endl;
@@ -1480,13 +1481,14 @@ void sdxl_decoder(ncnn::Mat& sample, const std::string& output_png_path, bool ti
     }
 }
 
-void stable_diffusion_xl(std::string positive_prompt, std::string output_png_path, int steps, std::string negative_prompt)
+void stable_diffusion_xl(std::string positive_prompt, std::string output_png_path, int steps, std::string negative_prompt, int seed)
 {
     std::cout << "----------------[start]------------------" << std::endl;
     std::cout << "positive_prompt: " << positive_prompt << std::endl;
     std::cout << "negative_prompt: " << negative_prompt << std::endl;
     std::cout << "output_png_path: " << output_png_path << std::endl;
     std::cout << "steps: " << steps << std::endl;
+    std::cout << "seed: " << seed << std::endl;
     std::cout << "----------------[prompt]------------------" << std::endl;
 
     tensor_vector<int64_t> tokens, tokens_neg;
@@ -1597,7 +1599,7 @@ void stable_diffusion_xl(std::string positive_prompt, std::string output_png_pat
     params.m_pooled_prompt_embeds = std::move(pooled_prompt_embeds);
     params.m_pooled_prompt_embeds_neg = std::move(pooled_prompt_embeds_neg);
 
-    ncnn::Mat sample = diffusion_solver(std::time(0) % 1024 * 1024, steps, ncnn::Mat(), ncnn::Mat(), &params);
+    ncnn::Mat sample = diffusion_solver(seed, steps, ncnn::Mat(), ncnn::Mat(), &params);
 
     if (g_main_args.m_save_latents.size())
     {
@@ -1688,6 +1690,10 @@ int main(int argc, char** argv)
         {
             g_main_args.m_ram = true;
         }
+        else if (arg == "--seed")
+        {
+            str = &g_main_args.m_seed;
+        }
         else
         {
             printf(("Invalid command line argument: \"" + arg + "\".\n\n").c_str());
@@ -1700,6 +1706,7 @@ int main(int argc, char** argv)
             printf("--prompt            Sets the positive prompt.\n");
             printf("--neg-prompt        Sets the negative prompt.\n");
             printf("--steps             Sets the number of diffusion steps.\n");
+            printf("--seed              Sets the seed.\n");
             printf("--save-latents      After the diffusion, saves the latents in the specified file.\n");
             printf("--decoder-calibrate (ONLY SD 1.5) Calibrates the quantized version of the VAE decoder.\n");
             printf("--not-tiled         (ONLY SDXL 1.0) Don't use the tiled VAE decoder.\n");
@@ -1778,9 +1785,9 @@ int main(int argc, char** argv)
     try
     {
         if (!g_main_args.m_xl)
-            stable_diffusion(g_main_args.m_prompt, g_main_args.m_output, std::stoi(g_main_args.m_steps), std::time(0) % 1024 * 1024, g_main_args.m_neg_prompt);
+            stable_diffusion(g_main_args.m_prompt, g_main_args.m_output, std::stoi(g_main_args.m_steps), std::stoi(g_main_args.m_seed), g_main_args.m_neg_prompt);
         else
-            stable_diffusion_xl(g_main_args.m_prompt, g_main_args.m_output, std::stoi(g_main_args.m_steps), g_main_args.m_neg_prompt);
+            stable_diffusion_xl(g_main_args.m_prompt, g_main_args.m_output, std::stoi(g_main_args.m_steps), g_main_args.m_neg_prompt, std::stoi(g_main_args.m_seed));
     }
     catch (const std::exception& e)
     {
