@@ -867,7 +867,11 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
     ncnn::Mat x_mat = randn_4_dim_dim(seed % 1000, dim);
     // t_to_sigma
     std::vector<float> sigma(step);
-    float delta = -999.0f / (step - 1);
+
+    float delta = 0.0f;
+    if (step > 1) {
+      delta = -999.0f / (step - 1);
+    }
 
     for (int i = 0; i < step; i++)
     {
@@ -878,7 +882,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
         sigma[i] = std::exp((1 - w) * log_sigmas[low_idx] + w * log_sigmas[high_idx]);
     }
 
-    sigma.push_back(0.f);
+    // sigma.push_back(0.f);
     float _norm_[4] = { sigma[0], sigma[0], sigma[0], sigma[0] };
     x_mat.substract_mean_normalize(0, _norm_);
     // sample_euler_ancestral
@@ -938,7 +942,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
         }
 #endif
 
-        for (int i = 0; i < static_cast<int>(sigma.size()) - 1; i++)
+        for (int i = 0; i < sigma.size(); i++)
         {
             std::cout << "step:" << i << "\t\t";
             double t1 = ncnn::get_current_time();
