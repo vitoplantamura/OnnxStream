@@ -55,6 +55,7 @@ struct MainArgs
     bool m_decoder_calibrate = false;
     bool m_rpi = false;
     bool m_xl = false;
+    bool m_turbo = false;
     bool m_tiled = true;
     bool m_rpi_lowmem = false;
     bool m_ram = false;
@@ -818,10 +819,13 @@ static inline ncnn::Mat CFGDenoiser_CompVisDenoiser(ncnn::Net& net, float const*
     };
 
     ncnn::Mat denoised_cond;
-    run_inference(denoised_cond, cond);
+	run_inference(denoised_cond, cond);
+	if (g_main_args.m_turbo) {
+		return denoised_cond;
+	}
 
     ncnn::Mat denoised_uncond;
-    run_inference(denoised_uncond, uncond);
+	run_inference(denoised_uncond, uncond);
 
     for (int c = 0; c < 4; c++)
     {
@@ -1341,7 +1345,10 @@ inline static std::pair<ncnn::Mat, ncnn::Mat> prompt_solver(std::string const& p
         infile.close();
     }
 
-    return std::make_pair(prompt_solve(tokenizer_token2idx, net, prompt_positive, return_tokens), prompt_solve(tokenizer_token2idx, net, prompt_negative, return_tokens_neg));
+    return std::make_pair(
+        prompt_solve(tokenizer_token2idx, net, prompt_positive, return_tokens),
+        !g_main_args.m_turbo ? prompt_solve(tokenizer_token2idx, net, prompt_negative, return_tokens_neg) : ncnn::Mat()
+    );
 }
 
 inline void stable_diffusion(std::string positive_prompt = std::string{}, std::string output_png_path = std::string{}, int step = 30, int seed = 42, std::string negative_prompt = std::string{})
@@ -1485,7 +1492,11 @@ void stable_diffusion_xl(std::string positive_prompt, std::string output_png_pat
 {
     std::cout << "----------------[start]------------------" << std::endl;
     std::cout << "positive_prompt: " << positive_prompt << std::endl;
-    std::cout << "negative_prompt: " << negative_prompt << std::endl;
+    if (g_main_args.m_turbo) {
+        std::cout << "SDXL turbo doesn't support negative_prompts" << std::endl;
+    } else {
+        std::cout << "negative_prompt: " << negative_prompt << std::endl;
+    }
     std::cout << "output_png_path: " << output_png_path << std::endl;
     std::cout << "steps: " << steps << std::endl;
     std::cout << "seed: " << seed << std::endl;
@@ -1518,10 +1529,14 @@ void stable_diffusion_xl(std::string positive_prompt, std::string output_png_pat
     };
 
     tensor_vector<int64_t> te1_input = get_final_tokens(tokens, 49407);
-    tensor_vector<int64_t> te1_input_neg = get_final_tokens(tokens_neg, 49407);
-
     tensor_vector<int64_t> te2_input = get_final_tokens(tokens, 0);
-    tensor_vector<int64_t> te2_input_neg = get_final_tokens(tokens_neg, 0);
+
+    tensor_vector<int64_t> te1_input_neg;
+    tensor_vector<int64_t> te2_input_neg; 
+    if (!g_main_args.m_turbo) {
+        te1_input_neg = get_final_tokens(tokens_neg, 49407);
+        te2_input_neg = get_final_tokens(tokens_neg, 0);
+    }
 
     auto run_te_model = [](int index, tensor_vector<int64_t>& input) -> std::vector<Tensor> {
 
@@ -1555,19 +1570,24 @@ void stable_diffusion_xl(std::string positive_prompt, std::string output_png_pat
     };
 
     auto te1_output = run_te_model(1, te1_input);
-    auto te1_output_neg = run_te_model(1, te1_input_neg);
-
     auto te2_output = run_te_model(2, te2_input);
-    auto te2_output_neg = run_te_model(2, te2_input_neg);
 
     tensor_vector<float> pooled_prompt_embeds = std::move(get_output(te2_output, "out_5F_0").get_vector<float>());
-    tensor_vector<float> pooled_prompt_embeds_neg = std::move(get_output(te2_output_neg, "out_5F_0").get_vector<float>());
-
     tensor_vector<float> prompt_embeds_1 = std::move(get_output(te1_output, "out_5F_13").get_vector<float>());
     tensor_vector<float> prompt_embeds_2 = std::move(get_output(te2_output, "out_5F_33").get_vector<float>());
 
-    tensor_vector<float> prompt_embeds_1_neg = std::move(get_output(te1_output_neg, "out_5F_13").get_vector<float>());
-    tensor_vector<float> prompt_embeds_2_neg = std::move(get_output(te2_output_neg, "out_5F_33").get_vector<float>());
+    std::vector<onnxstream::Tensor> te1_output_neg;
+    std::vector<onnxstream::Tensor> te2_output_neg;
+    tensor_vector<float> pooled_prompt_embeds_neg;
+    tensor_vector<float> prompt_embeds_1_neg;
+    tensor_vector<float> prompt_embeds_2_neg;
+    if (!g_main_args.m_turbo) {
+        te1_output_neg = run_te_model(1, te1_input_neg);
+        te2_output_neg = run_te_model(2, te2_input_neg);
+        pooled_prompt_embeds_neg = std::move(get_output(te2_output_neg, "out_5F_0").get_vector<float>());
+        prompt_embeds_1_neg = std::move(get_output(te1_output_neg, "out_5F_13").get_vector<float>());
+        prompt_embeds_2_neg = std::move(get_output(te2_output_neg, "out_5F_33").get_vector<float>());
+    }
 
     auto concat = [](tensor_vector<float>& first, tensor_vector<float>& second) -> tensor_vector<float> {
 
@@ -1595,9 +1615,12 @@ void stable_diffusion_xl(std::string positive_prompt, std::string output_png_pat
 
     SDXLParams params;
     params.m_prompt_embeds = concat(prompt_embeds_1, prompt_embeds_2);
-    params.m_prompt_embeds_neg = concat(prompt_embeds_1_neg, prompt_embeds_2_neg);
     params.m_pooled_prompt_embeds = std::move(pooled_prompt_embeds);
-    params.m_pooled_prompt_embeds_neg = std::move(pooled_prompt_embeds_neg);
+
+    if (!g_main_args.m_turbo) {
+        params.m_prompt_embeds_neg = concat(prompt_embeds_1_neg, prompt_embeds_2_neg);
+        params.m_pooled_prompt_embeds_neg = std::move(pooled_prompt_embeds_neg);
+    }
 
     ncnn::Mat sample = diffusion_solver(seed, steps, ncnn::Mat(), ncnn::Mat(), &params);
 
@@ -1677,6 +1700,11 @@ int main(int argc, char** argv)
         {
             g_main_args.m_xl = true;
         }
+        else if (arg == "--turbo")
+        {
+            g_main_args.m_xl = true;
+            g_main_args.m_turbo = true;
+        }
         else if (arg == "--not-tiled")
         {
             g_main_args.m_tiled = false;
@@ -1699,6 +1727,7 @@ int main(int argc, char** argv)
             printf(("Invalid command line argument: \"" + arg + "\".\n\n").c_str());
 
             printf("--xl                Runs Stable Diffusion XL 1.0 instead of Stable Diffusion 1.5.\n");
+            printf("--turbo             Runs Stable Diffusion Turbo 1.0 instead of Stable Diffusion 1.5.\n");
             printf("--models-path       Sets the folder containing the Stable Diffusion models.\n");
             printf("--ops-printf        During inference, writes the current operation to stdout.\n");
             printf("--output            Sets the output PNG file.\n");
@@ -1736,7 +1765,7 @@ int main(int argc, char** argv)
         g_main_args.m_path_with_slash += "/";
     }
 
-    if (std::stoi(g_main_args.m_steps) < 3)
+    if (!g_main_args.m_turbo && std::stoi(g_main_args.m_steps) < 3)
     {
         printf("--steps must be >= 3.");
         return -1;
