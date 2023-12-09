@@ -881,8 +881,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
         sigma[i] = std::exp((1 - w) * log_sigmas[low_idx] + w * log_sigmas[high_idx]);
     }
 
-    if (!g_main_args.m_turbo)
-        sigma.push_back(0.f);
+    sigma.push_back(0.f);
 
     float _norm_[4] = { sigma[0], sigma[0], sigma[0], sigma[0] };
     x_mat.substract_mean_normalize(0, _norm_);
@@ -943,7 +942,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
         }
 #endif
 
-        for (int i = 0; i < sigma.size(); i++)
+        for (int i = 0; i < sigma.size()-1; i++)
         {
             std::cout << "step:" << i << "\t\t";
             double t1 = ncnn::get_current_time();
