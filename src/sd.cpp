@@ -786,11 +786,10 @@ static inline ncnn::Mat CFGDenoiser_CompVisDenoiser(ncnn::Net& net, float const*
 
                 Tensor t4;
                 t4.m_name = "sample";
-                if (g_main_args.m_turbo) {
-                  t4.m_shape = {1, 4, 64, 64};
-                } else {
-                  t4.m_shape = {1, 4, 128, 128};
-                }
+                if (g_main_args.m_turbo)
+                    t4.m_shape = {1, 4, 64, 64};
+                else
+                    t4.m_shape = {1, 4, 128, 128};
                 t4.set_vector(std::move(x_v));
                 model.push_tensor(std::move(t4));
 
@@ -824,9 +823,8 @@ static inline ncnn::Mat CFGDenoiser_CompVisDenoiser(ncnn::Net& net, float const*
 
     ncnn::Mat denoised_cond;
 	run_inference(denoised_cond, cond);
-	if (g_main_args.m_turbo) {
+	if (g_main_args.m_turbo)
 		return denoised_cond;
-	}
 
     ncnn::Mat denoised_uncond;
 	run_inference(denoised_uncond, uncond);
@@ -872,10 +870,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
     // t_to_sigma
     std::vector<float> sigma(step);
 
-    float delta = 0.0f;
-    if (step > 1) {
-      delta = -999.0f / (step - 1);
-    }
+    float delta = step > 1 ? -999.0f / (step - 1) : 0.0f;
 
     for (int i = 0; i < step; i++)
     {
@@ -886,7 +881,9 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
         sigma[i] = std::exp((1 - w) * log_sigmas[low_idx] + w * log_sigmas[high_idx]);
     }
 
-    // sigma.push_back(0.f);
+    if (!g_main_args.m_turbo)
+        sigma.push_back(0.f);
+
     float _norm_[4] = { sigma[0], sigma[0], sigma[0], sigma[0] };
     x_mat.substract_mean_normalize(0, _norm_);
     // sample_euler_ancestral
@@ -1412,11 +1409,10 @@ void sdxl_decoder(ncnn::Mat& sample, const std::string& output_png_path, bool ti
 
         Tensor t;
         t.m_name = "latent_5F_sample";
-        if (g_main_args.m_turbo) {
+        if (g_main_args.m_turbo)
             t.m_shape = { 1, 4, 64, 64 };
-        } else {
+        else
             t.m_shape = { 1, 4, 128, 128 };
-        }
         t.set_vector(std::move(sample_v));
         model.push_tensor(std::move(t));
 
@@ -1505,11 +1501,10 @@ void stable_diffusion_xl(std::string positive_prompt, std::string output_png_pat
 {
     std::cout << "----------------[start]------------------" << std::endl;
     std::cout << "positive_prompt: " << positive_prompt << std::endl;
-    if (g_main_args.m_turbo) {
+    if (g_main_args.m_turbo)
         std::cout << "SDXL turbo doesn't support negative_prompts" << std::endl;
-    } else {
+    else
         std::cout << "negative_prompt: " << negative_prompt << std::endl;
-    }
     std::cout << "output_png_path: " << output_png_path << std::endl;
     std::cout << "steps: " << steps << std::endl;
     std::cout << "seed: " << seed << std::endl;
@@ -1546,7 +1541,8 @@ void stable_diffusion_xl(std::string positive_prompt, std::string output_png_pat
 
     tensor_vector<int64_t> te1_input_neg;
     tensor_vector<int64_t> te2_input_neg; 
-    if (!g_main_args.m_turbo) {
+    if (!g_main_args.m_turbo)
+    {
         te1_input_neg = get_final_tokens(tokens_neg, 49407);
         te2_input_neg = get_final_tokens(tokens_neg, 0);
     }
@@ -1594,7 +1590,8 @@ void stable_diffusion_xl(std::string positive_prompt, std::string output_png_pat
     tensor_vector<float> pooled_prompt_embeds_neg;
     tensor_vector<float> prompt_embeds_1_neg;
     tensor_vector<float> prompt_embeds_2_neg;
-    if (!g_main_args.m_turbo) {
+    if (!g_main_args.m_turbo)
+    {
         te1_output_neg = run_te_model(1, te1_input_neg);
         te2_output_neg = run_te_model(2, te2_input_neg);
         pooled_prompt_embeds_neg = std::move(get_output(te2_output_neg, "out_5F_0").get_vector<float>());
@@ -1630,7 +1627,8 @@ void stable_diffusion_xl(std::string positive_prompt, std::string output_png_pat
     params.m_prompt_embeds = concat(prompt_embeds_1, prompt_embeds_2);
     params.m_pooled_prompt_embeds = std::move(pooled_prompt_embeds);
 
-    if (!g_main_args.m_turbo) {
+    if (!g_main_args.m_turbo)
+    {
         params.m_prompt_embeds_neg = concat(prompt_embeds_1_neg, prompt_embeds_2_neg);
         params.m_pooled_prompt_embeds_neg = std::move(pooled_prompt_embeds_neg);
     }
