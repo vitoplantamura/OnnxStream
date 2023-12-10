@@ -822,12 +822,12 @@ static inline ncnn::Mat CFGDenoiser_CompVisDenoiser(ncnn::Net& net, float const*
     };
 
     ncnn::Mat denoised_cond;
-	run_inference(denoised_cond, cond);
-	if (g_main_args.m_turbo)
-		return denoised_cond;
+    run_inference(denoised_cond, cond);
+    if (g_main_args.m_turbo)
+        return denoised_cond;
 
     ncnn::Mat denoised_uncond;
-	run_inference(denoised_uncond, uncond);
+    run_inference(denoised_uncond, uncond);
 
     for (int c = 0; c < 4; c++)
     {
@@ -882,7 +882,6 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
     }
 
     sigma.push_back(0.f);
-
     float _norm_[4] = { sigma[0], sigma[0], sigma[0], sigma[0] };
     x_mat.substract_mean_normalize(0, _norm_);
     // sample_euler_ancestral
@@ -942,7 +941,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
         }
 #endif
 
-        for (int i = 0; i < sigma.size()-1; i++)
+        for (int i = 0; i < static_cast<int>(sigma.size()) - 1; i++)
         {
             std::cout << "step:" << i << "\t\t";
             double t1 = ncnn::get_current_time();
