@@ -1393,6 +1393,8 @@ void sdxl_decoder(ncnn::Mat& sample, const std::string& output_png_path, bool ti
     sample.substract_mean_normalize(0, factor);
 
     int image_dim = g_main_args.m_turbo ? 512 : 1024;
+    int latent_dim = g_main_args.m_turbo ? 64 : 128;
+
     ncnn::Mat res(image_dim, image_dim, 3);
 
     if (!tiled)
@@ -1420,7 +1422,7 @@ void sdxl_decoder(ncnn::Mat& sample, const std::string& output_png_path, bool ti
     }
     else
     {
-        auto slice_and_inf = [&sample](int sx, int sy) -> tensor_vector<float> {
+        auto slice_and_inf = [&sample, &latent_dim](int sx, int sy) -> tensor_vector<float> {
 
             tensor_vector<float> v(4 * 32 * 32);
 
@@ -1431,9 +1433,9 @@ void sdxl_decoder(ncnn::Mat& sample, const std::string& output_png_path, bool ti
             {
                 for (int y = 0; y < 32; y++)
                     for (int x = 0; x < 32; x++)
-                        *dst++ = src[(sy + y) * 128 + sx + x];
+                        *dst++ = src[(sy + y) * latent_dim + sx + x];
 
-                src += 128 * 128;
+                src += latent_dim * latent_dim;
             }
 
             Model model;
@@ -1453,7 +1455,7 @@ void sdxl_decoder(ncnn::Mat& sample, const std::string& output_png_path, bool ti
             return std::move(model.m_data[0].get_vector<float>());
         };
 
-        auto blend = [&res](const tensor_vector<float>& v, int dx, int dy) {
+        auto blend = [&res, &image_dim](const tensor_vector<float>& v, int dx, int dy) {
 
             const float* src = v.data();
 
@@ -1465,7 +1467,7 @@ void sdxl_decoder(ncnn::Mat& sample, const std::string& output_png_path, bool ti
                     for (int x = 0; x < 256; x++)
                     {
                         float s = *src++;
-                        float& d = dst[(dy + y) * 1024 + dx + x];
+                        float& d = dst[(dy + y) * image_dim + dx + x];
                         float f = 1;
 
                         if (dy && y < 64)
@@ -1478,8 +1480,9 @@ void sdxl_decoder(ncnn::Mat& sample, const std::string& output_png_path, bool ti
             }
         };
 
-        for (int y = 0; y <= 128 - 32; y += 24)
-            for (int x = 0; x <= 128 - 32; x += 24)
+        int inc = g_main_args.m_turbo ? 16 : 24;
+        for (int y = 0; y <= latent_dim - 32; y += inc)
+            for (int x = 0; x <= latent_dim - 32; x += inc)
                 blend(slice_and_inf(x, y), x * 8, y * 8);
     }
 
