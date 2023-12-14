@@ -1,2 +1,3 @@
 src/build/
 .ipynb_checkpoints
+.vscode
