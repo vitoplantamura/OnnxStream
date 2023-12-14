@@ -921,7 +921,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                 model.m_use_fp16_arithmetic = false;
                 model.m_attention_fused_ops_parts = 16;
 
-                if (g_main_args.m_rpi_lowmem)
+                if (g_main_args.m_rpi_lowmem && !g_main_args.m_turbo)
                 {
                     model.m_force_fp16_storage = true;
                     model.m_force_uint8_storage_set =
