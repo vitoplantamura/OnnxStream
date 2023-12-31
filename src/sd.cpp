@@ -16,6 +16,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <climits>
 #include <cstdint>
 #include <cstdio>
 #include <ctime>
@@ -1247,11 +1248,11 @@ inline static ncnn::Mat prompt_solve(std::unordered_map<std::string, int>& token
 
             for (std::string token : tokens)
             {
-                printf("Token: \"%s\"\n", token);
+                printf("Token: \"%s\"\n", token.c_str());
                 if (tokenizer_token2idx.find(token) != tokenizer_token2idx.end())
                     ids.push_back(tokenizer_token2idx[token]);
                 else
-                    printf("Warning token: \"%s\" was ignored\n", token);
+                    printf("Warning token: \"%s\" was ignored\n", token.c_str());
             }
 
             tokenized.push_back(ids);
