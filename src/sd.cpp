@@ -1389,7 +1389,10 @@ inline void stable_diffusion(std::string positive_prompt = std::string{}, std::s
 
 void sdxl_decoder(ncnn::Mat& sample, const std::string& output_png_path, bool tiled)
 {
-    constexpr float factor[4] = { 5.48998f, 5.48998f, 5.48998f, 5.48998f };
+    constexpr float factor_sd[4] = { 5.48998f, 5.48998f, 5.48998f, 5.48998f };
+    constexpr float factor_sdxl[4] = { 7.67754f, 7.67754f, 7.67754f, 7.67754f };
+    const float* factor = g_main_args.m_xl ? factor_sdxl : factor_sd;
+
     sample.substract_mean_normalize(0, factor);
 
     int image_dim = g_main_args.m_turbo ? 512 : 1024;
@@ -1806,7 +1809,8 @@ int main(int argc, char** argv)
             {
                 auto vec = ::read_file<tensor_vector<float>>(g_main_args.m_decode_latents.c_str());
 
-                ncnn::Mat sample(128, 128, 4);
+                size_t latent_dim = g_main_args.m_turbo ? 64 : 128;
+                ncnn::Mat sample(latent_dim, latent_dim, 4);
                 memcpy((float*)sample, vec.data(), sample.total() * sizeof(float));
 
                 sdxl_decoder(sample, g_main_args.m_output, /* tiled */ g_main_args.m_tiled);
