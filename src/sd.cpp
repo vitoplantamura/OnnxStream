@@ -61,7 +61,6 @@ struct MainArgs
     bool m_tiled = true;
     bool m_rpi_lowmem = false;
     bool m_ram = false;
-    bool m_bpe_ranking = false;
 };
 
 static MainArgs g_main_args;
@@ -1214,7 +1213,7 @@ inline static std::vector<std::string> split(std::string str, std::unordered_map
         pos = str.find_first_of(delims, beg + 1);
         std::string s = str.substr(beg, pos - beg);
 
-        if (g_main_args.m_bpe_ranking)
+        if (tokenizer_bperankings.size() > 0)
         {
             std::vector<std::string> bpes = bpe(s, tokenizer_bperankings);
             result.insert(result.end(), bpes.begin(), bpes.end());
@@ -1465,14 +1464,9 @@ inline static std::pair<ncnn::Mat, ncnn::Mat> prompt_solver(std::string const& p
         }
         infile.close();
 
-        if (g_main_args.m_bpe_ranking)
-        {
-            std::ifstream infile;
-            pathname = g_main_args.m_path_with_slash + (!is_sdxl ? "tokenizer/merges.txt" : "sdxl_tokenizer/merges.txt");
-            infile.open(pathname.data());
-            if (!infile)
-                throw std::invalid_argument("unable to open file: " + pathname);
-
+        pathname = g_main_args.m_path_with_slash + (!is_sdxl ? "tokenizer/merges.txt" : "sdxl_tokenizer/merges.txt");
+        infile.open(pathname.data());
+        if (infile) {
             while (getline(infile, s))
             {
                 int space_ind = s.find(" ");
@@ -1480,6 +1474,11 @@ inline static std::pair<ncnn::Mat, ncnn::Mat> prompt_solver(std::string const& p
                 idx++;
             }
             infile.close();
+        } else {
+            std::cout << "WARNING: The merges.txt file is missing from the tokenizer folder.\n"
+                "Running without byte pair encoding results in subpar tokenization.\n"
+                "The file can be downloaded here:\n"
+                "https://huggingface.co/AeroX2/stable-diffusion-xl-turbo-1.0-onnxstream/blob/main/sdxl_tokenizer/merges.txt" << std::endl;
         }
     }
 
@@ -1869,10 +1868,6 @@ int main(int argc, char** argv)
         {
             str = &g_main_args.m_seed;
         }
-        else if (arg == "--bpe")
-        {
-            g_main_args.m_bpe_ranking = true;
-        }
         else
         {
             printf(("Invalid command line argument: \"" + arg + "\".\n\n").c_str());
@@ -1893,7 +1888,6 @@ int main(int argc, char** argv)
             printf("--ram               Uses the RAM WeightsProvider (Experimental).\n");
             printf("--rpi               Configures the models to run on a Raspberry Pi.\n");
             printf("--rpi-lowmem        Configures the models to run on a Raspberry Pi Zero 2.\n");
-            printf("--bpe               Use Byte pair encoding ranking when splitting words, greatly helps for word recognition\n");
 
             return -1;
         }
