@@ -16,6 +16,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <climits>
 #include <cstdint>
 #include <cstdio>
 #include <ctime>
@@ -28,6 +29,7 @@
 #include <stack>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 #include <cstring>
 
@@ -1091,36 +1093,146 @@ inline static std::vector<std::pair<std::string, float>> parse_prompt_attention(
     return res;
 }
 
-inline static std::vector<std::string> split(std::string str)
+struct pair_hash
 {
-    std::string::size_type pos;
-    std::vector<std::string> result;
-    str += " ";
-    int size = str.size();
-
-    for (int i = 0; i < size; i++)
+    std::size_t operator() (const std::pair<std::string, std::string> &pair) const
     {
-        pos = std::min(str.find(" ", i), str.find(",", i));
+        return std::hash<std::string>{}(pair.first) ^ std::hash<std::string>{}(pair.second);
+    }
+};
 
-        if (pos < str.size())
+inline static std::unordered_set<std::pair<std::string, std::string>, pair_hash> get_pairs(std::vector<std::string> word)
+{
+    std::unordered_set<std::pair<std::string, std::string>, pair_hash> pairs;
+    std::string prev_char = word[0];
+
+    for (size_t i = 1; i < word.size(); ++i) {
+        pairs.insert({prev_char, word[i]});
+        prev_char = word[i];
+    }
+
+    return pairs;
+}
+
+inline static std::vector<std::string> bpe(std::string str, std::unordered_map<std::pair<std::string, std::string>, int, pair_hash>& tokenizer_bperankings)
+{
+    std::vector<std::string> word;
+    for (size_t i = 0; i < str.size() - 1; ++i)
+        word.push_back(std::string(1, str[i]));
+    word.push_back(std::string(1, str.back()) + "</w>");
+
+    auto pairs = get_pairs(word);
+
+    if (pairs.empty()) 
+        return std::vector<std::string>(1, str + "</w>");
+
+    while (true) 
+    {
+        auto bigram = std::min_element(
+            pairs.begin(), pairs.end(),
+            [&tokenizer_bperankings](const auto& pair1, const auto& pair2)
+            {
+                int a = INT_MAX;
+                if (tokenizer_bperankings.find(pair1) != tokenizer_bperankings.end()) 
+                    a = tokenizer_bperankings[pair1];
+
+                int b = INT_MAX;
+                if (tokenizer_bperankings.find(pair2) != tokenizer_bperankings.end()) 
+                    b = tokenizer_bperankings[pair2];
+
+                return a < b;
+            }
+        );
+
+        if (bigram == pairs.end() || tokenizer_bperankings.find(*bigram) == tokenizer_bperankings.end())
+            break;
+
+        auto [first, second] = *bigram;
+
+        std::vector<std::string> new_word;
+        size_t i = 0;
+
+        while (i < word.size())
         {
-            std::string s = str.substr(i, pos - i);
-            std::string pat = std::string(1, str[pos]);
+            auto a = word.begin() + i;
+            if (a >= word.end())
+                a = word.end();
 
+            auto find_iter = std::find(word.begin()+i, word.end(), first);
+            if (find_iter == word.end())
+            {
+                new_word.insert(new_word.end(), a, word.end());
+                break;
+            }
+            else
+            {
+                size_t j = std::distance(word.begin(), find_iter);
+                auto b = word.begin() + j;
+                if (b >= word.end())
+                    b = word.end();
+                new_word.insert(new_word.end(), a, b);
+                i = j;
+            }
+
+            if (word[i] == first && i < word.size() - 1 && word[i + 1] == second) 
+            {
+                new_word.push_back(first + second);
+                i += 2;
+            }
+            else
+            {
+                new_word.push_back(word[i]);
+                i += 1;
+            }
+
+        }
+
+        // for (auto x : new_word) {
+        //     std::cout << x << " ";
+        // }
+        // std::cout << std::endl;;
+
+        word = new_word;
+
+        if (word.size() == 1)
+            break;
+        else
+            pairs = get_pairs(word);
+    }
+    return word;
+}
+
+inline static std::vector<std::string> split(std::string str, std::unordered_map<std::pair<std::string, std::string>, int, pair_hash>& tokenizer_bperankings)
+{
+    std::string const delims { "., " };
+    
+    size_t beg, pos = 0;
+    std::vector<std::string> result;
+    while ((beg = str.find_first_not_of(delims, pos)) != std::string::npos)
+    {
+        pos = str.find_first_of(delims, beg + 1);
+        std::string s = str.substr(beg, pos - beg);
+
+        if (tokenizer_bperankings.size() > 0)
+        {
+            std::vector<std::string> bpes = bpe(s, tokenizer_bperankings);
+            result.insert(result.end(), bpes.begin(), bpes.end());
+        }
+        else 
+        {
+            std::string pat = std::string(1, str[pos]);
             if (s.length() > 0)
                 result.push_back(s + "</w>");
 
             if (pat != " ")
                 result.push_back(pat + "</w>");
-
-            i = pos;
         }
     }
 
     return result;
 }
 
-inline static ncnn::Mat prompt_solve(std::unordered_map<std::string, int>& tokenizer_token2idx, ncnn::Net& net, std::string prompt, tensor_vector<int64_t>* return_tokens = nullptr)
+inline static ncnn::Mat prompt_solve(std::unordered_map<std::string, int>& tokenizer_token2idx, std::unordered_map<std::pair<std::string, std::string>, int, pair_hash>& tokenizer_bperankings, ncnn::Net& net, std::string prompt, tensor_vector<int64_t>* return_tokens = nullptr)
 {
 
     // 重要度计算可以匹配“()”和“[]”，圆括号是加重要度，方括号是减重要度
@@ -1130,12 +1242,16 @@ inline static ncnn::Mat prompt_solve(std::unordered_map<std::string, int>& token
     {
         for (auto p : parsed)
         {
-            std::vector<std::string> tokens = split(p.first);
+            std::vector<std::string> tokens = split(p.first, tokenizer_bperankings);
             std::vector<int> ids;
 
             for (std::string token : tokens)
             {
-                ids.push_back(tokenizer_token2idx[token]);
+                printf("Token: \"%s\"\n", token.c_str());
+                if (tokenizer_token2idx.find(token) != tokenizer_token2idx.end())
+                    ids.push_back(tokenizer_token2idx[token]);
+                else
+                    printf("Warning token: \"%s\" was ignored\n", token.c_str());
             }
 
             tokenized.push_back(ids);
@@ -1317,6 +1433,7 @@ inline static ncnn::Mat prompt_solve(std::unordered_map<std::string, int>& token
 inline static std::pair<ncnn::Mat, ncnn::Mat> prompt_solver(std::string const& prompt_positive, std::string const& prompt_negative, bool is_sdxl = false, tensor_vector<int64_t>* return_tokens = nullptr, tensor_vector<int64_t>* return_tokens_neg = nullptr)
 {
     std::unordered_map<std::string, int> tokenizer_token2idx;
+    std::unordered_map<std::pair<std::string, std::string>, int, pair_hash> tokenizer_bperankings;
     ncnn::Net net;
     {
         // 加载CLIP模型
@@ -1342,15 +1459,32 @@ inline static std::pair<ncnn::Mat, ncnn::Mat> prompt_solver(std::string const& p
 
         while (getline(infile, s))
         {
-            tokenizer_token2idx.insert(std::pair<std::string, int>(s, idx));
+            tokenizer_token2idx.insert({s, idx});
             idx++;
         }
         infile.close();
+
+        pathname = g_main_args.m_path_with_slash + (!is_sdxl ? "tokenizer/merges.txt" : "sdxl_tokenizer/merges.txt");
+        infile.open(pathname.data());
+        if (infile) {
+            while (getline(infile, s))
+            {
+                int space_ind = s.find(" ");
+                tokenizer_bperankings.insert({{s.substr(0, space_ind), s.substr(space_ind+1)}, idx});
+                idx++;
+            }
+            infile.close();
+        } else {
+            std::cout << "WARNING: The merges.txt file is missing from the tokenizer folder.\n"
+                "Running without byte pair encoding results in subpar tokenization.\n"
+                "The file can be downloaded here:\n"
+                "https://huggingface.co/AeroX2/stable-diffusion-xl-turbo-1.0-onnxstream/blob/main/sdxl_tokenizer/merges.txt" << std::endl;
+        }
     }
 
     return std::make_pair(
-        prompt_solve(tokenizer_token2idx, net, prompt_positive, return_tokens),
-        !g_main_args.m_turbo ? prompt_solve(tokenizer_token2idx, net, prompt_negative, return_tokens_neg) : ncnn::Mat()
+        prompt_solve(tokenizer_token2idx, tokenizer_bperankings, net, prompt_positive, return_tokens),
+        !g_main_args.m_turbo ? prompt_solve(tokenizer_token2idx, tokenizer_bperankings, net, prompt_negative, return_tokens_neg) : ncnn::Mat()
     );
 }
 
