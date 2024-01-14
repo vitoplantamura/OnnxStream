@@ -6,11 +6,11 @@ January 14, 2024:
 
 **TinyLlama 1.1B on my 2018 laptop PC (CPU-only), precision: FP16:**
 
-https://raw.githubusercontent.com/vitoplantamura/OnnxStream/master/assets/tinyllama.mp4
+https://github.com/vitoplantamura/OnnxStream/assets/37000260/bb0caee3-3c29-4823-a72b-5be0a4de62ca
 
 **Mistral 7B on Google Colab Free (GPU: Nvidia T4 16GB), precision: FP16:**
 
-https://raw.githubusercontent.com/vitoplantamura/OnnxStream/master/assets/mistral7b.mp4
+https://github.com/vitoplantamura/OnnxStream/assets/37000260/bdca97f1-674c-4dbd-99ac-6ff53a882cf0
 
 ### Introduction
 
