@@ -80,7 +80,9 @@ public:
     scope_guard(Callable&& undo_func) : f(std::forward<Callable>(undo_func)) { }
 
     ~scope_guard() {
-        if (f) f();
+        if (m_active)
+            if (f)
+                f();
     }
 
     scope_guard() = delete;
@@ -88,6 +90,8 @@ public:
     scope_guard& operator = (const scope_guard&) = delete;
     scope_guard(scope_guard&&) = delete;
     scope_guard& operator = (scope_guard&&) = delete;
+
+    bool m_active = true;
 
 private:
     std::function<void()> f;
@@ -172,10 +176,12 @@ public:
 
     TensorDataLayout m_layout = TensorDataLayout::unspecified;
 
-    std::unique_ptr<Tensor> m_next_part;
+    std::shared_ptr<Tensor> m_next_part; // todo: remove
 
     float m_scale = 0;
     uint8_t m_zero_point = 0;
+
+    bool m_is_static_weights = false;
 
 public:
 
@@ -267,11 +273,34 @@ public:
 
     virtual void on_init(TensorDataType type, const std::string& name, size_t size) {}
     virtual void on_restart() {}
+    virtual void remove(const std::string& name) {}
+    virtual void update(Tensor& t) {}
+    virtual TensorDataType get_type_of_next() { return TensorDataType::none; }
+
+    virtual bool supports_getptr() { return false; }
+    virtual std::shared_ptr<tensor_vector<uint8_t>> getptr_uint8(const std::string& name) { throw std::invalid_argument("getptr not supported."); }
+    virtual std::shared_ptr<tensor_vector<uint16_t>> getptr_float16(const std::string& name) { throw std::invalid_argument("getptr not supported."); }
+    virtual std::shared_ptr<tensor_vector<float>> getptr_float32(const std::string& name) { throw std::invalid_argument("getptr not supported."); }
+    virtual std::shared_ptr<tensor_vector<int64_t>> getptr_int64(const std::string& name) { throw std::invalid_argument("getptr not supported."); }
 
     virtual tensor_vector<uint8_t> get_uint8(const std::string& name) = 0;
     virtual tensor_vector<uint16_t> get_float16(const std::string& name) = 0;
     virtual tensor_vector<float> get_float32(const std::string& name) = 0;
     virtual tensor_vector<int64_t> get_int64(const std::string& name) = 0;
+};
+
+class CollectNamesWeightsProvider : public WeightsProvider
+{
+public:
+
+    std::set<std::string> m_names;
+
+    virtual void on_init(TensorDataType type, const std::string& name, size_t size) { m_names.insert(name); }
+
+    virtual tensor_vector<uint8_t> get_uint8(const std::string& name) { throw std::invalid_argument("Not implemented."); }
+    virtual tensor_vector<uint16_t> get_float16(const std::string& name) { throw std::invalid_argument("Not implemented."); }
+    virtual tensor_vector<float> get_float32(const std::string& name) { throw std::invalid_argument("Not implemented."); }
+    virtual tensor_vector<int64_t> get_int64(const std::string& name) { throw std::invalid_argument("Not implemented."); }
 };
 
 class DiskNoCacheWeightsProvider : public WeightsProvider
@@ -575,6 +604,18 @@ public:
         init_members();
     }
 
+    virtual void remove(const std::string& name)
+    {
+        for (size_t i = 0; i < m_entries_copy.size(); i++)
+            if (m_entries_copy[i].m_name == name)
+            {
+                m_entries_copy.erase(m_entries_copy.begin() + i);
+                return;
+            }
+
+        throw std::invalid_argument("DiskPrefetchWeightsProvider::remove: name not found.");
+    }
+
     virtual tensor_vector<uint8_t> get_uint8(const std::string& name)
     {
         return provide<uint8_t>(name);
@@ -611,10 +652,10 @@ private:
 
         std::variant<
             std::monostate,
-            tensor_vector<uint8_t>,
-            tensor_vector<uint16_t>,
-            tensor_vector<float>,
-            tensor_vector<int64_t>
+            std::shared_ptr<tensor_vector<uint8_t>>,
+            std::shared_ptr<tensor_vector<uint16_t>>,
+            std::shared_ptr<tensor_vector<float>>,
+            std::shared_ptr<tensor_vector<int64_t>>
         > m_data;
     };
 
@@ -628,7 +669,7 @@ private:
 private:
 
     template <typename U>
-    tensor_vector<U> provide(const std::string& name)
+    std::shared_ptr<tensor_vector<U>> provide(const std::string& name)
     {
         if (m_reader)
         {
@@ -653,10 +694,10 @@ private:
 
             Entry e;
             e.m_name = name;
-            e.m_data = v;
+            e.m_data = std::make_shared<tensor_vector<U>>(std::move(v));
             m_weights.push_back(std::move(e));
 
-            return v;
+            return std::get<std::shared_ptr<tensor_vector<U>>>(m_weights.back().m_data);
         }
         else
         {
@@ -668,10 +709,10 @@ private:
             if (name != e.m_name)
                 throw std::invalid_argument("RamWeightsProvider::provide: invalid name.");
 
-            if (!std::holds_alternative<tensor_vector<U>>(e.m_data))
+            if (!std::holds_alternative<std::shared_ptr<tensor_vector<U>>>(e.m_data))
                 throw std::invalid_argument("RamWeightsProvider::provide: invalid data type.");
 
-            return std::get<tensor_vector<U>>(e.m_data);
+            return std::get<std::shared_ptr<tensor_vector<U>>>(e.m_data);
         }
     }
 
@@ -700,28 +741,125 @@ public:
         m_index = 0;
     }
 
+    virtual void remove(const std::string& name)
+    {
+        for (size_t i = 0; i < m_weights.size(); i++)
+            if (m_weights[i].m_name == name)
+            {
+                m_weights.erase(m_weights.begin() + i);
+                return;
+            }
+
+        throw std::invalid_argument("RamWeightsProvider::remove: name not found.");
+    }
+
+    virtual void update(Tensor& t)
+    {
+        for (size_t i = 0; i < m_weights.size(); i++)
+            if (m_weights[i].m_name == t.m_name)
+            {
+                auto& data = m_weights[i].m_data;
+
+                switch (t.m_type)
+                {
+                case TensorDataType::uint8:
+                    data = std::make_shared<tensor_vector<uint8_t>>(t.get_vector<uint8_t>());
+                    break;
+                case TensorDataType::float16:
+                    data = std::make_shared<tensor_vector<uint16_t>>(t.get_vector<uint16_t>());
+                    break;
+                case TensorDataType::float32:
+                    data = std::make_shared<tensor_vector<float>>(t.get_vector<float>());
+                    break;
+                case TensorDataType::int64:
+                    data = std::make_shared<tensor_vector<int64_t>>(t.get_vector<int64_t>());
+                    break;
+                }
+
+                return;
+            }
+
+        throw std::invalid_argument("RamWeightsProvider::update: name not found.");
+    }
+
+    virtual TensorDataType get_type_of_next()
+    {
+        if (m_reader)
+            return TensorDataType::none;
+
+        if (m_index >= m_weights.size())
+            throw std::invalid_argument("RamWeightsProvider::get_type_of_next: invalid index.");
+
+        Entry& e = m_weights[m_index];
+
+        if (std::holds_alternative<std::shared_ptr<tensor_vector<uint8_t>>>(e.m_data))
+            return TensorDataType::uint8;
+        else if (std::holds_alternative<std::shared_ptr<tensor_vector<uint16_t>>>(e.m_data))
+            return TensorDataType::float16;
+        else if (std::holds_alternative<std::shared_ptr<tensor_vector<float>>>(e.m_data))
+            return TensorDataType::float32;
+        else if (std::holds_alternative<std::shared_ptr<tensor_vector<int64_t>>>(e.m_data))
+            return TensorDataType::int64;
+
+        throw std::invalid_argument("RamWeightsProvider::get_type_of_next: unable to determine type.");
+    }
+
     virtual tensor_vector<uint8_t> get_uint8(const std::string& name)
     {
-        return provide<uint8_t>(name);
+        return *provide<uint8_t>(name);
     }
 
     virtual tensor_vector<uint16_t> get_float16(const std::string& name)
     {
-        return provide<uint16_t>(name);
+        return *provide<uint16_t>(name);
     }
 
     virtual tensor_vector<float> get_float32(const std::string& name)
     {
-        return provide<float>(name);
+        return *provide<float>(name);
     }
 
     virtual tensor_vector<int64_t> get_int64(const std::string& name)
+    {
+        return *provide<int64_t>(name);
+    }
+
+    virtual bool supports_getptr()
+    {
+        return true;
+    }
+
+    virtual std::shared_ptr<tensor_vector<uint8_t>> getptr_uint8(const std::string& name)
+    {
+        return provide<uint8_t>(name);
+    }
+
+    virtual std::shared_ptr<tensor_vector<uint16_t>> getptr_float16(const std::string& name)
+    {
+        return provide<uint16_t>(name);
+    }
+
+    virtual std::shared_ptr<tensor_vector<float>> getptr_float32(const std::string& name)
+    {
+        return provide<float>(name);
+    }
+
+    virtual std::shared_ptr<tensor_vector<int64_t>> getptr_int64(const std::string& name)
     {
         return provide<int64_t>(name);
     }
 };
 
 class XnnPack;
+
+struct CudaOptions
+{
+    uint64_t m_vram_to_use = 0;
+    bool m_compute_fp32 = false;
+
+    CudaOptions() {}
+    CudaOptions(uint64_t vram_to_use, bool compute_fp32) : m_vram_to_use(vram_to_use), m_compute_fp32(compute_fp32) {}
+};
 
 class Model
 {
@@ -738,12 +876,20 @@ public:
         m_wp_interface_internal = std::any_cast<T>(&m_wp_object);
     }
 
+    template <typename T>
+    T& get_weights_provider()
+    {
+        return *(T*)get_wp();
+    }
+
     void read_file(const char* filename);
+    void read_string(const char* string, const char* path_with_slash = "./");
 
     std::vector<Tensor> m_data;
 
     void push_tensor(Tensor&& t, bool force_quantization = false);
 
+    void init();
     void run();
 
     void read_range_data(const char* filename);
@@ -754,7 +900,6 @@ public:
     bool m_use_fp16_arithmetic = false;
     bool m_use_uint8_qdq = false;
     bool m_use_uint8_arithmetic = false;
-    bool m_pow_requires_float = false;
     bool m_do_multipart_quantization = false;
     size_t m_multipart_threshold = -1;
     bool m_fuse_ops_in_attention = false;
@@ -762,10 +907,24 @@ public:
     std::vector<std::string> m_extra_outputs;
     bool m_force_fp16_storage = false;
     std::set<std::string> m_force_uint8_storage_set;
+    bool m_support_dynamic_shapes = false;
+    bool m_use_ops_cache = false;
+    std::function<bool(const std::string&, const std::string&)> m_requires_upcast;
+    bool m_use_scaled_dp_attn_op = false;
+    std::set<std::string> m_outputs_convert_set;
+    bool m_use_next_op_cache = false;
+
+    void set_cuda_options(const CudaOptions& options);
 
     bool m_ops_printf = false;
+    bool m_ops_times_printf = false;
 
 private:
+
+    bool m_scaled_dp_attn_op_used = false;
+
+    std::set<std::string> m_weights_exclusion_set;
+    bool m_first_run = true;
 
     std::any m_wp_object;
     WeightsProvider* m_wp_interface_internal = nullptr;
@@ -784,11 +943,15 @@ private:
 
     Tensor parse_tensor_string(std::string& str);
 
+    std::optional<Operation> next_op_impl();
     std::optional<Operation> next_op();
+    std::vector<Operation> m_next_op_cache;
+    bool m_next_op_cache_ready = false;
 
     Tensor& get_tensor_data(Tensor& tensor, bool make_copy = false, bool requires_float = false, TensorDataLayout required_layout = TensorDataLayout::unspecified, bool accepts_multipart = false);
 
     static bool compare_shapes(const std::vector<size_t>& shape_1, const std::vector<size_t>& shape_2, int except = -1);
+    bool check_output_shape(const std::vector<size_t>& src, std::vector<size_t>& dst);
 
     std::vector<char> m_model;
     size_t m_pos = 0;

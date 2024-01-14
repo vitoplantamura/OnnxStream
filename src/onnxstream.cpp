@@ -16,18 +16,479 @@
 #include <cfloat>
 #include <ostream>
 #include <random>
+#include <functional>
+#include <unordered_map>
 
 #include <xnnpack.h>
 
 static_assert(TENSOR_VECTOR_EXTRA_BYTES == XNN_EXTRA_BYTES);
 
+#if ONNXSTREAM_CUDA
+#include <cuda_runtime.h>
+#include <cublas_v2.h>
+#endif
+
 namespace onnxstream {
+
+void* custom_aligned_alloc(std::size_t alignment, std::size_t size) // https://stackoverflow.com/questions/32133203/what-can-i-use-instead-of-stdaligned-alloc-in-ms-visual-studio-2013
+{
+    if (alignment < alignof(void*)) {
+        alignment = alignof(void*);
+    }
+    std::size_t space = size + alignment - 1;
+    void* allocated_mem = ::operator new(space + sizeof(void*));
+    void* aligned_mem = static_cast<void*>(static_cast<char*>(allocated_mem) + sizeof(void*));
+    if (!std::align(alignment, size, aligned_mem, space))
+        throw std::runtime_error("custom_aligned_alloc: std::align error.");
+    *(static_cast<void**>(aligned_mem) - 1) = allocated_mem;
+    return aligned_mem;
+}
+
+void custom_aligned_free(void* p) noexcept
+{
+    ::operator delete(*(static_cast<void**>(p) - 1));
+}
+
+#if ONNXSTREAM_CUDA
+
+#define CUDA_ERRCHECK(ans) { cuda_assert((ans), __FILE__, __LINE__); }
+static inline void cuda_assert(cudaError_t code, const char* file, int line)
+{
+    if (code != cudaSuccess)
+        throw std::runtime_error(std::string("cuda_assert: ") + cudaGetErrorString(code) + " in " + file + ":" + std::to_string(line));
+}
+
+static inline const char* cublasGetErrorString_(const cublasStatus_t err)
+{
+    switch (err) {
+    case CUBLAS_STATUS_SUCCESS: return "CUBLAS_STATUS_SUCCESS";
+    case CUBLAS_STATUS_NOT_INITIALIZED: return "CUBLAS_STATUS_NOT_INITIALIZED";
+    case CUBLAS_STATUS_ALLOC_FAILED: return "CUBLAS_STATUS_ALLOC_FAILED";
+    case CUBLAS_STATUS_INVALID_VALUE: return "CUBLAS_STATUS_INVALID_VALUE";
+    case CUBLAS_STATUS_ARCH_MISMATCH: return "CUBLAS_STATUS_ARCH_MISMATCH";
+    case CUBLAS_STATUS_MAPPING_ERROR: return "CUBLAS_STATUS_MAPPING_ERROR";
+    case CUBLAS_STATUS_EXECUTION_FAILED: return "CUBLAS_STATUS_EXECUTION_FAILED";
+    case CUBLAS_STATUS_INTERNAL_ERROR: return "CUBLAS_STATUS_INTERNAL_ERROR";
+    case CUBLAS_STATUS_NOT_SUPPORTED: return "CUBLAS_STATUS_NOT_SUPPORTED";
+    default: return "unknown error";
+    }
+}
+#define CUBLAS_ERRCHECK(ans) { cublas_assert((ans), __FILE__, __LINE__); }
+static inline void cublas_assert(cublasStatus_t code, const char* file, int line)
+{
+    if (code != CUBLAS_STATUS_SUCCESS)
+        throw std::runtime_error(std::string("cublas_assert: ") + cublasGetErrorString_(code) + " in " + file + ":" + std::to_string(line));
+}
+
+class CublasOps
+{
+private:
+
+    struct DBuffer
+    {
+        void* m_d_ptr = nullptr;
+        size_t m_size = 0;
+        bool m_used = false;
+    };
+
+    struct PendingOp
+    {
+        void* m_h_buffer = nullptr;
+        cudaStream_t m_stream = nullptr;
+        std::vector<void*> m_d_buffers;
+    };
+
+    cublasHandle_t m_cublas_handle = nullptr;
+    uint64_t m_vram_used = 0;
+    std::vector<DBuffer> m_d_buffers;
+    std::vector<cudaStream_t> m_streams;
+    size_t m_streams_pos = 0;
+    cudaEvent_t m_sync_event = nullptr;
+    std::vector<PendingOp> m_pending_ops;
+
+public:
+
+    CudaOptions m_cuda_options;
+
+public:
+
+    CublasOps()
+    {
+    }
+    ~CublasOps()
+    {
+        if (m_sync_event)
+            CUDA_ERRCHECK(cudaEventDestroy(m_sync_event));
+
+        for (cudaStream_t stream : m_streams)
+            CUDA_ERRCHECK(cudaStreamDestroy(stream));
+
+        if (m_cublas_handle)
+            CUBLAS_ERRCHECK(cublasDestroy(m_cublas_handle));
+
+        for (auto& d_buffer : m_d_buffers)
+            if (d_buffer.m_d_ptr)
+                CUDA_ERRCHECK(cudaFree(d_buffer.m_d_ptr));
+    }
+
+    cublasHandle_t get_cublas_handle()
+    {
+        if (!m_cublas_handle)
+            CUBLAS_ERRCHECK(cublasCreate(&m_cublas_handle));
+        return m_cublas_handle;
+    }
+
+    cudaStream_t get_next_stream()
+    {
+        if (!m_streams.size())
+        {
+            for (size_t i = 0; i < 8; i++)
+            {
+                cudaStream_t stream = nullptr;
+                CUDA_ERRCHECK(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
+                m_streams.push_back(stream);
+            }
+        }
+
+        return m_streams[m_streams_pos++ % m_streams.size()];
+    }
+
+    cudaEvent_t get_sync_event()
+    {
+        if (!m_sync_event)
+            CUDA_ERRCHECK(cudaEventCreateWithFlags(&m_sync_event, cudaEventBlockingSync | cudaEventDisableTiming));
+        return m_sync_event;
+    }
+
+    void* get_d_buffer(size_t size)
+    {
+        DBuffer* d_buffer = nullptr;
+        for (auto& item : m_d_buffers)
+            if (!item.m_used)
+            {
+                item.m_used = true;
+                d_buffer = &item;
+                break;
+            }
+
+        if (!d_buffer)
+        {
+            void* d_mem = nullptr;
+            CUDA_ERRCHECK(cudaMalloc(&d_mem, size));
+            m_d_buffers.emplace_back(d_mem, size, true);
+            return d_mem;
+        }
+        else if (size <= d_buffer->m_size)
+        {
+            return d_buffer->m_d_ptr;
+        }
+        else
+        {
+            CUDA_ERRCHECK(cudaFree(d_buffer->m_d_ptr));
+            d_buffer->m_d_ptr = nullptr;
+            CUDA_ERRCHECK(cudaMalloc(&d_buffer->m_d_ptr, size));
+            d_buffer->m_size = size;
+            return d_buffer->m_d_ptr;
+        }
+    }
+
+    void add_pending_op(void* h_buffer, cudaStream_t stream, const std::vector<void*>& d_buffers)
+    {
+        m_pending_ops.emplace_back(h_buffer, stream, d_buffers);
+    }
+
+    void ensure_is_ready(void* h_buffer)
+    {
+        for (size_t i = 0; i < m_pending_ops.size(); i++)
+        {
+            auto& op = m_pending_ops[i];
+
+            if (op.m_h_buffer == h_buffer)
+            {
+                for (void* d_buffer : op.m_d_buffers)
+                {
+                    bool found = false;
+                    for (auto& b : m_d_buffers)
+                        if (b.m_d_ptr == d_buffer)
+                        {
+                            b.m_used = false;
+                            found = true;
+                            break;
+                        }
+
+                    if (!found)
+                        throw std::runtime_error("CublasOps::ensure_is_ready: device buffer not found.");
+                }
+
+                CUDA_ERRCHECK(cudaStreamSynchronize(op.m_stream));
+
+                m_pending_ops.erase(m_pending_ops.begin() + i);
+
+                return;
+            }
+        }
+    }
+
+    void check_buffers_health()
+    {
+        if (m_pending_ops.size())
+            throw std::runtime_error("CublasOps::check_buffers_health: m_pending_ops not empty.");
+
+        for (auto& b : m_d_buffers)
+            if (b.m_used)
+                throw std::runtime_error("CublasOps::check_buffers_health: buffer in m_d_buffers still in use.");
+    }
+
+    enum class Type
+    {
+        none,
+        uint8,
+        fp16,
+        fp32
+    };
+
+#define CUBLASOPS_TAG_TEXT "OnnxStreamCublas"
+
+    bool is(void* op)
+    {
+        const char* c0 = (char*)op;
+        const char* c1 = CUBLASOPS_TAG_TEXT;
+        for (size_t i = 0; i < sizeof(CUBLASOPS_TAG_TEXT); i++)
+            if (c0[i] != c1[i])
+                return false;
+        return true;
+    }
+
+    class OpHeader
+    {
+    public:
+
+        char m_tag[sizeof(CUBLASOPS_TAG_TEXT)];
+        CublasOps* m_cublas_ops = nullptr;
+
+        OpHeader(CublasOps* cublas_ops) : m_cublas_ops(cublas_ops)
+        {
+            strcpy(m_tag, CUBLASOPS_TAG_TEXT);
+        }
+        virtual ~OpHeader()
+        {
+        }
+    };
+
+    template <typename T>
+    T* getptr(void* op)
+    {
+        if (!is(op))
+            throw std::runtime_error("CublasOps::getptr: is(op) == false.");
+#define OFFSETOF(TYPE, ELEMENT) ((size_t)&(((TYPE*)0)->ELEMENT)) // c++ offsetof in header <cstddef> gives a warning.
+        const size_t offset = OFFSETOF(OpHeader, m_tag);
+#undef OFFSETOF
+        OpHeader* ptr = (OpHeader*)((unsigned char*)op - offset);
+        T* ret = dynamic_cast<T*>(ptr);
+        if (!ret)
+            throw std::runtime_error("CublasOps::getptr: dynamic_cast failed.");
+        return ret;
+    }
+
+    void delete_operator(void* op)
+    {
+        delete getptr<OpHeader>(op);
+    }
+
+    class OpFullyConnected : public OpHeader
+    {
+    public:
+
+        Type m_type = Type::none;
+        size_t m_kernel_dim_0 = 0;
+        size_t m_kernel_dim_1 = 0;
+
+        void* m_d_kernel = nullptr;
+
+        void run(
+            size_t input_dim_0,
+            const void* input,
+            void* output)
+        {
+            size_t sizeof_element = m_type == Type::fp16 ? 2 : m_type == Type::fp32 ? 4 : 0;
+            size_t sizeof_input = input_dim_0 * m_kernel_dim_0 * sizeof_element;
+            size_t sizeof_output = input_dim_0 * m_kernel_dim_1 * sizeof_element;
+
+            cublasHandle_t cublas_handle = m_cublas_ops->get_cublas_handle();
+            cudaStream_t stream = m_cublas_ops->get_next_stream();
+
+            CUBLAS_ERRCHECK(cublasSetStream(cublas_handle, stream));
+
+            void* d_input = m_cublas_ops->get_d_buffer(sizeof_input);
+            void* d_output = m_cublas_ops->get_d_buffer(sizeof_output);
+
+            CUDA_ERRCHECK(cudaMemcpyAsync(d_input, input, sizeof_input, cudaMemcpyHostToDevice, stream));
+
+            CUDA_ERRCHECK(cudaEventRecord(m_cublas_ops->get_sync_event(), stream));
+
+            float alpha_fp32 = 1.0f;
+            float beta_fp32 = 0;
+            __half alpha_fp16 = 1.0f;
+            __half beta_fp16 = 0;
+
+            cudaDataType data_type = m_type == Type::fp16 ? CUDA_R_16F : CUDA_R_32F;
+            cublasComputeType_t compute_type = m_cublas_ops->m_cuda_options.m_compute_fp32 ? CUBLAS_COMPUTE_32F :
+                m_type == Type::fp16 ? CUBLAS_COMPUTE_16F : CUBLAS_COMPUTE_32F;
+
+            CUBLAS_ERRCHECK(cublasGemmEx(cublas_handle, CUBLAS_OP_N, CUBLAS_OP_N,
+                m_kernel_dim_1, input_dim_0, m_kernel_dim_0,
+                compute_type == CUBLAS_COMPUTE_16F ? (void*)&alpha_fp16 : (void*)&alpha_fp32,
+                m_d_kernel, data_type, m_kernel_dim_1,
+                d_input, data_type, m_kernel_dim_0,
+                compute_type == CUBLAS_COMPUTE_16F ? (void*)&beta_fp16 : (void*)&beta_fp32,
+                d_output, data_type, m_kernel_dim_1,
+                compute_type, CUBLAS_GEMM_DEFAULT));
+
+            CUDA_ERRCHECK(cudaMemcpyAsync(output, d_output, sizeof_output, cudaMemcpyDeviceToHost, stream));
+
+            CUDA_ERRCHECK(cudaEventSynchronize(m_cublas_ops->get_sync_event()));
+
+            m_cublas_ops->add_pending_op(output, stream, { d_input, d_output });
+        }
+
+        OpFullyConnected(
+            CublasOps* cublas_ops,
+            Type type,
+            size_t kernel_dim_0,
+            size_t kernel_dim_1,
+            const void* kernel) :
+            OpHeader(cublas_ops),
+            m_type(type), m_kernel_dim_0(kernel_dim_0), m_kernel_dim_1(kernel_dim_1)
+        {
+            size_t sizeof_element = type == Type::fp16 ? 2 : type == Type::fp32 ? 4 : 0;
+            size_t count = kernel_dim_0 * kernel_dim_1 * sizeof_element;
+
+            CUDA_ERRCHECK(cudaMalloc(&m_d_kernel, count));
+            CUDA_ERRCHECK(cudaMemcpy(m_d_kernel, kernel, count, cudaMemcpyHostToDevice));
+        }
+        virtual ~OpFullyConnected()
+        {
+            if (m_d_kernel)
+            {
+                CUDA_ERRCHECK(cudaFree(m_d_kernel));
+            }
+        }
+    };
+
+    void* create_fully_connected(
+        Type type,
+        size_t input_channels,
+        size_t output_channels,
+        size_t input_stride,
+        size_t output_stride,
+        const void* kernel,
+        const void* bias)
+    {
+        if (type != Type::fp16 && type != Type::fp32)
+            return nullptr;
+
+        if (input_channels != input_stride || output_channels != output_stride)
+            throw std::runtime_error("CublasOps::create_fully_connected: channels != stride.");
+        if (bias)
+            throw std::runtime_error("CublasOps::create_fully_connected: bias not supported.");
+
+        size_t sizeof_element = type == Type::fp16 ? 2 : type == Type::fp32 ? 4 : 0;
+        m_vram_used += input_channels * output_channels * sizeof_element;
+        if (m_vram_used > m_cuda_options.m_vram_to_use)
+            return nullptr;
+
+        OpFullyConnected* op = new OpFullyConnected(this, type, input_channels, output_channels, kernel);
+        return &op->m_tag;
+    }
+
+    void run_fully_connected(
+        void* fully_connected_op,
+        size_t batch_size,
+        const void* input,
+        void* output)
+    {
+        getptr<OpFullyConnected>(fully_connected_op)->run(batch_size, input, output);
+    }
+};
+
+#else
+
+class CublasOps
+{
+public:
+
+    CudaOptions m_cuda_options;
+
+    enum class Type
+    {
+        none,
+        uint8,
+        fp16,
+        fp32
+    };
+
+    bool is(void* op)
+    {
+        return false;
+    }
+
+    void delete_operator(void* op)
+    {
+        throw std::runtime_error("Not supported.");
+    }
+
+    void ensure_is_ready(void* h_buffer)
+    {
+        return;
+    }
+
+    void check_buffers_health()
+    {
+        return;
+    }
+
+    void* create_fully_connected(
+        Type type,
+        size_t input_channels,
+        size_t output_channels,
+        size_t input_stride,
+        size_t output_stride,
+        const void* kernel,
+        const void* bias)
+    {
+        return nullptr;
+    }
+
+    void run_fully_connected(
+        void* fully_connected_op,
+        size_t batch_size,
+        const void* input,
+        void* output)
+    {
+        throw std::runtime_error("Not supported.");
+    }
+};
+
+#endif
 
 class XnnPack
 {
 public:
 
+    CublasOps m_cublas_ops;
+
     pthreadpool_t threadpool = nullptr;
+
+    struct OpsCacheEntry
+    {
+        xnn_operator_t m_op = nullptr;
+    };
+
+    std::unordered_map<std::string, OpsCacheEntry> m_ops_cache;
+
+    void* m_workspace = nullptr;
+    size_t m_workspace_size = 0;
+    size_t m_workspace_alignment = 0;
 
 public:
 
@@ -44,6 +505,25 @@ public:
 
     ~XnnPack()
     {
+        for (auto& entry : m_ops_cache)
+        {
+            xnn_operator_t op = entry.second.m_op;
+
+            if (m_cublas_ops.is(op))
+            {
+                m_cublas_ops.delete_operator(op);
+            }
+            else
+            {
+                xnn_status status = xnn_delete_operator(op);
+                if (status != xnn_status_success)
+                    throw std::runtime_error("failed to delete operator");
+            }
+        }
+
+        if (m_workspace)
+            custom_aligned_free(m_workspace);
+
         if (threadpool)
         {
             pthreadpool_destroy(threadpool);
@@ -71,6 +551,13 @@ public:
         const size_t batch_size = input.size();
 
         tensor_vector<T> output = create_tensor_vector<T>(batch_size);
+
+#if 1
+
+        if (!convert<U, T>(input.data(), output.data(), batch_size, false /* single_threaded */))
+            throw std::runtime_error("FP16<->FP32 conversion error.");
+
+#else
 
         typedef typename std::conditional<std::is_same<T, float>::value, void, float>::type xnn_ptr_type_src;
         typedef typename std::conditional<std::is_same<T, float>::value, float, void>::type xnn_ptr_type_dst;
@@ -122,6 +609,8 @@ public:
         status = xnn_run_operator(convert_op, threadpool /* thread pool */);
         if (status != xnn_status_success)
             throw std::runtime_error("failed to run F16->F32 Convert operator");
+
+#endif
 
         return output;
     }
@@ -339,7 +828,8 @@ public:
         const std::vector<size_t>& second_shape, T* second_data,
         std::vector<size_t>* bias_shape, U* bias_data,
         T* output_data_override = nullptr,
-        Qu8MatMulData* qu8_data = nullptr)
+        Qu8MatMulData* qu8_data = nullptr,
+        const std::string& cache_key = "")
     {
         if (first_shape.size() != 2 || second_shape.size() != 2)
             throw std::runtime_error("XnnPack::matrix_multiply_fp32: not implemented (shape of inputs).");
@@ -364,86 +854,143 @@ public:
             uint8_t>::type>::type xnn_ptr_type;
 
         enum xnn_status(*xnn_create_fully_connected_nc_xxx)(size_t, size_t, size_t, size_t, const xnn_ptr_type*, const xnn_ptr_type*, float, float, uint32_t, xnn_code_cache_t, xnn_weights_cache_t, xnn_operator_t*) = nullptr;
-        enum xnn_status(*xnn_setup_fully_connected_nc_xxx)(xnn_operator_t, size_t, const xnn_ptr_type*, xnn_ptr_type*, pthreadpool_t) = nullptr;
+        enum xnn_status(*xnn_reshape_fully_connected_nc_xxx)(xnn_operator_t, size_t, pthreadpool_t) = nullptr;
+        enum xnn_status(*xnn_setup_fully_connected_nc_xxx)(xnn_operator_t, const xnn_ptr_type*, xnn_ptr_type*) = nullptr;
+
+        CublasOps::Type cublas_type = CublasOps::Type::none;
 
         if constexpr (std::is_same<T, float>::value)
         {
             xnn_create_fully_connected_nc_xxx = &xnn_create_fully_connected_nc_f32;
+            xnn_reshape_fully_connected_nc_xxx = &xnn_reshape_fully_connected_nc_f32;
             xnn_setup_fully_connected_nc_xxx = &xnn_setup_fully_connected_nc_f32;
+            cublas_type = CublasOps::Type::fp32;
         }
         else if constexpr (std::is_same<T, uint16_t>::value)
         {
             xnn_create_fully_connected_nc_xxx = &xnn_create_fully_connected_nc_f16;
+            xnn_reshape_fully_connected_nc_xxx = &xnn_reshape_fully_connected_nc_f16;
             xnn_setup_fully_connected_nc_xxx = &xnn_setup_fully_connected_nc_f16;
+            cublas_type = CublasOps::Type::fp16;
         }
         else
         {
             xnn_create_fully_connected_nc_xxx = nullptr;
+            xnn_reshape_fully_connected_nc_xxx = &xnn_reshape_fully_connected_nc_qu8;
             xnn_setup_fully_connected_nc_xxx = &xnn_setup_fully_connected_nc_qu8;
+            cublas_type = CublasOps::Type::uint8;
         }
 
         xnn_operator_t fc_op = nullptr;
+
+        if (cache_key.size() &&
+            m_ops_cache.count(cache_key))
+        {
+            fc_op = m_ops_cache[cache_key].m_op;
+        }
+
         xnn_status status;
 
-        if constexpr (!std::is_same<T, uint8_t>::value)
+        if (!fc_op)
         {
-            status = xnn_create_fully_connected_nc_xxx(
+            fc_op = !cache_key.size() ? nullptr : (xnn_operator_t)m_cublas_ops.create_fully_connected(
+                cublas_type /* type */,
                 second_shape[0] /* input_channels */,
                 second_shape[1] /* output_channels */,
                 second_shape[0] /* input_stride */,
                 second_shape[1] /* output_stride */,
                 second_data /* kernel */,
-                !bias_data ? nullptr : bias_data /* bias */,
-                -std::numeric_limits<float>::infinity() /* output_min */,
-                +std::numeric_limits<float>::infinity() /* output_max */,
-                XNN_FLAG_TRANSPOSE_WEIGHTS /* flags */,
-                nullptr, nullptr /* caches */,
-                &fc_op /* fully_connected_op_out */);
-        }
-        else
-        {
-            status = xnn_create_fully_connected_nc_qu8(
-                second_shape[0] /* input_channels */,
-                second_shape[1] /* output_channels */,
-                second_shape[0] /* input_stride */,
-                second_shape[1] /* output_stride */,
-                qu8_data->input_zero_point,
-                qu8_data->input_scale,
-                qu8_data->kernel_zero_point,
-                qu8_data->kernel_scale,
-                second_data /* kernel */,
-                !bias_data ? nullptr : bias_data /* bias */,
-                qu8_data->output_zero_point,
-                qu8_data->output_scale,
-                0 /* output_min */,
-                255 /* output_max */,
-                XNN_FLAG_TRANSPOSE_WEIGHTS /* flags */,
-                nullptr, nullptr /* caches */,
-                &fc_op /* fully_connected_op_out */);
+                !bias_data ? nullptr : bias_data /* bias */);
+
+            if (!fc_op)
+            {
+                if constexpr (!std::is_same<T, uint8_t>::value)
+                {
+                    status = xnn_create_fully_connected_nc_xxx(
+                        second_shape[0] /* input_channels */,
+                        second_shape[1] /* output_channels */,
+                        second_shape[0] /* input_stride */,
+                        second_shape[1] /* output_stride */,
+                        second_data /* kernel */,
+                        !bias_data ? nullptr : bias_data /* bias */,
+                        -std::numeric_limits<float>::infinity() /* output_min */,
+                        +std::numeric_limits<float>::infinity() /* output_max */,
+                        XNN_FLAG_TRANSPOSE_WEIGHTS /* flags */,
+                        nullptr, nullptr /* caches */,
+                        &fc_op /* fully_connected_op_out */);
+                }
+                else
+                {
+                    status = xnn_create_fully_connected_nc_qu8(
+                        second_shape[0] /* input_channels */,
+                        second_shape[1] /* output_channels */,
+                        second_shape[0] /* input_stride */,
+                        second_shape[1] /* output_stride */,
+                        qu8_data->input_zero_point,
+                        qu8_data->input_scale,
+                        qu8_data->kernel_zero_point,
+                        qu8_data->kernel_scale,
+                        second_data /* kernel */,
+                        !bias_data ? nullptr : bias_data /* bias */,
+                        qu8_data->output_zero_point,
+                        qu8_data->output_scale,
+                        0 /* output_min */,
+                        255 /* output_max */,
+                        XNN_FLAG_TRANSPOSE_WEIGHTS /* flags */,
+                        nullptr, nullptr /* caches */,
+                        &fc_op /* fully_connected_op_out */);
+                }
+
+                if (status != xnn_status_success)
+                    throw std::runtime_error("failed to create fully connected operation");
+            }
         }
 
-        if (status != xnn_status_success)
-            throw std::runtime_error("failed to create fully connected operation");
-
-        scope_guard __sg__([&fc_op]() {
+        scope_guard __sg__([&]() {
+            if (m_cublas_ops.is(fc_op))
+                throw std::runtime_error("trying to delete cublas op as an xnn op");
             xnn_status status = xnn_delete_operator(fc_op);
             if (status != xnn_status_success)
                 throw std::runtime_error("failed to delete operator");
             fc_op = nullptr;
         });
+        
+        if (cache_key.size())
+        {
+            __sg__.m_active = false;
 
-        status = xnn_setup_fully_connected_nc_xxx(
-            fc_op /* fully_connected_op */,
-            first_shape[0] /* batch_size */,
-            first_data /* input */,
-            output_data_override ? output_data_override : output_data.data() /* output */,
-            threadpool /* threadpool */);
-        if (status != xnn_status_success)
-            throw std::runtime_error("failed to setup fully connected operation");
+            if (m_ops_cache.count(cache_key) == 0)
+                m_ops_cache[cache_key].m_op = fc_op;
+        }
 
-        status = xnn_run_operator(fc_op, threadpool /* thread pool */);
-        if (status != xnn_status_success)
-            throw std::runtime_error("failed to run fully connected operator");
+        if (m_cublas_ops.is(fc_op))
+        {
+            m_cublas_ops.run_fully_connected(
+                fc_op /* fully_connected_op */,
+                first_shape[0] /* batch_size */,
+                first_data /* input */,
+                output_data_override ? output_data_override : output_data.data() /* output */);
+        }
+        else
+        {
+            status = xnn_reshape_fully_connected_nc_xxx(
+                fc_op,
+                first_shape[0] /* batch_size */,
+                threadpool /* threadpool */);
+            if (status != xnn_status_success)
+                throw std::runtime_error("failed to reshape fully connected operation");
+
+            status = xnn_setup_fully_connected_nc_xxx(
+                fc_op /* fully_connected_op */,
+                first_data /* input */,
+                output_data_override ? output_data_override : output_data.data() /* output */);
+            if (status != xnn_status_success)
+                throw std::runtime_error("failed to setup fully connected operation");
+
+            status = xnn_run_operator(fc_op, threadpool /* thread pool */);
+            if (status != xnn_status_success)
+                throw std::runtime_error("failed to run fully connected operator");
+        }
 
         return std::pair<std::vector<size_t>, tensor_vector<T>>(
             std::move(output_shape), std::move(output_data));
@@ -829,21 +1376,25 @@ public:
         tensor_vector<T> output_data = create_tensor_vector<T>(el_count_output);
 
         enum xnn_status(*xnn_create_transpose_nd_xxx)(uint32_t, xnn_operator_t*) = nullptr;
-        enum xnn_status(*xnn_setup_transpose_nd_xxx)(xnn_operator_t, const void*, void*, size_t, const size_t*, const size_t*, pthreadpool_t) = nullptr;
+        enum xnn_status(*xnn_reshape_transpose_nd_xxx)(xnn_operator_t, size_t, const size_t*, const size_t*, pthreadpool_t) = nullptr;
+        enum xnn_status(*xnn_setup_transpose_nd_xxx)(xnn_operator_t, const void*, void*) = nullptr;
 
         if constexpr (std::is_same<T, float>::value)
         {
             xnn_create_transpose_nd_xxx = &xnn_create_transpose_nd_x32;
+            xnn_reshape_transpose_nd_xxx = &xnn_reshape_transpose_nd_x32;
             xnn_setup_transpose_nd_xxx = &xnn_setup_transpose_nd_x32;
         }
         else if constexpr (std::is_same<T, uint16_t>::value)
         {
             xnn_create_transpose_nd_xxx = &xnn_create_transpose_nd_x16;
+            xnn_reshape_transpose_nd_xxx = &xnn_reshape_transpose_nd_x16;
             xnn_setup_transpose_nd_xxx = &xnn_setup_transpose_nd_x16;
         }
         else if constexpr (std::is_same<T, uint8_t>::value)
         {
             xnn_create_transpose_nd_xxx = &xnn_create_transpose_nd_x8;
+            xnn_reshape_transpose_nd_xxx = &xnn_reshape_transpose_nd_x8;
             xnn_setup_transpose_nd_xxx = &xnn_setup_transpose_nd_x8;
         }
         else
@@ -863,14 +1414,19 @@ public:
             transpose_op = nullptr;
         });
 
-        status = xnn_setup_transpose_nd_xxx(
+        status = xnn_reshape_transpose_nd_xxx(
             transpose_op,
-            input_data.data() /* input */,
-            output_data.data() /* output */,
             perm.size() /* num_dims */,
             input_shape.data() /* shape */,
             perm.data() /* perm */,
             threadpool /* threadpool */);
+        if (status != xnn_status_success)
+            throw std::runtime_error("failed to reshape transpose operation");
+
+        status = xnn_setup_transpose_nd_xxx(
+            transpose_op,
+            input_data.data() /* input */,
+            output_data.data() /* output */);
         if (status != xnn_status_success)
             throw std::runtime_error("failed to setup transpose operation");
 
@@ -1089,21 +1645,25 @@ public:
             uint8_t>::type>::type xnn_ptr_type;
 
         enum xnn_status(*xnn_create_softmax_nc_xxx)(size_t, size_t, size_t, uint32_t, xnn_operator_t*) = nullptr;
-        enum xnn_status(*xnn_setup_softmax_nc_xxx)(xnn_operator_t, size_t, const xnn_ptr_type*, xnn_ptr_type*, pthreadpool_t) = nullptr;
+        enum xnn_status(*xnn_reshape_softmax_nc_xxx)(xnn_operator_t, size_t, pthreadpool_t) = nullptr;
+        enum xnn_status(*xnn_setup_softmax_nc_xxx)(xnn_operator_t, const xnn_ptr_type*, xnn_ptr_type*) = nullptr;
 
         if constexpr (std::is_same<T, float>::value)
         {
             xnn_create_softmax_nc_xxx = &xnn_create_softmax_nc_f32;
+            xnn_reshape_softmax_nc_xxx = &xnn_reshape_softmax_nc_f32;
             xnn_setup_softmax_nc_xxx = &xnn_setup_softmax_nc_f32;
         }
         else if constexpr (std::is_same<T, uint16_t>::value)
         {
             xnn_create_softmax_nc_xxx = &xnn_create_softmax_nc_f16;
+            xnn_reshape_softmax_nc_xxx = &xnn_reshape_softmax_nc_f16;
             xnn_setup_softmax_nc_xxx = &xnn_setup_softmax_nc_f16;
         }
         else
         {
             xnn_create_softmax_nc_xxx = nullptr;
+            xnn_reshape_softmax_nc_xxx = &xnn_reshape_softmax_nc_qu8;
             xnn_setup_softmax_nc_xxx = &xnn_setup_softmax_nc_qu8;
         }
 
@@ -1139,10 +1699,16 @@ public:
             softmax_op = nullptr;
         });
 
-        status = xnn_setup_softmax_nc_xxx(
-            softmax_op, batch_size /* batch_size */,
-            input_data, output_data_override ? output_data_override : output_data.data(),
+        status = xnn_reshape_softmax_nc_xxx(
+            softmax_op,
+            batch_size /* batch_size */,
             threadpool /* thread pool */);
+        if (status != xnn_status_success)
+            throw std::runtime_error("failed to reshape softmax operator");
+
+        status = xnn_setup_softmax_nc_xxx(
+            softmax_op,
+            input_data, output_data_override ? output_data_override : output_data.data());
         if (status != xnn_status_success)
             throw std::runtime_error("failed to setup softmax operator");
 
@@ -1152,6 +1718,119 @@ public:
 
         return std::pair<std::vector<size_t>, tensor_vector<T>>(
             std::move(output_shape), std::move(output_data));
+    }
+
+    template <typename T>
+    std::pair<std::vector<size_t>, tensor_vector<T>> scaled_dot_product_attention(
+        tensor_vector<T>& query, tensor_vector<T>& key, tensor_vector<T>& value,
+        tensor_vector<T>& scale, tensor_vector<T>& mask,
+        size_t batch_size, size_t query_heads, size_t query_tokens,
+        size_t key_value_heads, size_t key_value_tokens,
+        size_t query_key_channels, size_t value_channels)
+    {
+        if (query.size() != batch_size * query_heads * query_tokens * query_key_channels)
+            throw std::runtime_error("XnnPack::scaled_dot_product_attention: invalid size of query.");
+        if (key.size() != batch_size * key_value_heads * key_value_tokens * query_key_channels)
+            throw std::runtime_error("XnnPack::scaled_dot_product_attention: invalid size of key.");
+        if (value.size() != batch_size * key_value_heads * key_value_tokens * value_channels)
+            throw std::runtime_error("XnnPack::scaled_dot_product_attention: invalid size of value.");
+        if (scale.size() != query_key_channels)
+            throw std::runtime_error("XnnPack::scaled_dot_product_attention: invalid size of scale.");
+        if (mask.size() != query_tokens * key_value_tokens)
+            throw std::runtime_error("XnnPack::scaled_dot_product_attention: invalid size of mask.");
+
+        std::vector<size_t> output_shape({ batch_size , query_heads , query_tokens , value_channels });
+
+        size_t output_size = 1;
+        for (auto& d : output_shape)
+            output_size *= d;
+
+        tensor_vector<T> output = create_tensor_vector<T>(output_size);
+
+        typedef typename std::conditional<std::is_same<T, float>::value, float, void>::type xnn_ptr_type;
+        enum xnn_status(*xnn_create_scaled_dot_product_attention_nhtc_xxx)(enum xnn_attention_logits_cap_type, const void*, uint32_t, xnn_operator_t*) = nullptr;
+        enum xnn_status(*xnn_reshape_scaled_dot_product_attention_nhtc_xxx)(xnn_operator_t, size_t, size_t, size_t, size_t, size_t, size_t, size_t, size_t*, size_t*, pthreadpool_t) = nullptr;
+        enum xnn_status(*xnn_setup_scaled_dot_product_attention_nhtc_xxx)(xnn_operator_t, void*, const xnn_ptr_type*, const xnn_ptr_type*, const xnn_ptr_type*, const xnn_ptr_type*, const xnn_ptr_type*, xnn_ptr_type*) = nullptr;
+
+        std::string cache_key;
+
+        if constexpr (std::is_same<T, float>::value)
+        {
+            xnn_create_scaled_dot_product_attention_nhtc_xxx = &xnn_create_scaled_dot_product_attention_nhtc_f32;
+            xnn_reshape_scaled_dot_product_attention_nhtc_xxx = &xnn_reshape_scaled_dot_product_attention_nhtc_f32;
+            xnn_setup_scaled_dot_product_attention_nhtc_xxx = &xnn_setup_scaled_dot_product_attention_nhtc_f32;
+
+            cache_key = ":xnn_create_scaled_dot_product_attention_nhtc_f32";
+        }
+        else
+        {
+            xnn_create_scaled_dot_product_attention_nhtc_xxx = &xnn_create_scaled_dot_product_attention_nhtc_f16;
+            xnn_reshape_scaled_dot_product_attention_nhtc_xxx = &xnn_reshape_scaled_dot_product_attention_nhtc_f16;
+            xnn_setup_scaled_dot_product_attention_nhtc_xxx = &xnn_setup_scaled_dot_product_attention_nhtc_f16;
+
+            cache_key = ":xnn_create_scaled_dot_product_attention_nhtc_f16";
+        }
+
+        xnn_status status;
+
+        xnn_operator_t attention_op = m_ops_cache.count(cache_key) ? m_ops_cache[cache_key].m_op : nullptr;
+
+        if (!attention_op)
+        {
+            status = xnn_create_scaled_dot_product_attention_nhtc_xxx(
+                xnn_attention_logits_cap_type_none,
+                nullptr,
+                /*flags=*/0,
+                &attention_op);
+            if (status != xnn_status_success)
+                throw std::runtime_error("failed to create scaled dot product attention operator");
+
+            m_ops_cache[cache_key].m_op = attention_op;
+        }
+
+        size_t workspace_size = 0;
+        size_t workspace_alignment = 0;
+
+        status = xnn_reshape_scaled_dot_product_attention_nhtc_xxx(
+            attention_op,
+            batch_size, query_heads, query_tokens,
+            key_value_heads, key_value_tokens,
+            query_key_channels, value_channels,
+            &workspace_size, &workspace_alignment,
+            threadpool);
+        if (status != xnn_status_success)
+            throw std::runtime_error("failed to reshape scaled dot product attention operator");
+
+        if (workspace_size > m_workspace_size)
+        {
+            if (m_workspace)
+            {
+                custom_aligned_free(m_workspace);
+                m_workspace = nullptr;
+            }
+
+            m_workspace = custom_aligned_alloc(workspace_alignment, workspace_size);
+            m_workspace_size = workspace_size;
+            m_workspace_alignment = workspace_alignment;
+        }
+        else if (workspace_alignment != m_workspace_alignment)
+        {
+            throw std::runtime_error("different workspace alignments");
+        }
+
+        status = xnn_setup_scaled_dot_product_attention_nhtc_xxx(
+            attention_op,
+            m_workspace, query.data(), key.data(), value.data(),
+            scale.data(), mask.data(), output.data());
+        if (status != xnn_status_success)
+            throw std::runtime_error("failed to setup scaled dot product attention operator");
+
+        status = xnn_run_operator(attention_op, threadpool);
+        if (status != xnn_status_success)
+            throw std::runtime_error("failed to run scaled dot product attention operator");
+
+        return std::pair<std::vector<size_t>, tensor_vector<T>>(
+            std::move(output_shape), std::move(output));
     }
 };
 
@@ -1409,6 +2088,11 @@ Model::~Model()
         delete m_xnnpack;
 }
 
+void Model::set_cuda_options(const CudaOptions& options)
+{
+    m_xnnpack->m_cublas_ops.m_cuda_options = options;
+}
+
 void Model::read_file(const char* filename)
 {
     auto model = onnxstream::read_file<std::vector<char>>(filename);
@@ -1424,12 +2108,24 @@ void Model::read_file(const char* filename)
     get_wp()->m_path = m_path;
 }
 
+void Model::read_string(const char* string, const char* path_with_slash /*= "./"*/)
+{
+    m_model.clear();
+
+    size_t len = std::strlen(string);
+    for (size_t i = 0; i < len; i++)
+        m_model.push_back(string[i]);
+
+    m_path = path_with_slash;
+    get_wp()->m_path = m_path;
+}
+
 std::string Model::next_line()
 {
     return next_file_line(m_model, m_pos);
 }
 
-std::optional<Operation> Model::next_op()
+std::optional<Operation> Model::next_op_impl()
 {
     auto line = next_line();
 
@@ -1492,6 +2188,33 @@ std::optional<Operation> Model::next_op()
     }
 
     return op;
+}
+
+std::optional<Operation> Model::next_op()
+{
+    if (!m_use_next_op_cache)
+    {
+        return next_op_impl();
+    }
+    else
+    {
+        if (!m_next_op_cache_ready)
+        {
+            std::optional<Operation> op = next_op_impl();
+            if (op)
+                m_next_op_cache.push_back(*op);
+            else
+                m_next_op_cache_ready = true;
+            return op;
+        }
+        else
+        {
+            if (m_pos < m_next_op_cache.size())
+                return m_next_op_cache[m_pos++];
+            else
+                return std::nullopt;
+        }
+    }
 }
 
 Tensor Model::parse_tensor_string(std::string& str)
@@ -1560,8 +2283,10 @@ Tensor Model::parse_tensor_string(std::string& str)
         for (auto& dim : dims)
         {
             int i = std::stoi(dim);
-            if (i <= 0)
-                throw std::invalid_argument("Model::parse_tensor_string: invalid shape.");
+            if (i < 0)
+                throw std::invalid_argument("Model::parse_tensor_string: invalid shape (dim < 0).");
+            else if (i == 0 && !m_support_dynamic_shapes)
+                throw std::invalid_argument("Model::parse_tensor_string: invalid shape (dim == 0).");
 
             t.m_shape.push_back(i);
         }
@@ -1572,12 +2297,14 @@ Tensor Model::parse_tensor_string(std::string& str)
 
 Tensor& Model::get_tensor_data(Tensor& t, bool make_copy /*= false*/, bool requires_float /*= false*/, TensorDataLayout required_layout /*= TensorDataLayout::unspecified*/, bool accepts_multipart /*= false*/)
 {
-    if (m_pow_requires_float && m_ops_queue.size() && m_ops_queue[0].m_type == "Pow")
+    if (m_use_fp16_arithmetic && m_requires_upcast && m_ops_queue.size() && m_requires_upcast(m_ops_queue[0].m_type, m_ops_queue[0].m_name))
         requires_float = true;
+
+    bool load = true;
 
     if (t.m_type != TensorDataType::none)
     {
-        std::string fn = t.m_name;
+        std::string& fn = t.m_name;
 
         if (required_layout == TensorDataLayout::nhwc)
         {
@@ -1602,35 +2329,68 @@ Tensor& Model::get_tensor_data(Tensor& t, bool make_copy /*= false*/, bool requi
             }
         }
 
-        switch (t.m_type)
+        load = !m_weights_exclusion_set.contains(fn);
+
+        if (load)
         {
-        case TensorDataType::uint8:
+            TensorDataType new_type = get_wp()->get_type_of_next();
+            if (new_type != TensorDataType::none) t.m_type = new_type;
+        }
+
+        if (!load || !get_wp()->supports_getptr())
         {
-            auto data = get_wp()->get_uint8(fn);
-            t.set_vector(std::move(data));
-            break;
+            switch (t.m_type)
+            {
+            case TensorDataType::uint8:
+            {
+                auto data = load ? get_wp()->get_uint8(fn) : tensor_vector<uint8_t>();
+                t.set_vector(std::move(data));
+                break;
+            }
+            case TensorDataType::float16:
+            {
+                auto data = load ? get_wp()->get_float16(fn) : tensor_vector<uint16_t>();
+                t.set_vector(std::move(data));
+                break;
+            }
+            case TensorDataType::float32:
+            {
+                auto data = load ? get_wp()->get_float32(fn) : tensor_vector<float>();
+                t.set_vector(std::move(data));
+                break;
+            }
+            case TensorDataType::int64:
+            {
+                auto data = load ? get_wp()->get_int64(fn) : tensor_vector<int64_t>();
+                t.set_vector(std::move(data));
+                break;
+            }
+            default:
+                throw std::invalid_argument("Model::get_tensor_data: unsupported tensor data format.");
+            }
         }
-        case TensorDataType::float16:
+        else
         {
-            auto data = get_wp()->get_float16(fn);
-            t.set_vector(std::move(data));
-            break;
+            switch (t.m_type)
+            {
+            case TensorDataType::uint8:
+                t.m_data = get_wp()->getptr_uint8(fn);
+                break;
+            case TensorDataType::float16:
+                t.m_data = get_wp()->getptr_float16(fn);
+                break;
+            case TensorDataType::float32:
+                t.m_data = get_wp()->getptr_float32(fn);
+                break;
+            case TensorDataType::int64:
+                t.m_data = get_wp()->getptr_int64(fn);
+                break;
+            default:
+                throw std::invalid_argument("Model::get_tensor_data: unsupported tensor data format.");
+            }
         }
-        case TensorDataType::float32:
-        {
-            auto data = get_wp()->get_float32(fn);
-            t.set_vector(std::move(data));
-            break;
-        }
-        case TensorDataType::int64:
-        {
-            auto data = get_wp()->get_int64(fn);
-            t.set_vector(std::move(data));
-            break;
-        }
-        default:
-            throw std::invalid_argument("Model::get_tensor_data: unsupported tensor data format.");
-        }
+
+        t.m_is_static_weights = true;
     }
     else
     {
@@ -1644,6 +2404,16 @@ Tensor& Model::get_tensor_data(Tensor& t, bool make_copy /*= false*/, bool requi
 
         if (tensor_ptr == nullptr)
             throw std::invalid_argument("Model::get_tensor_data: input tensor not found: " + t.m_name);
+
+        switch (tensor_ptr->m_type)
+        {
+        case TensorDataType::float16:
+            m_xnnpack->m_cublas_ops.ensure_is_ready(tensor_ptr->get_vector<uint16_t>().data());
+            break;
+        case TensorDataType::float32:
+            m_xnnpack->m_cublas_ops.ensure_is_ready(tensor_ptr->get_vector<float>().data());
+            break;
+        }
 
         auto& refs = m_intermediate_refs[t.m_name];
 
@@ -1706,101 +2476,109 @@ Tensor& Model::get_tensor_data(Tensor& t, bool make_copy /*= false*/, bool requi
     if (t.m_next_part && !accepts_multipart)
         throw std::invalid_argument("Model::get_tensor_data: multipart tensor but accepts_multipart == false (" + (!m_ops_queue.size() ? std::string("?") : m_ops_queue[0].m_type) + ").");
 
-    size_t size = 0;
-    switch (t.m_type)
+    if (load)
     {
-    case TensorDataType::uint8:
-        size = t.get_vector<uint8_t>().size();
-        break;
-    case TensorDataType::float16:
-        size = t.get_vector<uint16_t>().size();
-        break;
-    case TensorDataType::float32:
-        size = t.get_vector<float>().size();
-        break;
-    case TensorDataType::int64:
-        size = t.get_vector<int64_t>().size();
-        break;
-    }
-
-    int from_shape = 1;
-    for (auto& i : t.m_shape)
-        from_shape *= i;
-
-    if (from_shape <= 0 || from_shape != size)
-        throw std::invalid_argument("Model::get_tensor_data: mismatch between tensor shape and data size.");
-
-    bool skip_conversion_fp16 = true;
-    if (m_ops_queue.size())
-    {
-        for (auto& i : m_ops_queue[0].m_input)
-            if (i.m_type == TensorDataType::none || i.m_type == TensorDataType::float16)
-            {
-                skip_conversion_fp16 = false;
-                break;
-            }
-    }
-
-    if (t.m_type == TensorDataType::uint8)
-    {
-        if (!m_use_uint8_arithmetic)
-            dequantize(t, m_use_fp16_arithmetic && !requires_float && !skip_conversion_fp16 ? TensorDataType::float16 : TensorDataType::float32);
-    }
-    else if (t.m_type == TensorDataType::float16)
-    {
-        if (!(m_use_fp16_arithmetic && !requires_float))
+        size_t size = 0;
+        switch (t.m_type)
         {
-            auto data = t.get_vector<uint16_t>();
-            auto data_fp32 = m_xnnpack->convert<uint16_t, float>(data);
-            t.set_vector<float>(std::move(data_fp32));
+        case TensorDataType::uint8:
+            size = t.get_vector<uint8_t>().size();
+            break;
+        case TensorDataType::float16:
+            size = t.get_vector<uint16_t>().size();
+            break;
+        case TensorDataType::float32:
+            size = t.get_vector<float>().size();
+            break;
+        case TensorDataType::int64:
+            size = t.get_vector<int64_t>().size();
+            break;
         }
-    }
-    else if (t.m_type == TensorDataType::float32)
-    {
-        if (m_use_fp16_arithmetic && !requires_float && !skip_conversion_fp16)
+
+        int from_shape = 1;
+        for (auto& i : t.m_shape)
+            from_shape *= i;
+
+        if (from_shape < 0 || from_shape != size)
+            throw std::invalid_argument("Model::get_tensor_data: mismatch between tensor shape and data size.");
+
+        bool skip_conversion_fp16 = true;
+        if (m_ops_queue.size())
         {
-            auto data = t.get_vector<float>();
-            auto data_fp16 = m_xnnpack->convert<float, uint16_t>(data);
-            t.set_vector<uint16_t>(std::move(data_fp16));
+            for (auto& i : m_ops_queue[0].m_input)
+                if (i.m_type == TensorDataType::none || i.m_type == TensorDataType::float16)
+                {
+                    skip_conversion_fp16 = false;
+                    break;
+                }
         }
-    }
 
-    std::vector<size_t> transpose_perm;
+        TensorDataType prev_type = t.m_type;
 
-    if (required_layout == TensorDataLayout::nhwc && t.m_layout == TensorDataLayout::unspecified)
-    {
-        transpose_perm = { 0, 2, 3, 1 };
-    }
-    else if (required_layout == TensorDataLayout::unspecified && t.m_layout == TensorDataLayout::nhwc)
-    {
-        transpose_perm = { 0, 3, 1, 2 };
-    }
-
-    if (transpose_perm.size())
-    {
-        if (t.m_shape.size() != 4)
-            throw std::invalid_argument("Model::get_tensor_data: transpose required but invalid shape.");
-
-        if (t.m_type == TensorDataType::float32)
+        if (t.m_type == TensorDataType::uint8)
         {
-            auto result = m_xnnpack->transpose(t.m_shape, t.get_vector<float>(), transpose_perm);
-            t.set_vector(std::move(result.second));
-            t.m_shape = std::move(result.first);
+            if (!m_use_uint8_arithmetic)
+                dequantize(t, m_use_fp16_arithmetic && !requires_float && !skip_conversion_fp16 ? TensorDataType::float16 : TensorDataType::float32);
         }
         else if (t.m_type == TensorDataType::float16)
         {
-            auto result = m_xnnpack->transpose(t.m_shape, t.get_vector<uint16_t>(), transpose_perm);
-            t.set_vector(std::move(result.second));
-            t.m_shape = std::move(result.first);
+            if (!(m_use_fp16_arithmetic && !requires_float))
+            {
+                auto data = t.get_vector<uint16_t>();
+                auto data_fp32 = m_xnnpack->convert<uint16_t, float>(data);
+                t.set_vector<float>(std::move(data_fp32));
+            }
         }
-        else
+        else if (t.m_type == TensorDataType::float32)
         {
-            auto result = m_xnnpack->transpose(t.m_shape, t.get_vector<uint8_t>(), transpose_perm);
-            t.set_vector(std::move(result.second));
-            t.m_shape = std::move(result.first);
+            if (m_use_fp16_arithmetic && !requires_float && !skip_conversion_fp16)
+            {
+                auto data = t.get_vector<float>();
+                auto data_fp16 = m_xnnpack->convert<float, uint16_t>(data);
+                t.set_vector<uint16_t>(std::move(data_fp16));
+            }
         }
 
-        t.m_layout = required_layout;
+        if (m_first_run && t.m_is_static_weights && prev_type != t.m_type)
+            get_wp()->update(t);
+
+        std::vector<size_t> transpose_perm;
+
+        if (required_layout == TensorDataLayout::nhwc && t.m_layout == TensorDataLayout::unspecified)
+        {
+            transpose_perm = { 0, 2, 3, 1 };
+        }
+        else if (required_layout == TensorDataLayout::unspecified && t.m_layout == TensorDataLayout::nhwc)
+        {
+            transpose_perm = { 0, 3, 1, 2 };
+        }
+
+        if (transpose_perm.size())
+        {
+            if (t.m_shape.size() != 4)
+                throw std::invalid_argument("Model::get_tensor_data: transpose required but invalid shape.");
+
+            if (t.m_type == TensorDataType::float32)
+            {
+                auto result = m_xnnpack->transpose(t.m_shape, t.get_vector<float>(), transpose_perm);
+                t.set_vector(std::move(result.second));
+                t.m_shape = std::move(result.first);
+            }
+            else if (t.m_type == TensorDataType::float16)
+            {
+                auto result = m_xnnpack->transpose(t.m_shape, t.get_vector<uint16_t>(), transpose_perm);
+                t.set_vector(std::move(result.second));
+                t.m_shape = std::move(result.first);
+            }
+            else
+            {
+                auto result = m_xnnpack->transpose(t.m_shape, t.get_vector<uint8_t>(), transpose_perm);
+                t.set_vector(std::move(result.second));
+                t.m_shape = std::move(result.first);
+            }
+
+            t.m_layout = required_layout;
+        }
     }
 
     return t;
@@ -1833,7 +2611,7 @@ void Model::push_tensor(Tensor&& t, bool force_quantization /*= false*/)
 
     bool skip_conversion = false;
 
-    if (m_ops_queue.size() >= 2 && m_ops_queue[0].m_output.size() == 1)
+    if (!skip_conversion && m_ops_queue.size() >= 2 && m_ops_queue[0].m_output.size() == 1)
     {
         std::string name = m_ops_queue[0].m_output[0].m_name;
 
@@ -1890,6 +2668,26 @@ bool Model::compare_shapes(const std::vector<size_t>& shape_1, const std::vector
         for (int i = 0; i < shape_1.size(); i++)
             if (shape_1[i] != shape_2[i])
                 if (except == -1 || i != except)
+                    return false;
+
+    return true;
+}
+
+bool Model::check_output_shape(const std::vector<size_t>& src, std::vector<size_t>& dst)
+{
+    if (src.size() != dst.size())
+    {
+        if (m_support_dynamic_shapes && dst.size() == 0)
+            dst = src;
+        else
+            return false;
+    }
+    else
+        for (int i = 0; i < src.size(); i++)
+            if (src[i] != dst[i])
+                if (m_support_dynamic_shapes && dst[i] == 0)
+                    dst[i] = src[i];
+                else
                     return false;
 
     return true;
@@ -2332,7 +3130,7 @@ void Model::write_range_data(const char* filename)
     onnxstream::write_file(filename, data);
 }
 
-void Model::run()
+void Model::init()
 {
     if (m_intermediate_refs_copy.size() == 0)
     {
@@ -2376,8 +3174,15 @@ void Model::run()
 
         m_ops_printf_index = 0;
 
+        m_first_run = false;
+
         get_wp()->on_restart();
     }
+}
+
+void Model::run()
+{
+    init();
 
     m_pos = 0;
 
@@ -2386,7 +3191,7 @@ void Model::run()
         if (m_ops_queue.size())
             m_ops_queue.erase(m_ops_queue.begin());
 
-        const size_t ops_to_read = 5;
+        const size_t ops_to_read = 7;
 
         if (m_ops_queue.size() < ops_to_read)
         {
@@ -2460,6 +3265,69 @@ void Model::run()
             }
         }
 
+        if (m_use_scaled_dp_attn_op)
+        {
+            if (m_ops_queue.size() >= 6 &&
+                m_ops_queue[0].m_type == "Transpose" &&
+                m_ops_queue[1].m_type == "MatMul" &&
+                m_ops_queue[2].m_type == "Div" &&
+                m_ops_queue[3].m_type == "Add" &&
+                m_ops_queue[4].m_type == "Softmax" &&
+                m_ops_queue[5].m_type == "MatMul")
+            {
+                Operation& transpose = m_ops_queue[0];
+                Operation& matmul0 = m_ops_queue[1];
+                Operation& div = m_ops_queue[2];
+                Operation& add = m_ops_queue[3];
+                Operation& softmax = m_ops_queue[4];
+                Operation& matmul1 = m_ops_queue[5];
+
+                auto is_output_the_input = [&](Operation& op0, Operation& op1, int index = 0) {
+                    auto& name = op0.m_output[0].m_name;
+                    return name == op1.m_input[index].m_name &&
+                        m_intermediate_refs[name] == 1;
+                };
+
+                if (transpose.m_input.size() == 1 && transpose.m_output.size() == 1 &&
+                    matmul0.m_input.size() == 2 && matmul0.m_output.size() == 1 &&
+                    div.m_input.size() == 2 && div.m_output.size() == 1 &&
+                    add.m_input.size() == 2 && add.m_output.size() == 1 &&
+                    softmax.m_input.size() == 1 && softmax.m_output.size() == 1 &&
+                    softmax.m_attributes.size() == 1 && softmax.m_attributes[0].first == "axis" && softmax.m_attributes[0].second == "-1" &&
+                    matmul1.m_input.size() == 2 && matmul1.m_output.size() == 1 &&
+                    is_output_the_input(transpose, matmul0, 1) &&
+                    is_output_the_input(matmul0, div) &&
+                    is_output_the_input(div, add) &&
+                    is_output_the_input(add, softmax) &&
+                    is_output_the_input(softmax, matmul1))
+                {
+                    m_intermediate_refs[transpose.m_output[0].m_name] = 0;
+                    m_intermediate_refs[matmul0.m_output[0].m_name] = 0;
+                    m_intermediate_refs[div.m_output[0].m_name] = 0;
+                    m_intermediate_refs[add.m_output[0].m_name] = 0;
+                    m_intermediate_refs[softmax.m_output[0].m_name] = 0;
+
+                    Operation op;
+
+                    op.m_name = transpose.m_name + "_ScaledDotProductAttention";
+                    op.m_type = "ScaledDotProductAttention";
+
+                    op.m_input.push_back(std::move(matmul0.m_input[0]));
+                    op.m_input.push_back(std::move(transpose.m_input[0]));
+                    op.m_input.push_back(std::move(div.m_input[1]));
+                    op.m_input.push_back(std::move(add.m_input[1]));
+                    op.m_input.push_back(std::move(matmul1.m_input[1]));
+
+                    op.m_output.push_back(std::move(matmul1.m_output[0]));
+
+                    m_ops_queue.erase(m_ops_queue.begin(), m_ops_queue.begin() + 6);
+                    m_ops_queue.insert(m_ops_queue.begin(), std::move(op));
+
+                    m_scaled_dp_attn_op_used = true;
+                }
+            }
+        }
+
         Operation& op = m_ops_queue[0];
 
         if (m_ops_printf)
@@ -2498,6 +3366,13 @@ void Model::run()
                     }
                 }
             }
+        }
+
+        std::chrono::time_point<std::chrono::high_resolution_clock> hrc_now;
+
+        if (m_ops_times_printf)
+        {
+            hrc_now = std::chrono::high_resolution_clock::now();
         }
 
         if (op.m_type == "Unsqueeze")
@@ -2539,7 +3414,7 @@ void Model::run()
                 data.m_shape.insert(data.m_shape.begin() + a, 1);
             }
 
-            if (!compare_shapes(data.m_shape, output.m_shape))
+            if (!check_output_shape(data.m_shape, output.m_shape))
                 throw std::invalid_argument(op.m_type + ": unexpected shape of output.");
 
             output.m_type = data.m_type;
@@ -2577,7 +3452,7 @@ void Model::run()
 
                     auto result = m_xnnpack->multiply(input_0.m_shape, input_0_data.data(), input_1.m_shape, input_1_data.data());
 
-                    if (!compare_shapes(result.first, output.m_shape))
+                    if (!check_output_shape(result.first, output.m_shape))
                         throw std::invalid_argument(op.m_type + ": unexpected shape of output.");
 
                     output.set_vector(std::move(result.second));
@@ -2592,7 +3467,7 @@ void Model::run()
 
                     auto result = m_xnnpack->multiply(input_0.m_shape, input_0_data.data(), input_1.m_shape, input_1_data.data());
 
-                    if (!compare_shapes(result.first, output.m_shape))
+                    if (!check_output_shape(result.first, output.m_shape))
                         throw std::invalid_argument(op.m_type + ": unexpected shape of output.");
 
                     output.set_vector(std::move(result.second));
@@ -2620,7 +3495,7 @@ void Model::run()
 
                     auto result = m_xnnpack->multiply<uint8_t>(input_0.m_shape, input_0_data.data(), input_1.m_shape, input_1_data.data(), nullptr, &qu8_data);
 
-                    if (!compare_shapes(result.first, output.m_shape))
+                    if (!check_output_shape(result.first, output.m_shape))
                         throw std::invalid_argument(op.m_type + ": unexpected shape of output.");
 
                     output.set_vector(std::move(result.second));
@@ -2766,7 +3641,7 @@ void Model::run()
             if (prl_ctx.error)
                 throw std::invalid_argument(op.m_type + ": conversion error between f32 and f16.");
 
-            if (!compare_shapes(input.m_shape, output.m_shape))
+            if (!check_output_shape(input.m_shape, output.m_shape))
                 throw std::invalid_argument(op.m_type + ": unexpected shape of output.");
 
             push_tensor(std::move(output));
@@ -2807,6 +3682,8 @@ void Model::run()
 
             for (auto& t : op.m_input)
             {
+                auto& input = get_tensor_data(t);
+
                 if (!compare_shapes(t.m_shape, op.m_input[0].m_shape, axis))
                     throw std::invalid_argument(op.m_type + ": invalid shape of one or more inputs.");
 
@@ -2817,22 +3694,24 @@ void Model::run()
                 final_dim += t.m_shape[axis];
                 output_stride += num;
 
-                auto& input = get_tensor_data(t);
                 if (!sizeof_element)
                 {
                     if (input.m_type == TensorDataType::float16)
                         sizeof_element = sizeof(uint16_t);
                     else if (input.m_type == TensorDataType::float32)
                         sizeof_element = sizeof(float);
+                    else if (input.m_type == TensorDataType::int64)
+                        sizeof_element = sizeof(int64_t);
                     else
                         throw std::invalid_argument(op.m_type + ": wrong data type of input.");
                 }
                 else
                 {
                     if (
-                        (input.m_type != TensorDataType::float16 && input.m_type != TensorDataType::float32) ||
+                        (input.m_type != TensorDataType::float16 && input.m_type != TensorDataType::float32 && input.m_type != TensorDataType::int64) ||
                         (input.m_type == TensorDataType::float16 && sizeof_element != sizeof(uint16_t)) ||
-                        (input.m_type == TensorDataType::float32 && sizeof_element != sizeof(float))
+                        (input.m_type == TensorDataType::float32 && sizeof_element != sizeof(float)) ||
+                        (input.m_type == TensorDataType::int64 && sizeof_element != sizeof(int64_t))
                         )
                     {
                         throw std::invalid_argument(op.m_type + ": wrong data type of input.");
@@ -2844,9 +3723,14 @@ void Model::run()
                     auto& input_data = input.get_vector<float>();
                     inputs.emplace_back(input_data.data(), num);
                 }
-                else
+                else if (input.m_type == TensorDataType::float16)
                 {
                     auto& input_data = input.get_vector<uint16_t>();
+                    inputs.emplace_back(input_data.data(), num);
+                }
+                else
+                {
+                    auto& input_data = input.get_vector<int64_t>();
                     inputs.emplace_back(input_data.data(), num);
                 }
             }
@@ -2866,11 +3750,17 @@ void Model::run()
                 output.set_vector(std::move(output_data));
                 ptr_output = output.get_vector<float>().data();
             }
-            else
+            else if (sizeof_element == sizeof(uint16_t))
             {
                 tensor_vector<uint16_t> output_data = create_tensor_vector<uint16_t>(output_num_els);
                 output.set_vector(std::move(output_data));
                 ptr_output = output.get_vector<uint16_t>().data();
+            }
+            else
+            {
+                tensor_vector<int64_t> output_data = create_tensor_vector<int64_t>(output_num_els);
+                output.set_vector(std::move(output_data));
+                ptr_output = output.get_vector<int64_t>().data();
             }
 
             size_t ops_num = output_num_els / output_stride;
@@ -2907,7 +3797,7 @@ void Model::run()
 
             m_xnnpack->parallelize((void*)pfn, &prl_ctx, ops_num);
 
-            if (!compare_shapes(output_shape, output.m_shape))
+            if (!check_output_shape(output_shape, output.m_shape))
                 throw std::invalid_argument(op.m_type + ": unexpected shape of output.");
 
             push_tensor(std::move(output));
@@ -2963,7 +3853,7 @@ void Model::run()
 
                 auto result = m_xnnpack->matrix_multiply<float, float>(input_0.m_shape, input_0_data.data(), input_1.m_shape, input_1_data.data(), &bias.m_shape, bias_data.data());
 
-                if (!compare_shapes(result.first, output.m_shape))
+                if (!check_output_shape(result.first, output.m_shape))
                     throw std::invalid_argument(op.m_type + ": unexpected shape of output.");
 
                 output.set_vector(std::move(result.second));
@@ -2980,7 +3870,7 @@ void Model::run()
 
                 auto result = m_xnnpack->matrix_multiply<uint16_t, uint16_t>(input_0.m_shape, input_0_data.data(), input_1.m_shape, input_1_data.data(), &bias.m_shape, bias_data.data());
 
-                if (!compare_shapes(result.first, output.m_shape))
+                if (!check_output_shape(result.first, output.m_shape))
                     throw std::invalid_argument(op.m_type + ": unexpected shape of output.");
 
                 output.set_vector(std::move(result.second));
@@ -3006,7 +3896,7 @@ void Model::run()
 
                 auto result = m_xnnpack->sigmoid(input.m_shape, input_data);
 
-                if (!compare_shapes(result.first, output.m_shape))
+                if (!check_output_shape(result.first, output.m_shape))
                     throw std::invalid_argument(op.m_type + ": unexpected shape of output.");
 
                 output.set_vector(std::move(result.second));
@@ -3019,7 +3909,7 @@ void Model::run()
 
                 auto result = m_xnnpack->sigmoid(input.m_shape, input_data);
 
-                if (!compare_shapes(result.first, output.m_shape))
+                if (!check_output_shape(result.first, output.m_shape))
                     throw std::invalid_argument(op.m_type + ": unexpected shape of output.");
 
                 output.set_vector(std::move(result.second));
@@ -3100,7 +3990,7 @@ void Model::run()
                 if (prl_ctx.error)
                     throw std::invalid_argument(op.m_type + ": quantization error.");
 
-                if (!compare_shapes(input.m_shape, output.m_shape))
+                if (!check_output_shape(input.m_shape, output.m_shape))
                     throw std::invalid_argument(op.m_type + ": unexpected shape of output.");
             }
 
@@ -3249,7 +4139,7 @@ void Model::run()
             }
 
             if (result_first.size() != 4 ||
-                !compare_shapes(output.m_shape, { result_first[0], result_first[3], result_first[1], result_first[2] }))
+                !check_output_shape({ result_first[0], result_first[3], result_first[1], result_first[2] }, output.m_shape))
             {
                 throw std::invalid_argument(op.m_type + ": unexpected shape of output.");
             }
@@ -3328,7 +4218,7 @@ void Model::run()
                 }
             }
 
-            if (!compare_shapes(output_shape, output.m_shape))
+            if (!check_output_shape(output_shape, output.m_shape))
                 throw std::invalid_argument(op.m_type + ": unexpected shape of output.");
 
             output.m_type = data.m_type;
@@ -3602,7 +4492,7 @@ void Model::run()
             if (prl_ctx.error)
                 throw std::invalid_argument(op.m_type + ": conversion error between f32 and f16.");
 
-            if (!compare_shapes(input.m_shape, output.m_shape))
+            if (!check_output_shape(input.m_shape, output.m_shape))
                 throw std::invalid_argument(op.m_type + ": unexpected shape of output.");
 
             push_tensor(std::move(output));
@@ -3626,7 +4516,7 @@ void Model::run()
 
                 auto result = m_xnnpack->add(input_0.m_shape, input_0_data, input_1.m_shape, input_1_data);
 
-                if (!compare_shapes(result.first, output.m_shape))
+                if (!check_output_shape(result.first, output.m_shape))
                     throw std::invalid_argument(op.m_type + ": unexpected shape of output.");
 
                 output.set_vector(std::move(result.second));
@@ -3641,12 +4531,12 @@ void Model::run()
 
                 auto result = m_xnnpack->add(input_0.m_shape, input_0_data, input_1.m_shape, input_1_data);
 
-                if (!compare_shapes(result.first, output.m_shape))
+                if (!check_output_shape(result.first, output.m_shape))
                     throw std::invalid_argument(op.m_type + ": unexpected shape of output.");
 
                 output.set_vector(std::move(result.second));
             }
-            else
+            else if (input_0.m_type == TensorDataType::uint8)
             {
                 if (input_0.m_type != TensorDataType::uint8) throw std::invalid_argument(op.m_type + ": wrong data type of input 0.");
                 if (input_1.m_type != TensorDataType::uint8) throw std::invalid_argument(op.m_type + ": wrong data type of input 1.");
@@ -3669,13 +4559,55 @@ void Model::run()
 
                 auto result = m_xnnpack->add(input_0.m_shape, input_0_data, input_1.m_shape, input_1_data, &qu8_data);
 
-                if (!compare_shapes(result.first, output.m_shape))
+                if (!check_output_shape(result.first, output.m_shape))
                     throw std::invalid_argument(op.m_type + ": unexpected shape of output.");
 
                 output.set_vector(std::move(result.second));
 
                 output.m_scale = s.first;
                 output.m_zero_point = s.second;
+            }
+            else
+            {
+                if (input_0.m_type != TensorDataType::int64) throw std::invalid_argument(op.m_type + ": wrong data type of input 0.");
+                if (input_1.m_type != TensorDataType::int64) throw std::invalid_argument(op.m_type + ": wrong data type of input 1.");
+
+                if (input_1.m_shape.size() != 0)
+                    throw std::invalid_argument(op.m_type + ": second input must be a scalar (not implemented).");
+
+                auto& input_0_data = input_0.get_vector<int64_t>();
+                auto& input_1_data = input_1.get_vector<int64_t>();
+
+                std::vector<size_t> output_shape;
+                tensor_vector<int64_t> output_data;
+
+                if (input_0.m_shape.size() == 0)
+                {
+                    size_t output_num_els = 1;
+
+                    output_data = create_tensor_vector<int64_t>(output_num_els);
+
+                    output_data[0] = input_0_data[0] + input_1_data[0];
+                }
+                else if (input_0.m_shape.size() == 1)
+                {
+                    size_t output_num_els = input_0.m_shape[0];
+                    output_shape = { output_num_els };
+
+                    output_data = create_tensor_vector<int64_t>(output_num_els);
+
+                    for (size_t i = 0; i < output_num_els; i++)
+                        output_data[i] = input_0_data[i] + input_1_data[0];
+                }
+                else
+                {
+                    throw std::invalid_argument(op.m_type + ": first input must be a scalar or 1D (not implemented).");
+                }
+
+                if (!check_output_shape(output_shape, output.m_shape))
+                    throw std::invalid_argument(op.m_type + ": unexpected shape of output.");
+
+                output.set_vector(std::move(output_data));
             }
 
             push_tensor(std::move(output));
@@ -3704,7 +4636,7 @@ void Model::run()
 
                 auto result = m_xnnpack->transpose(input.m_shape, input_data, perm);
 
-                if (!compare_shapes(result.first, output.m_shape))
+                if (!check_output_shape(result.first, output.m_shape))
                     throw std::invalid_argument(op.m_type + ": unexpected shape of output.");
 
                 output.set_vector(std::move(result.second));
@@ -3717,7 +4649,7 @@ void Model::run()
 
                 auto result = m_xnnpack->transpose(input.m_shape, input_data, perm);
 
-                if (!compare_shapes(result.first, output.m_shape))
+                if (!check_output_shape(result.first, output.m_shape))
                     throw std::invalid_argument(op.m_type + ": unexpected shape of output.");
 
                 output.set_vector(std::move(result.second));
@@ -3730,7 +4662,7 @@ void Model::run()
 
                 auto result = m_xnnpack->transpose(input.m_shape, input_data, perm);
 
-                if (!compare_shapes(result.first, output.m_shape))
+                if (!check_output_shape(result.first, output.m_shape))
                     throw std::invalid_argument(op.m_type + ": unexpected shape of output.");
 
                 output.set_vector(std::move(result.second));
@@ -3753,15 +4685,20 @@ void Model::run()
                 throw std::invalid_argument(op.m_type + ": invalid shape of input.");
 
             std::vector<int> axes;
+            int keepdims = 1;
 
             for (auto& a : op.m_attributes)
                 if (a.first == "axes")
                     axes = string_to_int_vec<int>(a.second);
+                else if (a.first == "keepdims")
+                    keepdims = std::stoi(a.second);
                 else
                     throw std::invalid_argument(op.m_type + ": unrecognized attribute: " + a.first + ".");
 
             if (axes.size() != 1)
                 throw std::invalid_argument(op.m_type + ": reduce supported on 1 axis only (not implemented).");
+            if (keepdims != 1)
+                throw std::invalid_argument(op.m_type + ": 'keepdims' must be 1 (not implemented).");
 
             int axis = axes[0];
 
@@ -3888,7 +4825,7 @@ void Model::run()
             if (prl_ctx.error)
                 throw std::invalid_argument(op.m_type + ": conversion error between f32 and f16.");
 
-            if (!compare_shapes(output_shape, output.m_shape))
+            if (!check_output_shape(output_shape, output.m_shape))
                 throw std::invalid_argument(op.m_type + ": unexpected shape of output.");
 
             push_tensor(std::move(output));
@@ -3912,12 +4849,12 @@ void Model::run()
 
                 auto result = m_xnnpack->subtract(input_0.m_shape, input_0_data, input_1.m_shape, input_1_data);
 
-                if (!compare_shapes(result.first, output.m_shape))
+                if (!check_output_shape(result.first, output.m_shape))
                     throw std::invalid_argument(op.m_type + ": unexpected shape of output.");
 
                 output.set_vector(std::move(result.second));
             }
-            else
+            else if (input_0.m_type == TensorDataType::float16)
             {
                 if (input_0.m_type != TensorDataType::float16) throw std::invalid_argument(op.m_type + ": wrong data type of input 0.");
                 if (input_1.m_type != TensorDataType::float16) throw std::invalid_argument(op.m_type + ": wrong data type of input 1.");
@@ -3927,10 +4864,52 @@ void Model::run()
 
                 auto result = m_xnnpack->subtract(input_0.m_shape, input_0_data, input_1.m_shape, input_1_data);
 
-                if (!compare_shapes(result.first, output.m_shape))
+                if (!check_output_shape(result.first, output.m_shape))
                     throw std::invalid_argument(op.m_type + ": unexpected shape of output.");
 
                 output.set_vector(std::move(result.second));
+            }
+            else
+            {
+                if (input_0.m_type != TensorDataType::int64) throw std::invalid_argument(op.m_type + ": wrong data type of input 0.");
+                if (input_1.m_type != TensorDataType::int64) throw std::invalid_argument(op.m_type + ": wrong data type of input 1.");
+
+                if (input_1.m_shape.size() != 0)
+                    throw std::invalid_argument(op.m_type + ": second input must be a scalar (not implemented).");
+
+                auto& input_0_data = input_0.get_vector<int64_t>();
+                auto& input_1_data = input_1.get_vector<int64_t>();
+
+                std::vector<size_t> output_shape;
+                tensor_vector<int64_t> output_data;
+
+                if (input_0.m_shape.size() == 0)
+                {
+                    size_t output_num_els = 1;
+
+                    output_data = create_tensor_vector<int64_t>(output_num_els);
+
+                    output_data[0] = input_0_data[0] - input_1_data[0];
+                }
+                else if (input_0.m_shape.size() == 1)
+                {
+                    size_t output_num_els = input_0.m_shape[0];
+                    output_shape = { output_num_els };
+
+                    output_data = create_tensor_vector<int64_t>(output_num_els);
+
+                    for (size_t i = 0; i < output_num_els; i++)
+                        output_data[i] = input_0_data[i] - input_1_data[0];
+                }
+                else
+                {
+                    throw std::invalid_argument(op.m_type + ": first input must be a scalar or 1D (not implemented).");
+                }
+
+                if (!check_output_shape(output_shape, output.m_shape))
+                    throw std::invalid_argument(op.m_type + ": unexpected shape of output.");
+
+                output.set_vector(std::move(output_data));
             }
 
             push_tensor(std::move(output));
@@ -4057,7 +5036,7 @@ void Model::run()
             if (prl_ctx.error)
                 throw std::invalid_argument(op.m_type + ": conversion error between f32 and f16.");
 
-            if (!compare_shapes(input.m_shape, output.m_shape))
+            if (!check_output_shape(input.m_shape, output.m_shape))
                 throw std::invalid_argument(op.m_type + ": unexpected shape of output.");
 
             push_tensor(std::move(output));
@@ -4081,7 +5060,7 @@ void Model::run()
 
                 auto result = m_xnnpack->divide(input_0.m_shape, input_0_data, input_1.m_shape, input_1_data);
 
-                if (!compare_shapes(result.first, output.m_shape))
+                if (!check_output_shape(result.first, output.m_shape))
                     throw std::invalid_argument(op.m_type + ": unexpected shape of output.");
 
                 output.set_vector(std::move(result.second));
@@ -4096,7 +5075,7 @@ void Model::run()
 
                 auto result = m_xnnpack->divide(input_0.m_shape, input_0_data, input_1.m_shape, input_1_data);
 
-                if (!compare_shapes(result.first, output.m_shape))
+                if (!check_output_shape(result.first, output.m_shape))
                     throw std::invalid_argument(op.m_type + ": unexpected shape of output.");
 
                 output.set_vector(std::move(result.second));
@@ -4112,6 +5091,17 @@ void Model::run()
             auto& input_0 = get_tensor_data(op.m_input[0], false /* make_copy */, false /* requires_float */, TensorDataLayout::unspecified /* required_layout */, true /* accepts_multipart */);
             auto& input_1 = get_tensor_data(op.m_input[1]);
             auto& output = op.m_output[0];
+
+            std::string cache_key;
+            if (m_use_ops_cache && input_1.m_is_static_weights)
+            {
+                cache_key = op.m_name;
+                if (m_first_run)
+                {
+                    m_weights_exclusion_set.insert(input_1.m_name);
+                    get_wp()->remove(input_1.m_name);
+                }
+            }
 
             bool shape_has_leading_1 = false;
             bool first_shape_is_2d = false;
@@ -4157,7 +5147,7 @@ void Model::run()
             else if (first_shape_is_2d)
                 output_shape.erase(output_shape.begin());
 
-            if (!compare_shapes(output_shape, output.m_shape))
+            if (!check_output_shape(output_shape, output.m_shape))
                 throw std::invalid_argument(op.m_type + ": unexpected shape of output.");
 
             size_t output_num_els = 1;
@@ -4173,6 +5163,9 @@ void Model::run()
                 output_num_els /= n;
                 is_multipart_output = true;
             }
+
+            if (cache_key.size() && n != 1)
+                throw std::invalid_argument(op.m_type + ": cache_key != '' and n != 1.");
 
             void* input_0_ptr = nullptr;
             void* input_1_ptr = nullptr;
@@ -4277,7 +5270,8 @@ void Model::run()
                         { input_1.m_shape[1], input_1.m_shape[2] },
                         (float*)input_1_ptr,
                         nullptr, nullptr,
-                        (float*)output_ptr);
+                        (float*)output_ptr,
+                        nullptr /* qu8_data */, cache_key);
 
                     result_first = std::move(result.first);
                 }
@@ -4289,7 +5283,8 @@ void Model::run()
                         { input_1.m_shape[1], input_1.m_shape[2] },
                         (uint16_t*)input_1_ptr,
                         nullptr, nullptr,
-                        (uint16_t*)output_ptr);
+                        (uint16_t*)output_ptr,
+                        nullptr /* qu8_data */, cache_key);
 
                     result_first = std::move(result.first);
                 }
@@ -4311,7 +5306,7 @@ void Model::run()
                         (uint8_t*)input_1_ptr,
                         nullptr, nullptr,
                         (uint8_t*)output_ptr,
-                        &qu8_data);
+                        &qu8_data, cache_key);
 
                     result_first = std::move(result.first);
                 }
@@ -4377,7 +5372,7 @@ void Model::run()
 
                     auto result = m_xnnpack->softmax(input.m_shape, input_data.data());
 
-                    if (!compare_shapes(result.first, output.m_shape))
+                    if (!check_output_shape(result.first, output.m_shape))
                         throw std::invalid_argument(op.m_type + ": unexpected shape of output.");
 
                     output.set_vector(std::move(result.second));
@@ -4390,7 +5385,7 @@ void Model::run()
 
                     auto result = m_xnnpack->softmax(input.m_shape, input_data.data());
 
-                    if (!compare_shapes(result.first, output.m_shape))
+                    if (!check_output_shape(result.first, output.m_shape))
                         throw std::invalid_argument(op.m_type + ": unexpected shape of output.");
 
                     output.set_vector(std::move(result.second));
@@ -4409,7 +5404,7 @@ void Model::run()
 
                     auto result = m_xnnpack->softmax<uint8_t>(input.m_shape, input_data.data(), nullptr, &qu8_data);
 
-                    if (!compare_shapes(result.first, output.m_shape))
+                    if (!check_output_shape(result.first, output.m_shape))
                         throw std::invalid_argument(op.m_type + ": unexpected shape of output.");
 
                     output.set_vector(std::move(result.second));
@@ -4529,7 +5524,7 @@ void Model::run()
 
                 m_xnnpack->parallelize((void*)pfn, &prl_ctx, ops_num);
 
-                if (!compare_shapes(output_shape, output.m_shape))
+                if (!check_output_shape(output_shape, output.m_shape))
                     throw std::invalid_argument(op.m_type + ": unexpected shape of output.");
 
                 push_tensor(std::move(output));
@@ -4681,7 +5676,7 @@ void Model::run()
 
             m_xnnpack->parallelize((void*)pfn, &prl_ctx, prl_ctx.n_size);
 
-            if (!compare_shapes(output_shape, output.m_shape))
+            if (!check_output_shape(output_shape, output.m_shape))
                 throw std::invalid_argument(op.m_type + ": unexpected shape of output.");
 
             push_tensor(std::move(output));
@@ -4691,8 +5686,16 @@ void Model::run()
             if (op.m_input.size() != 2) throw std::invalid_argument(op.m_type + ": wrong number of inputs.");
             if (op.m_output.size() != 1) throw std::invalid_argument(op.m_type + ": wrong number of outputs.");
 
-            if (op.m_attributes.size())
-                throw std::invalid_argument(op.m_type + ": unrecognized attribute (not implemented).");
+            int axis = 0;
+
+            for (auto& a : op.m_attributes)
+                if (a.first == "axis")
+                    axis = std::stoi(a.second);
+                else
+                    throw std::invalid_argument(op.m_type + ": unrecognized attribute: " + a.first + ".");
+
+            if (axis != 0)
+                throw std::invalid_argument(op.m_type + ": axis must be 0 (not implemented).");
 
             auto& input = get_tensor_data(op.m_input[0]);
             auto& indices = get_tensor_data(op.m_input[1]);
@@ -4700,7 +5703,22 @@ void Model::run()
 
             if (indices.m_type != TensorDataType::int64) throw std::invalid_argument(op.m_type + ": wrong data type of indices.");
 
+            bool input_shape_1d = false;
+
+            if (input.m_shape.size() == 1)
+            {
+                input.m_shape.insert(input.m_shape.begin(), 1);
+                input_shape_1d = true;
+            }
+
+            bool indices_shape_0d = false;
             bool indices_shape_1d = false;
+
+            if (indices.m_shape.size() == 0)
+            {
+                indices.m_shape.insert(indices.m_shape.begin(), 1);
+                indices_shape_0d = true;
+            }
 
             if (indices.m_shape.size() == 1)
             {
@@ -4717,7 +5735,9 @@ void Model::run()
 
             std::vector<size_t> output_shape({ 1, indices.m_shape[1], input.m_shape[1] });
 
-            if (indices_shape_1d)
+            if (input_shape_1d && indices_shape_0d)
+                output_shape.clear();
+            else if (indices_shape_1d)
                 output_shape.erase(output_shape.begin());
 
             size_t output_num_els = 1;
@@ -4741,7 +5761,7 @@ void Model::run()
                 ptr_output = output.get_vector<float>().data();
                 ptr_input = input_data.data();
             }
-            else
+            else if (input.m_type == TensorDataType::float16)
             {
                 if (input.m_type != TensorDataType::float16) throw std::invalid_argument(op.m_type + ": wrong data type of input.");
 
@@ -4754,12 +5774,25 @@ void Model::run()
                 ptr_output = output.get_vector<uint16_t>().data();
                 ptr_input = input_data.data();
             }
+            else
+            {
+                if (input.m_type != TensorDataType::int64) throw std::invalid_argument(op.m_type + ": wrong data type of input.");
+
+                auto& input_data = input.get_vector<int64_t>();
+
+                tensor_vector<int64_t> output_data = create_tensor_vector<int64_t>(output_num_els);
+                output.set_vector(std::move(output_data));
+
+                sizeof_element = sizeof(int64_t);
+                ptr_output = output.get_vector<int64_t>().data();
+                ptr_input = input_data.data();
+            }
 
             struct context
             {
                 std::vector<size_t>* input_shape;
                 tensor_vector<int64_t>* indices_data;
-                bool error_0;
+                bool error_0, input_shape_1d;
                 size_t sizeof_element;
                 void* ptr_input, * ptr_output;
             };
@@ -4769,6 +5802,7 @@ void Model::run()
             prl_ctx.input_shape = &input.m_shape;
             prl_ctx.indices_data = &indices_data;
             prl_ctx.error_0 = false;
+            prl_ctx.input_shape_1d = input_shape_1d;
             prl_ctx.sizeof_element = sizeof_element;
             prl_ctx.ptr_input = ptr_input;
             prl_ctx.ptr_output = ptr_output;
@@ -4777,15 +5811,17 @@ void Model::run()
             {
                 int64_t index = (*_->indices_data)[i];
 
+                int64_t dim = (int64_t)(*_->input_shape)[_->input_shape_1d ? 1 : 0];
+
                 if (index < 0)
-                    index = (int64_t)(*_->input_shape)[0] + index;
-                if (index < 0 || index >= (int64_t)(*_->input_shape)[0])
+                    index = dim + index;
+                if (index < 0 || index >= dim)
                 {
                     _->error_0 = true;
                     return;
                 }
 
-                const size_t els = (*_->input_shape)[1];
+                const size_t els = _->input_shape_1d ? 1 : (*_->input_shape)[1];
 
                 memcpy((uint8_t*)_->ptr_output + i * els * _->sizeof_element,
                     (uint8_t*)_->ptr_input + index * els * _->sizeof_element,
@@ -4797,7 +5833,7 @@ void Model::run()
             if (prl_ctx.error_0)
                 throw std::invalid_argument(op.m_type + ": invalid index in indices.");
 
-            if (!compare_shapes(output_shape, output.m_shape))
+            if (!check_output_shape(output_shape, output.m_shape))
                 throw std::invalid_argument(op.m_type + ": unexpected shape of output.");
 
             push_tensor(std::move(output));
@@ -4828,6 +5864,8 @@ void Model::run()
             auto& starts_data = starts.get_vector<int64_t>();
             auto& ends_data = ends.get_vector<int64_t>();
 
+            bool last_but_one = false;
+
             if (op.m_input.size() > 3)
             {
                 auto& axes = get_tensor_data(op.m_input[3]);
@@ -4847,8 +5885,10 @@ void Model::run()
                 if (axis < 0 || axis >= rank)
                     throw std::invalid_argument(op.m_type + ": invalid axis in axes.");
 
-                if (axis != rank - 1)
-                    throw std::invalid_argument(op.m_type + ": unsupported axes value(s): slice supported on last axis only (not implemented).");
+                last_but_one = axis == rank - 2;
+
+                if (axis != rank - 1 && !last_but_one)
+                    throw std::invalid_argument(op.m_type + ": unsupported axes value(s): slice supported on last or last but one axis only (not implemented).");
             }
 
             if (op.m_input.size() > 4)
@@ -4866,20 +5906,27 @@ void Model::run()
                     throw std::invalid_argument(op.m_type + ": unsupported steps value(s) (not implemented).");
             }
 
-            int start = (int)starts_data[0];
-            int end = (int)ends_data[0];
+            int64_t start = starts_data[0];
+            int64_t end = ends_data[0];
 
-            int last_dim = (int)data.m_shape.back();
+            int64_t dim = (int64_t)data.m_shape[data.m_shape.size() - (last_but_one ? 2 : 1)];
 
-            if (end == -1)
-                end = last_dim;
+            if (start < 0)
+                start += dim;
+            if (start > dim)
+                start = dim;
 
-            if (start < 0 || start > last_dim || end < 0 || end > last_dim || start >= end)
+            if (end < 0)
+                end += dim;
+            if (end > dim)
+                end = dim;
+
+            if (start < 0 || start > dim || end < 0 || end > dim || start >= end)
                 throw std::invalid_argument(op.m_type + ": invalid value(s) in starts and/or ends.");
 
             std::vector<size_t> output_shape(data.m_shape);
 
-            output_shape.back() = end - start;
+            output_shape[output_shape.size() - (last_but_one ? 2 : 1)] = end - start;
 
             size_t output_num_els = 1;
             for (auto& s : output_shape)
@@ -4902,7 +5949,7 @@ void Model::run()
                 ptr_data = data_data.data();
                 ptr_output = output.get_vector<float>().data();
             }
-            else
+            else if (data.m_type == TensorDataType::float16)
             {
                 if (data.m_type != TensorDataType::float16) throw std::invalid_argument(op.m_type + ": wrong data type of data.");
 
@@ -4915,6 +5962,19 @@ void Model::run()
                 ptr_data = data_data.data();
                 ptr_output = output.get_vector<uint16_t>().data();
             }
+            else
+            {
+                if (data.m_type != TensorDataType::int64) throw std::invalid_argument(op.m_type + ": wrong data type of data.");
+
+                auto& data_data = data.get_vector<int64_t>();
+
+                tensor_vector<int64_t> temp = create_tensor_vector<int64_t>(output_num_els);
+                output.set_vector(std::move(temp));
+
+                sizeof_element = sizeof(int64_t);
+                ptr_data = data_data.data();
+                ptr_output = output.get_vector<int64_t>().data();
+            }
 
             struct context
             {
@@ -4924,10 +5984,10 @@ void Model::run()
 
             context prl_ctx;
 
-            prl_ctx.start = start;
+            prl_ctx.start = start * (last_but_one ? data.m_shape.back() : 1);
 
-            prl_ctx.output_stride = output_shape.back();
-            prl_ctx.data_stride = data.m_shape.back();
+            prl_ctx.output_stride = output_shape.back() * (last_but_one ? output_shape[output_shape.size() - 2] : 1);
+            prl_ctx.data_stride = data.m_shape.back() * (last_but_one ? data.m_shape[data.m_shape.size() - 2] : 1);
 
             size_t num = output_num_els / prl_ctx.output_stride;
 
@@ -4944,7 +6004,7 @@ void Model::run()
 
             m_xnnpack->parallelize((void*)pfn, &prl_ctx, num);
 
-            if (!compare_shapes(output_shape, output.m_shape))
+            if (!check_output_shape(output_shape, output.m_shape))
                 throw std::invalid_argument(op.m_type + ": unexpected shape of output.");
 
             push_tensor(std::move(output));
@@ -4986,7 +6046,7 @@ void Model::run()
             if (shape_has_leading_1)
                 output_shape.insert(output_shape.begin(), 1);
 
-            if (!compare_shapes(output_shape, output.m_shape))
+            if (!check_output_shape(output_shape, output.m_shape))
                 throw std::invalid_argument(op.m_type + ": unexpected shape of output.");
 
             size_t output_num_els = 1;
@@ -5245,20 +6305,812 @@ void Model::run()
                 }
             }
 
-            if (!compare_shapes(output_shape, output.m_shape))
+            if (!check_output_shape(output_shape, output.m_shape))
                 throw std::invalid_argument(op.m_type + ": unexpected shape of output.");
 
             output.set_vector(std::move(output_data));
             push_tensor(std::move(output));
         }
+        else if (op.m_type == "Shape")
+        {
+            if (op.m_input.size() != 1) throw std::invalid_argument(op.m_type + ": wrong number of inputs.");
+            if (op.m_output.size() != 1) throw std::invalid_argument(op.m_type + ": wrong number of outputs.");
+
+            auto& input = get_tensor_data(op.m_input[0]);
+            auto& output = op.m_output[0];
+
+            if (op.m_attributes.size())
+                throw std::invalid_argument(op.m_type + ": unrecognized attribute (not implemented).");
+
+            if (input.m_shape.size() == 0)
+                throw std::invalid_argument(op.m_type + ": shape of input not available.");
+
+            std::vector<size_t> output_shape({ input.m_shape.size() });
+
+            size_t output_num_els = 1;
+            for (auto& s : output_shape)
+                output_num_els *= s;
+
+            tensor_vector<int64_t> output_data = create_tensor_vector<int64_t>(output_num_els);
+
+            for (size_t i = 0; i < output_num_els; i++)
+                output_data[i] = input.m_shape[i];
+
+            if (!check_output_shape(output_shape, output.m_shape))
+                throw std::invalid_argument(op.m_type + ": unexpected shape of output.");
+
+            output.set_vector(std::move(output_data));
+            push_tensor(std::move(output));
+        }
+        else if (op.m_type == "Equal")
+        {
+            if (op.m_input.size() != 2) throw std::invalid_argument(op.m_type + ": wrong number of inputs.");
+            if (op.m_output.size() != 1) throw std::invalid_argument(op.m_type + ": wrong number of outputs.");
+
+            auto& input_0 = get_tensor_data(op.m_input[0]);
+            auto& input_1 = get_tensor_data(op.m_input[1]);
+            auto& output = op.m_output[0];
+
+            if (op.m_attributes.size())
+                throw std::invalid_argument(op.m_type + ": unrecognized attribute (not implemented).");
+
+            if (!compare_shapes(input_0.m_shape, input_1.m_shape))
+                throw std::invalid_argument(op.m_type + ": shapes of A and B not equal (broadcasting not implemented).");
+
+            if (input_0.m_type != TensorDataType::int64) throw std::invalid_argument(op.m_type + ": wrong data type of A (not implemented).");
+            if (input_1.m_type != TensorDataType::int64) throw std::invalid_argument(op.m_type + ": wrong data type of B (not implemented).");
+
+            auto& input_0_data = input_0.get_vector<int64_t>();
+            auto& input_1_data = input_1.get_vector<int64_t>();
+
+            std::vector<size_t> output_shape(input_0.m_shape);
+
+            size_t output_num_els = 1;
+            for (auto& s : output_shape)
+                output_num_els *= s;
+
+            tensor_vector<int64_t> output_data = create_tensor_vector<int64_t>(output_num_els);
+
+            for (size_t i = 0; i < output_num_els; i++)
+                output_data[i] = input_0_data[i] == input_1_data[i] ? 1 : 0;
+
+            if (!check_output_shape(output_shape, output.m_shape))
+                throw std::invalid_argument(op.m_type + ": unexpected shape of output.");
+
+            output.set_vector(std::move(output_data));
+            push_tensor(std::move(output));
+        }
+        else if (op.m_type == "Where")
+        {
+            if (op.m_input.size() != 3) throw std::invalid_argument(op.m_type + ": wrong number of inputs.");
+            if (op.m_output.size() != 1) throw std::invalid_argument(op.m_type + ": wrong number of outputs.");
+
+            auto& input_0 = get_tensor_data(op.m_input[0]);
+            auto& input_1 = get_tensor_data(op.m_input[1]);
+            auto& input_2 = get_tensor_data(op.m_input[2]);
+            auto& output = op.m_output[0];
+
+            if (op.m_attributes.size())
+                throw std::invalid_argument(op.m_type + ": unrecognized attribute (not implemented).");
+
+            bool input_0_scalar = input_0.m_shape.size() == 0;
+            bool input_1_scalar = input_1.m_shape.size() == 0;
+            bool input_2_scalar = input_2.m_shape.size() == 0;
+
+            if (input_0_scalar)
+                throw std::invalid_argument(op.m_type + ": condition cannot be a scalar (not implemented).");
+
+            if ((!input_1_scalar && !compare_shapes(input_0.m_shape, input_1.m_shape)) ||
+                (!input_2_scalar && !compare_shapes(input_0.m_shape, input_2.m_shape)))
+                throw std::invalid_argument(op.m_type + ": shapes of condition, A and/or B not equal (broadcasting not implemented).");
+
+            if (input_0.m_type != TensorDataType::int64) throw std::invalid_argument(op.m_type + ": wrong data type of condition (not implemented).");
+
+            auto& input_0_data = input_0.get_vector<int64_t>();
+
+            std::vector<size_t> output_shape(input_0.m_shape);
+
+            size_t output_num_els = 1;
+            for (auto& s : output_shape)
+                output_num_els *= s;
+
+            if (input_1.m_type == TensorDataType::int64)
+            {
+                if (input_1.m_type != TensorDataType::int64) throw std::invalid_argument(op.m_type + ": wrong data type of A (not implemented).");
+                if (input_2.m_type != TensorDataType::int64) throw std::invalid_argument(op.m_type + ": wrong data type of B (not implemented).");
+
+                auto& input_1_data = input_1.get_vector<int64_t>();
+                auto& input_2_data = input_2.get_vector<int64_t>();
+
+                tensor_vector<int64_t> output_data = create_tensor_vector<int64_t>(output_num_els);
+
+                for (size_t i = 0; i < output_num_els; i++)
+                    output_data[i] = input_0_data[i] ? input_1_data[input_1_scalar ? 0 : i] : input_2_data[input_2_scalar ? 0 : i];
+
+                output.set_vector(std::move(output_data));
+            }
+            else if (input_1.m_type == TensorDataType::float32)
+            {
+                if (input_1.m_type != TensorDataType::float32) throw std::invalid_argument(op.m_type + ": wrong data type of A (not implemented).");
+                if (input_2.m_type != TensorDataType::float32) throw std::invalid_argument(op.m_type + ": wrong data type of B (not implemented).");
+
+                auto& input_1_data = input_1.get_vector<float>();
+                auto& input_2_data = input_2.get_vector<float>();
+
+                tensor_vector<float> output_data = create_tensor_vector<float>(output_num_els);
+
+                for (size_t i = 0; i < output_num_els; i++)
+                    output_data[i] = input_0_data[i] ? input_1_data[input_1_scalar ? 0 : i] : input_2_data[input_2_scalar ? 0 : i];
+
+                output.set_vector(std::move(output_data));
+            }
+            else if (input_1.m_type == TensorDataType::float16)
+            {
+                if (input_1.m_type != TensorDataType::float16) throw std::invalid_argument(op.m_type + ": wrong data type of A (not implemented).");
+                if (input_2.m_type != TensorDataType::float16) throw std::invalid_argument(op.m_type + ": wrong data type of B (not implemented).");
+
+                auto& input_1_data = input_1.get_vector<uint16_t>();
+                auto& input_2_data = input_2.get_vector<uint16_t>();
+
+                tensor_vector<uint16_t> output_data = create_tensor_vector<uint16_t>(output_num_els);
+
+                for (size_t i = 0; i < output_num_els; i++)
+                    output_data[i] = input_0_data[i] ? input_1_data[input_1_scalar ? 0 : i] : input_2_data[input_2_scalar ? 0 : i];
+
+                output.set_vector(std::move(output_data));
+            }
+            else
+                throw std::invalid_argument(op.m_type + ": wrong data type of A and/or B (not implemented).");
+
+            if (!check_output_shape(output_shape, output.m_shape))
+                throw std::invalid_argument(op.m_type + ": unexpected shape of output.");
+
+            push_tensor(std::move(output));
+        }
+        else if (op.m_type == "Expand")
+        {
+            if (op.m_input.size() != 2) throw std::invalid_argument(op.m_type + ": wrong number of inputs.");
+            if (op.m_output.size() != 1) throw std::invalid_argument(op.m_type + ": wrong number of outputs.");
+
+            auto& input = get_tensor_data(op.m_input[0]);
+            auto& shape = get_tensor_data(op.m_input[1]);
+            auto& output = op.m_output[0];
+
+            if (op.m_attributes.size())
+                throw std::invalid_argument(op.m_type + ": unrecognized attribute (not implemented).");
+
+            if (shape.m_shape.size() != 1)
+                throw std::invalid_argument(op.m_type + ": shape must be 1D.");
+            if (input.m_shape.size() == 0)
+                throw std::invalid_argument(op.m_type + ": invalid shape of input.");
+            if (input.m_shape.size() != shape.m_shape[0])
+                throw std::invalid_argument(op.m_type + ": shape of input not matching 'shape'.");
+
+            if (shape.m_type != TensorDataType::int64) throw std::invalid_argument(op.m_type + ": wrong data type of shape.");
+
+            auto& shape_data = shape.get_vector<int64_t>();
+
+            size_t last_dim = -1;
+
+            for (size_t i = 0; i < shape_data.size(); i++)
+            {
+                int64_t dimi = (int64_t)input.m_shape[i];
+                int64_t dimo = shape_data[i];
+
+                if (dimi <= 0 || dimo <= 0)
+                    throw std::invalid_argument(op.m_type + ": dimension <= 0.");
+                if (dimi > dimo)
+                    throw std::invalid_argument(op.m_type + ": input dimension > output dimension.");
+                if (dimi != dimo)
+                {
+                    if (dimi != 1)
+                        throw std::invalid_argument(op.m_type + ": invalid input dimension.");
+                    last_dim = i;
+                }
+            }
+
+            std::vector<size_t> output_shape;
+            for (auto& d : shape_data)
+                output_shape.push_back((size_t)d);
+
+            size_t output_num_els = 1;
+            for (auto& s : output_shape)
+                output_num_els *= s;
+
+            size_t sizeof_element = 0;
+            void* input_data = nullptr;
+            void* output_data = nullptr;
+            size_t input_data_size = 0;
+
+            if (input.m_type == TensorDataType::int64)
+            {
+                if (input.m_type != TensorDataType::int64) throw std::invalid_argument(op.m_type + ": wrong data type of input (not implemented).");
+
+                sizeof_element = sizeof(int64_t);
+
+                auto& input_vec = input.get_vector<int64_t>();
+                input_data = input_vec.data();
+                input_data_size = input_vec.size();
+
+                tensor_vector<int64_t> output_vec = create_tensor_vector<int64_t>(output_num_els);
+                output.set_vector(std::move(output_vec));
+                output_data = output.get_vector<int64_t>().data();
+            }
+            else if (input.m_type == TensorDataType::float32)
+            {
+                if (input.m_type != TensorDataType::float32) throw std::invalid_argument(op.m_type + ": wrong data type of input (not implemented).");
+
+                sizeof_element = sizeof(float);
+
+                auto& input_vec = input.get_vector<float>();
+                input_data = input_vec.data();
+                input_data_size = input_vec.size();
+
+                tensor_vector<float> output_vec = create_tensor_vector<float>(output_num_els);
+                output.set_vector(std::move(output_vec));
+                output_data = output.get_vector<float>().data();
+            }
+            else
+            {
+                if (input.m_type != TensorDataType::float16) throw std::invalid_argument(op.m_type + ": wrong data type of input (not implemented).");
+
+                sizeof_element = sizeof(uint16_t);
+
+                auto& input_vec = input.get_vector<uint16_t>();
+                input_data = input_vec.data();
+                input_data_size = input_vec.size();
+
+                tensor_vector<uint16_t> output_vec = create_tensor_vector<uint16_t>(output_num_els);
+                output.set_vector(std::move(output_vec));
+                output_data = output.get_vector<uint16_t>().data();
+            }
+
+            if (last_dim == -1)
+            {
+                if (input_data_size != output_num_els)
+                    throw std::invalid_argument(op.m_type + ": input and output vector size mismatch.");
+
+                memcpy(output_data, input_data, input_data_size * sizeof_element);
+            }
+            else
+            {
+                struct context
+                {
+                    size_t num_elements, sizeof_element, pos_src, pos_dst, num_copies;
+                    void* input_data, * output_data;
+                };
+
+                std::vector<context> work_items;
+
+                std::vector<size_t> s = output_shape;
+                size_t pos_dst = 0;
+
+                size_t num_elements = 1;
+                for (size_t i = last_dim + 1; i < input.m_shape.size(); i++)
+                    num_elements *= input.m_shape[i];
+
+                std::function<void(size_t, size_t)> expand = [&](size_t dim, size_t val)
+                {
+                    if (dim != -1) s[dim] = val;
+                    dim++;
+
+                    if (dim < last_dim)
+                    {
+                        for (size_t i = 0; i < output_shape[dim]; i++)
+                            expand(dim, i);
+                    }
+                    else
+                    {
+                        size_t num_copies = output_shape[dim];
+
+                        size_t pos_src = 0;
+                        for (size_t i = 0; i <= last_dim; i++)
+                        {
+                            size_t m = s[i];
+                            if (m && m < input.m_shape[i])
+                            {
+                                for (size_t j = i + 1; j < input.m_shape.size(); j++)
+                                    m *= input.m_shape[j];
+
+                                pos_src += m;
+                            }
+                        }
+
+                        context prl_ctx;
+
+                        prl_ctx.num_elements = num_elements;
+                        prl_ctx.sizeof_element = sizeof_element;
+                        prl_ctx.pos_src = pos_src;
+                        prl_ctx.pos_dst = pos_dst;
+                        prl_ctx.input_data = input_data;
+                        prl_ctx.output_data = output_data;
+                        prl_ctx.num_copies = num_copies;
+
+                        work_items.push_back(prl_ctx);
+
+                        pos_dst += num_elements * num_copies;
+                    }
+                };
+
+                expand(-1, 0);
+
+                if (pos_dst != output_num_els)
+                    throw std::invalid_argument(op.m_type + ": pointer error.");
+
+                void (*pfn)(context*, size_t) = nullptr;
+
+                pfn = [](context* _, size_t x)
+                {
+                    _ += x;
+
+                    size_t n = _->num_elements * _->sizeof_element;
+
+                    for (size_t i = 0; i < _->num_copies; i++)
+                    {
+                        memcpy((uint8_t*)_->output_data + _->pos_dst * _->sizeof_element + n * i,
+                            (uint8_t*)_->input_data + _->pos_src * _->sizeof_element,
+                            n);
+                    }
+                };
+
+                m_xnnpack->parallelize((void*)pfn, work_items.data(), work_items.size());
+            }
+
+            if (!check_output_shape(output_shape, output.m_shape))
+                throw std::invalid_argument(op.m_type + ": unexpected shape of output.");
+
+            push_tensor(std::move(output));
+        }
+        else if (op.m_type == "Cast")
+        {
+            if (op.m_input.size() != 1) throw std::invalid_argument(op.m_type + ": wrong number of inputs.");
+            if (op.m_output.size() != 1) throw std::invalid_argument(op.m_type + ": wrong number of outputs.");
+
+            auto& input = get_tensor_data(op.m_input[0], false /* make_copy */, true /* requires_float */);
+            auto& output = op.m_output[0];
+
+            int to = -1;
+
+            for (auto& a : op.m_attributes)
+                if (a.first == "to")
+                {
+                    to = std::stoi(a.second);
+                }
+                else
+                    throw std::invalid_argument(op.m_type + ": unrecognized attribute (not implemented).");
+
+            if (to == -1)
+                throw std::invalid_argument(op.m_type + ": 'to' attribute not found.");
+
+            std::vector<size_t> output_shape(input.m_shape);
+
+            size_t output_num_els = 1;
+            for (auto& s : output_shape)
+                output_num_els *= s;
+
+            if (to == 1 /* FLOAT */)
+            {
+                if (input.m_type != TensorDataType::int64) throw std::invalid_argument(op.m_type + ": wrong data type of input (not implemented).");
+
+                auto& input_data = input.get_vector<int64_t>();
+
+                tensor_vector<float> output_data = create_tensor_vector<float>(output_num_els);
+
+                for (size_t i = 0; i < output_num_els; i++)
+                    output_data[i] = (float)input_data[i];
+
+                output.set_vector(std::move(output_data));
+            }
+            else if (to == 9 /* BOOL */ || to == 7 /* INT64 */)
+            {
+                if (input.m_type != TensorDataType::float32) throw std::invalid_argument(op.m_type + ": wrong data type of input (not implemented).");
+
+                auto& input_data = input.get_vector<float>();
+
+                tensor_vector<int64_t> output_data = create_tensor_vector<int64_t>(output_num_els);
+
+                for (size_t i = 0; i < output_num_els; i++)
+                    output_data[i] = (int64_t)input_data[i];
+
+                output.set_vector(std::move(output_data));
+            }
+            else
+                throw std::invalid_argument(op.m_type + ": requested cast not implemented.");
+
+            if (!check_output_shape(output_shape, output.m_shape))
+                throw std::invalid_argument(op.m_type + ": unexpected shape of output.");
+
+            push_tensor(std::move(output));
+        }
+        else if (op.m_type == "Squeeze")
+        {
+            if (op.m_input.size() != 2) throw std::invalid_argument(op.m_type + ": wrong number of inputs.");
+            if (op.m_output.size() != 1) throw std::invalid_argument(op.m_type + ": wrong number of outputs.");
+
+            auto& data = get_tensor_data(op.m_input[0], true /* make_copy */);
+            auto& axes = get_tensor_data(op.m_input[1]);
+            auto& output = op.m_output[0];
+
+            if (axes.m_type != TensorDataType::int64) throw std::invalid_argument(op.m_type + ": wrong data type of axes.");
+
+            auto& axes_data = axes.get_vector<int64_t>();
+
+            if (axes_data.size() == 0)
+                throw std::invalid_argument(op.m_type + ": axes cannot be empty (not implemented).");
+
+            int rank = data.m_shape.size();
+
+            for (auto& a : axes_data)
+            {
+                if (a < 0)
+                    a = rank + a;
+                if (a < 0 || a >= rank)
+                    throw std::invalid_argument(op.m_type + ": wrong data in axes.");
+            }
+
+            std::sort(axes_data.begin(), axes_data.end(), std::greater<>());
+
+            int64_t prev = -1;
+            for (auto& a : axes_data)
+            {
+                if (a == prev)
+                    throw std::invalid_argument(op.m_type + ": duplicate value in axes.");
+                else
+                    prev = a;
+
+                if (a >= data.m_shape.size())
+                    throw std::invalid_argument(op.m_type + ": wrong data in axes.");
+
+                data.m_shape.erase(data.m_shape.begin() + a);
+            }
+
+            if (!check_output_shape(data.m_shape, output.m_shape))
+                throw std::invalid_argument(op.m_type + ": unexpected shape of output.");
+
+            output.m_type = data.m_type;
+            output.m_data = std::move(data.m_data);
+
+            push_tensor(std::move(output));
+        }
+        else if (op.m_type == "Neg")
+        {
+            if (op.m_input.size() != 1) throw std::invalid_argument(op.m_type + ": wrong number of inputs.");
+            if (op.m_output.size() != 1) throw std::invalid_argument(op.m_type + ": wrong number of outputs.");
+
+            auto& input = get_tensor_data(op.m_input[0]);
+            auto& output = op.m_output[0];
+
+            if (input.m_type == TensorDataType::float32)
+            {
+                if (input.m_type != TensorDataType::float32) throw std::invalid_argument(op.m_type + ": wrong data type of input.");
+
+                auto& input_data = input.get_vector<float>();
+
+                std::vector<size_t> minus_1_shape({ 1 });
+                tensor_vector<float> minus_1_data = create_tensor_vector<float>(1);
+                minus_1_data[0] = -1;
+
+                auto result = m_xnnpack->multiply(input.m_shape, input_data.data(), minus_1_shape, minus_1_data.data());
+
+                if (!check_output_shape(result.first, output.m_shape))
+                    throw std::invalid_argument(op.m_type + ": unexpected shape of output.");
+
+                output.set_vector(std::move(result.second));
+            }
+            else
+            {
+                if (input.m_type != TensorDataType::float16) throw std::invalid_argument(op.m_type + ": wrong data type of input.");
+
+                auto& input_data = input.get_vector<uint16_t>();
+
+                std::vector<size_t> minus_1_shape({ 1 });
+                tensor_vector<uint16_t> minus_1_data = create_tensor_vector<uint16_t>(1);
+                minus_1_data[0] = 0b1011110000000000;
+
+                auto result = m_xnnpack->multiply(input.m_shape, input_data.data(), minus_1_shape, minus_1_data.data());
+
+                if (!check_output_shape(result.first, output.m_shape))
+                    throw std::invalid_argument(op.m_type + ": unexpected shape of output.");
+
+                output.set_vector(std::move(result.second));
+            }
+
+            push_tensor(std::move(output));
+        }
+        else if (op.m_type == "ConstantOfShape")
+        {
+            if (op.m_input.size() != 1) throw std::invalid_argument(op.m_type + ": wrong number of inputs.");
+            if (op.m_output.size() != 1) throw std::invalid_argument(op.m_type + ": wrong number of outputs.");
+
+            auto& input = get_tensor_data(op.m_input[0]);
+            auto& output = op.m_output[0];
+
+            std::string value;
+
+            for (auto& a : op.m_attributes)
+                if (a.first == "value")
+                    value = a.second;
+                else
+                    throw std::invalid_argument(op.m_type + ": unrecognized attribute (not implemented).");
+
+            if (value.size() == 0)
+                throw std::invalid_argument(op.m_type + ": 'value' attribute not specified (not implemented).");
+
+            if (input.m_shape.size() != 1)
+                throw std::invalid_argument(op.m_type + ": input must be 1D.");
+
+            if (input.m_type != TensorDataType::int64) throw std::invalid_argument(op.m_type + ": wrong data type of input.");
+
+            auto& input_data = input.get_vector<int64_t>();
+
+            std::vector<size_t> output_shape;
+            for (auto& d : input_data)
+                output_shape.push_back((size_t)d);
+
+            size_t output_num_els = 1;
+            for (auto& s : output_shape)
+                output_num_els *= s;
+
+            tensor_vector<float> output_data = create_tensor_vector<float>(output_num_els);
+
+            float v = std::stof(value);
+            for (size_t i = 0; i < output_num_els; i++)
+                output_data[i] = v;
+
+            if (!check_output_shape(output_shape, output.m_shape))
+                throw std::invalid_argument(op.m_type + ": unexpected shape of output.");
+
+            output.set_vector(std::move(output_data));
+            push_tensor(std::move(output));
+        }
+        else if (op.m_type == "Range")
+        {
+            if (op.m_input.size() != 3) throw std::invalid_argument(op.m_type + ": wrong number of inputs.");
+            if (op.m_output.size() != 1) throw std::invalid_argument(op.m_type + ": wrong number of outputs.");
+
+            auto& start = get_tensor_data(op.m_input[0]);
+            auto& limit = get_tensor_data(op.m_input[1]);
+            auto& delta = get_tensor_data(op.m_input[2]);
+            auto& output = op.m_output[0];
+
+            if (op.m_attributes.size())
+                throw std::invalid_argument(op.m_type + ": unrecognized attribute (not implemented).");
+
+            if (start.m_shape.size() != 0) throw std::invalid_argument(op.m_type + ": start must be a scalar.");
+            if (limit.m_shape.size() != 0) throw std::invalid_argument(op.m_type + ": limit must be a scalar.");
+            if (delta.m_shape.size() != 0) throw std::invalid_argument(op.m_type + ": delta must be a scalar.");
+
+            if (start.m_type != TensorDataType::int64) throw std::invalid_argument(op.m_type + ": wrong data type of start (not implemented).");
+            if (limit.m_type != TensorDataType::int64) throw std::invalid_argument(op.m_type + ": wrong data type of limit (not implemented).");
+            if (delta.m_type != TensorDataType::int64) throw std::invalid_argument(op.m_type + ": wrong data type of delta (not implemented).");
+
+            auto& start_data = start.get_vector<int64_t>();
+            auto& limit_data = limit.get_vector<int64_t>();
+            auto& delta_data = delta.get_vector<int64_t>();
+
+            int64_t s = start_data[0];
+            int64_t l = limit_data[0];
+            int64_t d = delta_data[0];
+
+            if (d != 1)
+                throw std::invalid_argument(op.m_type + ": delta must be 1 (not implemented).");
+            if (s >= l)
+                throw std::invalid_argument(op.m_type + ": start must be less than limit.");
+
+            size_t output_num_els = l - s;
+            std::vector<size_t> output_shape({ output_num_els });
+
+            tensor_vector<int64_t> output_data = create_tensor_vector<int64_t>(output_num_els);
+
+            for (size_t i = 0; i < output_num_els; i++)
+                output_data[i] = s + i;
+
+            if (!check_output_shape(output_shape, output.m_shape))
+                throw std::invalid_argument(op.m_type + ": unexpected shape of output.");
+
+            output.set_vector(std::move(output_data));
+            push_tensor(std::move(output));
+        }
+        else if (op.m_type == "Less")
+        {
+            if (op.m_input.size() != 2) throw std::invalid_argument(op.m_type + ": wrong number of inputs.");
+            if (op.m_output.size() != 1) throw std::invalid_argument(op.m_type + ": wrong number of outputs.");
+
+            auto& input_0 = get_tensor_data(op.m_input[0]);
+            auto& input_1 = get_tensor_data(op.m_input[1]);
+            auto& output = op.m_output[0];
+
+            if (op.m_attributes.size())
+                throw std::invalid_argument(op.m_type + ": unrecognized attribute (not implemented).");
+
+            if (input_0.m_type != TensorDataType::int64) throw std::invalid_argument(op.m_type + ": wrong data type of A (not implemented).");
+            if (input_1.m_type != TensorDataType::int64) throw std::invalid_argument(op.m_type + ": wrong data type of B (not implemented).");
+
+            auto& input_0_data = input_0.get_vector<int64_t>();
+            auto& input_1_data = input_1.get_vector<int64_t>();
+
+            tensor_vector<int64_t> output_data;
+            std::vector<size_t> output_shape;
+
+            if (compare_shapes(input_0.m_shape, input_1.m_shape))
+            {
+                output_shape = input_0.m_shape;
+
+                size_t output_num_els = 1;
+                for (auto& s : output_shape)
+                    output_num_els *= s;
+
+                output_data = create_tensor_vector<int64_t>(output_num_els);
+
+                for (size_t i = 0; i < output_num_els; i++)
+                    output_data[i] = input_0_data[i] < input_1_data[i] ? 1 : 0;
+            }
+            else if (input_0.m_shape.size() == 1 &&
+                input_1.m_shape.size() == 2 &&
+                input_1.m_shape[1] == 1)
+            {
+                size_t w = input_0.m_shape[0];
+                size_t h = input_1.m_shape[0];
+
+                output_shape = { h, w };
+
+                size_t output_num_els = 1;
+                for (auto& s : output_shape)
+                    output_num_els *= s;
+
+                output_data = create_tensor_vector<int64_t>(output_num_els);
+
+                size_t i = 0;
+                for (size_t y = 0; y < h; y++)
+                    for (size_t x = 0; x < w; x++)
+                        output_data[i++] = input_0_data[x] < input_1_data[y] ? 1 : 0;
+            }
+            else
+            {
+                throw std::invalid_argument(op.m_type + ": shapes of A and B not compatible (not implemented).");
+            }
+
+            if (!check_output_shape(output_shape, output.m_shape))
+                throw std::invalid_argument(op.m_type + ": unexpected shape of output.");
+
+            output.set_vector(std::move(output_data));
+            push_tensor(std::move(output));
+        }
+        else if (op.m_type == "ScaledDotProductAttention")
+        {
+            if (op.m_input.size() != 5) throw std::invalid_argument(op.m_type + ": wrong number of inputs.");
+            if (op.m_output.size() != 1) throw std::invalid_argument(op.m_type + ": wrong number of outputs.");
+
+            auto& q = get_tensor_data(op.m_input[0]);
+            auto& k = get_tensor_data(op.m_input[1]);
+            auto& s = get_tensor_data(op.m_input[2]);
+            auto& m = get_tensor_data(op.m_input[3]);
+            auto& v = get_tensor_data(op.m_input[4]);
+            auto& output = op.m_output[0];
+
+            if (q.m_shape.size() != 4) throw std::invalid_argument(op.m_type + ": invalid shape of query.");
+            if (k.m_shape.size() != 4) throw std::invalid_argument(op.m_type + ": invalid shape of key.");
+            if (v.m_shape.size() != 4) throw std::invalid_argument(op.m_type + ": invalid shape of value.");
+
+            if (s.m_shape.size() != 0)
+                throw std::invalid_argument(op.m_type + ": invalid shape of scale.");
+            if (m.m_shape.size() != 2 && !(m.m_shape.size() == 4 && m.m_shape[0] == 1 && m.m_shape[1] == 1))
+                throw std::invalid_argument(op.m_type + ": invalid shape of mask.");
+
+            size_t batch_size = q.m_shape[0];
+            size_t query_heads = q.m_shape[1];
+            size_t query_tokens = q.m_shape[2];
+            size_t query_key_channels = q.m_shape[3];
+            size_t key_value_heads = k.m_shape[1];
+            size_t key_value_tokens = k.m_shape[2];
+            size_t value_channels = v.m_shape[3];
+
+            if (q.m_type == TensorDataType::float32)
+            {
+                if (q.m_type != TensorDataType::float32) throw std::invalid_argument(op.m_type + ": wrong data type of query.");
+                if (k.m_type != TensorDataType::float32) throw std::invalid_argument(op.m_type + ": wrong data type of key.");
+                if (v.m_type != TensorDataType::float32) throw std::invalid_argument(op.m_type + ": wrong data type of value.");
+                if (s.m_type != TensorDataType::float32) throw std::invalid_argument(op.m_type + ": wrong data type of scale.");
+                if (m.m_type != TensorDataType::float32) throw std::invalid_argument(op.m_type + ": wrong data type of mask.");
+
+                auto& q_data = q.get_vector<float>();
+                auto& k_data = k.get_vector<float>();
+                auto& v_data = v.get_vector<float>();
+                auto& s_data = s.get_vector<float>();
+                auto& m_data = m.get_vector<float>();
+
+                auto inv_s_data = tensor_vector<float>(query_key_channels, 1.0f / s_data[0]);
+
+                auto result = m_xnnpack->scaled_dot_product_attention<float>(
+                    q_data, k_data, v_data,
+                    inv_s_data, m_data,
+                    batch_size, query_heads, query_tokens,
+                    key_value_heads, key_value_tokens,
+                    query_key_channels, value_channels);
+
+                if (!check_output_shape(result.first, output.m_shape))
+                    throw std::invalid_argument(op.m_type + ": unexpected shape of output.");
+
+                output.set_vector(std::move(result.second));
+            }
+            else
+            {
+                if (q.m_type != TensorDataType::float16) throw std::invalid_argument(op.m_type + ": wrong data type of query.");
+                if (k.m_type != TensorDataType::float16) throw std::invalid_argument(op.m_type + ": wrong data type of key.");
+                if (v.m_type != TensorDataType::float16) throw std::invalid_argument(op.m_type + ": wrong data type of value.");
+                if (s.m_type != TensorDataType::float16) throw std::invalid_argument(op.m_type + ": wrong data type of scale.");
+                if (m.m_type != TensorDataType::float16) throw std::invalid_argument(op.m_type + ": wrong data type of mask.");
+
+                auto& q_data = q.get_vector<uint16_t>();
+                auto& k_data = k.get_vector<uint16_t>();
+                auto& v_data = v.get_vector<uint16_t>();
+                auto& s_data = s.get_vector<uint16_t>();
+                auto& m_data = m.get_vector<uint16_t>();
+
+                float val = 0;
+                if (!m_xnnpack->convert<uint16_t, float>(s_data.data(), &val, 1))
+                    throw std::invalid_argument(op.m_type + ": fp16 to fp32 conversion error.");
+
+                val = 1.0f / val;
+                uint16_t inv = 0;
+                if (!m_xnnpack->convert<float, uint16_t>(&val, &inv, 1))
+                    throw std::invalid_argument(op.m_type + ": fp32 to fp16 conversion error.");
+
+                auto inv_s_data = tensor_vector<uint16_t>(query_key_channels, inv);
+
+                auto result = m_xnnpack->scaled_dot_product_attention<uint16_t>(
+                    q_data, k_data, v_data,
+                    inv_s_data, m_data,
+                    batch_size, query_heads, query_tokens,
+                    key_value_heads, key_value_tokens,
+                    query_key_channels, value_channels);
+
+                if (!check_output_shape(result.first, output.m_shape))
+                    throw std::invalid_argument(op.m_type + ": unexpected shape of output.");
+
+                output.set_vector(std::move(result.second));
+            }
+
+            push_tensor(std::move(output));
+        }
         else
             throw std::invalid_argument("Operator not implemented: " + op.m_type + ".");
+
+        if (m_ops_times_printf)
+        {
+            std::chrono::duration<double, std::milli> t = std::chrono::high_resolution_clock::now() - hrc_now;
+
+            static std::map<std::string, double> m0;
+
+            m0[op.m_type] += t.count();
+
+            if (m_ops_queue.size() == 1)
+            {
+                printf("\033[7m > \033[0m");
+                for (auto& e : m0)
+                    printf(" %s:%f,", e.first.c_str(), e.second / 10);
+                m0.clear();
+            }
+        }
     }
 
     for (auto& t : m_data)
     {
+        switch (t.m_type)
+        {
+        case TensorDataType::float16:
+            m_xnnpack->m_cublas_ops.ensure_is_ready(t.get_vector<uint16_t>().data());
+            break;
+        case TensorDataType::float32:
+            m_xnnpack->m_cublas_ops.ensure_is_ready(t.get_vector<float>().data());
+            break;
+        }
+
         if (t.m_next_part)
             throw std::invalid_argument("Model::run: multipart tensors are intended to be used internally.");
+
+        if (m_outputs_convert_set.size() && !m_outputs_convert_set.contains(t.m_name))
+            continue;
 
         if (t.m_type == TensorDataType::uint8)
         {
@@ -5270,7 +7122,7 @@ void Model::run()
             auto data_fp32 = m_xnnpack->convert<uint16_t, float>(data);
             t.set_vector<float>(std::move(data_fp32));
         }
-        else if (t.m_type != TensorDataType::float32)
+        else if (t.m_type != TensorDataType::float32 && t.m_type != TensorDataType::int64)
             throw std::invalid_argument("Model::run: invalid type of output tensor.");
 
         if (t.m_layout == TensorDataLayout::nhwc)
@@ -5286,6 +7138,11 @@ void Model::run()
             t.m_shape = std::move(result.first);
         }
     }
+
+    if (m_first_run && m_use_scaled_dp_attn_op && !m_scaled_dp_attn_op_used)
+        throw std::invalid_argument("Model::run: m_use_scaled_dp_attn_op is true but operator not used.");
+
+    m_xnnpack->m_cublas_ops.check_buffers_health();
 }
 
 }

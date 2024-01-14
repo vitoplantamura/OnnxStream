@@ -1,5 +1,6 @@
 ﻿#### News 📣
 
+- January 14, 2024: Added LLM chat application (**TinyLlama 1.1B and Mistral 7B**) with initial GPU support! More info [here](https://github.com/vitoplantamura/OnnxStream/blob/master/assets/LLM.md).
 - December 14, 2023: Added support for **Stable Diffusion XL Turbo 1.0**! (thanks to @AeroX2)
 - October 3, 2023: Added support for **Stable Diffusion XL 1.0 Base**!
 
@@ -9,6 +10,7 @@
 - **[Stable Diffusion 1.5](https://github.com/vitoplantamura/OnnxStream#stable-diffusion-15)**
 - **[Stable Diffusion XL 1.0 Base](https://github.com/vitoplantamura/OnnxStream#stable-diffusion-xl-10-base)**
 - **[Stable Diffusion XL Turbo 1.0](https://github.com/vitoplantamura/OnnxStream#stable-diffusion-xl-turbo-10)**
+- **[TinyLlama 1.1B and Mistral 7B](https://github.com/vitoplantamura/OnnxStream/blob/master/assets/LLM.md)**
 - [Features of OnnxStream](https://github.com/vitoplantamura/OnnxStream#features-of-onnxstream)
 - [Performance](https://github.com/vitoplantamura/OnnxStream#performance)
 - [Attention Slicing and Quantization](https://github.com/vitoplantamura/OnnxStream#attention-slicing-and-quantization)
@@ -107,10 +109,11 @@ A comparison between SDXL 1.0 and SDXL Turbo run in OnnxStream with respect to t
 - Static quantization (W8A8 unsigned, asymmetric, percentile)
 - Easy calibration of a quantized model
 - FP16 support (with or without FP16 arithmetic)
-- 25 ONNX operators implemented (the most common)
-- Operations executed sequentially but all operators are multithreaded
+- 35 ONNX operators implemented (the most common)
+- Operations executed sequentially but ~~all~~ most operators are multithreaded
 - Single implementation file + header file
 - XNNPACK calls wrapped in the `XnnPack` class (for future replacement)
+- Initial GPU support (cuBLAS)
 
 OnnxStream depends on [XNNPACK](https://github.com/google/XNNPACK) for some (accelerated) primitives: MatMul, Convolution, element-wise Add/Sub/Mul/Div, Sigmoid and Softmax.
 
@@ -223,8 +226,7 @@ Since the function prototypes of XnnPack can change at any time, I've included a
 ```
 git clone https://github.com/google/XNNPACK.git
 cd XNNPACK
-git rev-list -n 1 --before="2023-06-27 00:00" master
-git checkout <COMMIT_ID_FROM_THE_PREVIOUS_COMMAND>
+git checkout 579de32260742a24166ecd13213d2e60af862675
 mkdir build
 cd build
 cmake -DXNNPACK_BUILD_TESTS=OFF -DXNNPACK_BUILD_BENCHMARKS=OFF ..
@@ -241,7 +243,7 @@ cd OnnxStream
 cd src
 mkdir build
 cd build
-cmake -DMAX_SPEED=ON -DXNNPACK_DIR=<DIRECTORY_WHERE_XNNPACK_WAS_CLONED> ..
+cmake -DMAX_SPEED=ON -DOS_LLM=OFF -DOS_CUDA=OFF -DXNNPACK_DIR=<DIRECTORY_WHERE_XNNPACK_WAS_CLONED> ..
 cmake --build . --config Release
 ```
 
