@@ -6923,7 +6923,8 @@ void Model::run()
             output.set_vector(std::move(output_data));
             push_tensor(std::move(output));
         }
-        else if (op.m_type == "Less")
+        else if (op.m_type == "Less" ||
+            op.m_type == "Greater")
         {
             if (op.m_input.size() != 2) throw std::invalid_argument(op.m_type + ": wrong number of inputs.");
             if (op.m_output.size() != 1) throw std::invalid_argument(op.m_type + ": wrong number of outputs.");
@@ -6941,6 +6942,17 @@ void Model::run()
             auto& input_0_data = input_0.get_vector<int64_t>();
             auto& input_1_data = input_1.get_vector<int64_t>();
 
+            bool (*pcompare)(int64_t, int64_t) = nullptr;
+
+            if (op.m_type == "Less")
+            {
+                pcompare = [](int64_t a, int64_t b) -> bool { return a < b; };
+            }
+            else
+            {
+                pcompare = [](int64_t a, int64_t b) -> bool { return a > b; };
+            }
+
             tensor_vector<int64_t> output_data;
             std::vector<size_t> output_shape;
 
@@ -6955,7 +6967,7 @@ void Model::run()
                 output_data = create_tensor_vector<int64_t>(output_num_els);
 
                 for (size_t i = 0; i < output_num_els; i++)
-                    output_data[i] = input_0_data[i] < input_1_data[i] ? 1 : 0;
+                    output_data[i] = pcompare(input_0_data[i], input_1_data[i]) ? 1 : 0;
             }
             else if (input_0.m_shape.size() == 1 &&
                 input_1.m_shape.size() == 2 &&
@@ -6975,7 +6987,7 @@ void Model::run()
                 size_t i = 0;
                 for (size_t y = 0; y < h; y++)
                     for (size_t x = 0; x < w; x++)
-                        output_data[i++] = input_0_data[x] < input_1_data[y] ? 1 : 0;
+                        output_data[i++] = pcompare(input_0_data[x], input_1_data[y]) ? 1 : 0;
             }
             else
             {
