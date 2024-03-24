@@ -6703,14 +6703,26 @@ void Model::run()
             }
             else if (to == 9 /* BOOL */ || to == 7 /* INT64 */)
             {
-                if (input.m_type != TensorDataType::float32) throw std::invalid_argument(op.m_type + ": wrong data type of input (not implemented).");
-
-                auto& input_data = input.get_vector<float>();
-
                 tensor_vector<int64_t> output_data = create_tensor_vector<int64_t>(output_num_els);
 
-                for (size_t i = 0; i < output_num_els; i++)
-                    output_data[i] = (int64_t)input_data[i];
+                if (input.m_type == TensorDataType::float32)
+                {
+                    if (input.m_type != TensorDataType::float32) throw std::invalid_argument(op.m_type + ": wrong data type of input (not implemented).");
+
+                    auto& input_data = input.get_vector<float>();
+
+                    for (size_t i = 0; i < output_num_els; i++)
+                        output_data[i] = (int64_t)input_data[i];
+                }
+                else
+                {
+                    if (input.m_type != TensorDataType::int64) throw std::invalid_argument(op.m_type + ": wrong data type of input (not implemented).");
+
+                    auto& input_data = input.get_vector<int64_t>();
+
+                    for (size_t i = 0; i < output_num_els; i++)
+                        output_data[i] = input_data[i];
+                }
 
                 output.set_vector(std::move(output_data));
             }
@@ -7071,6 +7083,62 @@ void Model::run()
                 output.set_vector(std::move(result.second));
             }
 
+            push_tensor(std::move(output));
+        }
+        else if (op.m_type == "Trilu")
+        {
+            if (op.m_input.size() != 2) throw std::invalid_argument(op.m_type + ": wrong number of inputs.");
+            if (op.m_output.size() != 1) throw std::invalid_argument(op.m_type + ": wrong number of outputs.");
+
+            auto& input = get_tensor_data(op.m_input[0]);
+            auto& k_tensor = get_tensor_data(op.m_input[1]);
+            auto& output = op.m_output[0];
+
+            std::string upper = "1";
+
+            for (auto& a : op.m_attributes)
+                if (a.first == "upper")
+                    upper = a.second;
+                else
+                    throw std::invalid_argument(op.m_type + ": unrecognized attribute (not implemented).");
+
+            if (upper != "1")
+                throw std::invalid_argument(op.m_type + ": 'upper' must be 1 (not implemented).");
+
+            if (input.m_type != TensorDataType::float32) throw std::invalid_argument(op.m_type + ": wrong data type of input.");
+            if (k_tensor.m_type != TensorDataType::int64) throw std::invalid_argument(op.m_type + ": wrong data type of k.");
+
+            auto& input_data = input.get_vector<float>();
+            auto& k_data = k_tensor.get_vector<int64_t>();
+
+            if (input.m_shape.size() != 2)
+                throw std::invalid_argument(op.m_type + ": input must be 2D (not implemented).");
+            if (k_tensor.m_shape.size() != 0)
+                throw std::invalid_argument(op.m_type + ": second input (k) must be a scalar (not implemented).");
+
+            std::vector<size_t> output_shape = input.m_shape;
+
+            size_t output_num_els = 1;
+            for (auto& s : output_shape)
+                output_num_els *= s;
+
+            tensor_vector<float> output_data = create_tensor_vector<float>(output_num_els);
+
+            int w = (int)input.m_shape[1];
+            int h = (int)input.m_shape[0];
+            int k = (int)k_data[0];
+
+            for (int y = 0; y < h; y++)
+                for (int x = 0; x < w; x++)
+                {
+                    int index = y * w + x;
+                    output_data[index] = x - k >= y ? input_data[index] : 0;
+                }
+
+            if (!check_output_shape(output_shape, output.m_shape))
+                throw std::invalid_argument(op.m_type + ": unexpected shape of output.");
+
+            output.set_vector(std::move(output_data));
             push_tensor(std::move(output));
         }
         else
