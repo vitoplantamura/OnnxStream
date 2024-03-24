@@ -6348,7 +6348,7 @@ void Model::run()
             if (op.m_output.size() != 1) throw std::invalid_argument(op.m_type + ": wrong number of outputs.");
 
             auto& input_0 = get_tensor_data(op.m_input[0]);
-            auto& input_1 = get_tensor_data(op.m_input[1]);
+            auto& input_1 = get_tensor_data(op.m_input[1], false /* make_copy */, true /* requires_float */);
             auto& output = op.m_output[0];
 
             if (op.m_attributes.size())
@@ -6358,10 +6358,8 @@ void Model::run()
                 throw std::invalid_argument(op.m_type + ": shapes of A and B not equal (broadcasting not implemented).");
 
             if (input_0.m_type != TensorDataType::int64) throw std::invalid_argument(op.m_type + ": wrong data type of A (not implemented).");
-            if (input_1.m_type != TensorDataType::int64) throw std::invalid_argument(op.m_type + ": wrong data type of B (not implemented).");
 
             auto& input_0_data = input_0.get_vector<int64_t>();
-            auto& input_1_data = input_1.get_vector<int64_t>();
 
             std::vector<size_t> output_shape(input_0.m_shape);
 
@@ -6371,8 +6369,24 @@ void Model::run()
 
             tensor_vector<int64_t> output_data = create_tensor_vector<int64_t>(output_num_els);
 
-            for (size_t i = 0; i < output_num_els; i++)
-                output_data[i] = input_0_data[i] == input_1_data[i] ? 1 : 0;
+            if (input_1.m_type == TensorDataType::int64)
+            {
+                if (input_1.m_type != TensorDataType::int64) throw std::invalid_argument(op.m_type + ": wrong data type of B (not implemented).");
+
+                auto& input_1_data = input_1.get_vector<int64_t>();
+
+                for (size_t i = 0; i < output_num_els; i++)
+                    output_data[i] = input_0_data[i] == input_1_data[i] ? 1 : 0;
+            }
+            else
+            {
+                if (input_1.m_type != TensorDataType::float32) throw std::invalid_argument(op.m_type + ": wrong data type of B (not implemented).");
+
+                auto& input_1_data = input_1.get_vector<float>();
+
+                for (size_t i = 0; i < output_num_els; i++)
+                    output_data[i] = input_0_data[i] == (int64_t)input_1_data[i] ? 1 : 0;
+            }
 
             if (!check_output_shape(output_shape, output.m_shape))
                 throw std::invalid_argument(op.m_type + ": unexpected shape of output.");
