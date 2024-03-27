@@ -6428,18 +6428,60 @@ void Model::run()
             for (auto& s : output_shape)
                 output_num_els *= s;
 
-            if (input_1.m_type == TensorDataType::int64)
+            if (input_1.m_type == TensorDataType::int64 || input_2.m_type == TensorDataType::int64)
             {
-                if (input_1.m_type != TensorDataType::int64) throw std::invalid_argument(op.m_type + ": wrong data type of A (not implemented).");
-                if (input_2.m_type != TensorDataType::int64) throw std::invalid_argument(op.m_type + ": wrong data type of B (not implemented).");
+                tensor_vector<int64_t>* input_1_data = nullptr;
+                tensor_vector<int64_t>* input_2_data = nullptr;
+                tensor_vector<int64_t> temp_1, temp_2;
 
-                auto& input_1_data = input_1.get_vector<int64_t>();
-                auto& input_2_data = input_2.get_vector<int64_t>();
+                auto to_int64 = [](tensor_vector<float>& input) -> tensor_vector<int64_t>
+                {
+                    size_t s = input.size();
+                    auto output = create_tensor_vector<int64_t>(s);
+                    for (size_t i = 0; i < s; i++)
+                        output[i] = (int64_t)input[i];
+                    return output;
+                };
+
+                if (input_1.m_type == TensorDataType::int64)
+                {
+                    input_1_data = &input_1.get_vector<int64_t>();
+                }
+                else if (input_1.m_type == TensorDataType::float32)
+                {
+                    temp_1 = to_int64(input_1.get_vector<float>());
+                    input_1_data = &temp_1;
+                }
+                else if (input_1.m_type == TensorDataType::float16)
+                {
+                    auto temp = m_xnnpack->convert<uint16_t, float>(input_1.get_vector<uint16_t>());
+                    temp_1 = to_int64(temp);
+                    input_1_data = &temp_1;
+                }
+
+                if (input_2.m_type == TensorDataType::int64)
+                {
+                    input_2_data = &input_2.get_vector<int64_t>();
+                }
+                else if (input_2.m_type == TensorDataType::float32)
+                {
+                    temp_2 = to_int64(input_2.get_vector<float>());
+                    input_2_data = &temp_2;
+                }
+                else if (input_2.m_type == TensorDataType::float16)
+                {
+                    auto temp = m_xnnpack->convert<uint16_t, float>(input_2.get_vector<uint16_t>());
+                    temp_2 = to_int64(temp);
+                    input_2_data = &temp_2;
+                }
+
+                if (!input_1_data) throw std::invalid_argument(op.m_type + ": wrong data type of A (not implemented).");
+                if (!input_2_data) throw std::invalid_argument(op.m_type + ": wrong data type of B (not implemented).");
 
                 tensor_vector<int64_t> output_data = create_tensor_vector<int64_t>(output_num_els);
 
                 for (size_t i = 0; i < output_num_els; i++)
-                    output_data[i] = input_0_data[i] ? input_1_data[input_1_scalar ? 0 : i] : input_2_data[input_2_scalar ? 0 : i];
+                    output_data[i] = input_0_data[i] ? (*input_1_data)[input_1_scalar ? 0 : i] : (*input_2_data)[input_2_scalar ? 0 : i];
 
                 output.set_vector(std::move(output_data));
             }
