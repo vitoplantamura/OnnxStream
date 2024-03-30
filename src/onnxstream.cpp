@@ -3130,6 +3130,24 @@ void Model::write_range_data(const char* filename)
     onnxstream::write_file(filename, data);
 }
 
+tensor_vector<int64_t> Model::float_to_int64(tensor_vector<float>& input)
+{
+    size_t s = input.size();
+    auto output = create_tensor_vector<int64_t>(s);
+    for (size_t i = 0; i < s; i++)
+        output[i] = (int64_t)input[i];
+    return output;
+}
+
+tensor_vector<float> Model::int64_to_float(tensor_vector<int64_t>& input)
+{
+    size_t s = input.size();
+    auto output = create_tensor_vector<float>(s);
+    for (size_t i = 0; i < s; i++)
+        output[i] = (float)input[i];
+    return output;
+}
+
 void Model::init()
 {
     if (m_intermediate_refs_copy.size() == 0)
@@ -4572,16 +4590,15 @@ void Model::run()
                 if (input_0.m_type != TensorDataType::int64) throw std::invalid_argument(op.m_type + ": wrong data type of input 0.");
                 if (input_1.m_type != TensorDataType::int64) throw std::invalid_argument(op.m_type + ": wrong data type of input 1.");
 
-                if (input_1.m_shape.size() != 0)
-                    throw std::invalid_argument(op.m_type + ": second input must be a scalar (not implemented).");
-
                 auto& input_0_data = input_0.get_vector<int64_t>();
                 auto& input_1_data = input_1.get_vector<int64_t>();
 
                 std::vector<size_t> output_shape;
                 tensor_vector<int64_t> output_data;
 
-                if (input_0.m_shape.size() == 0)
+                bool input_1_scalar = input_1.m_shape.size() == 0;
+
+                if (input_1_scalar && input_0.m_shape.size() == 0)
                 {
                     size_t output_num_els = 1;
 
@@ -4589,7 +4606,7 @@ void Model::run()
 
                     output_data[0] = input_0_data[0] + input_1_data[0];
                 }
-                else if (input_0.m_shape.size() == 1)
+                else if (input_1_scalar && input_0.m_shape.size() == 1)
                 {
                     size_t output_num_els = input_0.m_shape[0];
                     output_shape = { output_num_els };
@@ -4601,7 +4618,13 @@ void Model::run()
                 }
                 else
                 {
-                    throw std::invalid_argument(op.m_type + ": first input must be a scalar or 1D (not implemented).");
+                    auto input_0_data_fp32 = int64_to_float(input_0_data);
+                    auto input_1_data_fp32 = int64_to_float(input_1_data);
+
+                    auto result = m_xnnpack->add(input_0.m_shape, input_0_data_fp32, input_1.m_shape, input_1_data_fp32);
+
+                    output_shape = std::move(result.first);
+                    output_data = float_to_int64(result.second);
                 }
 
                 if (!check_output_shape(output_shape, output.m_shape))
@@ -6342,58 +6365,6 @@ void Model::run()
             output.set_vector(std::move(output_data));
             push_tensor(std::move(output));
         }
-        else if (op.m_type == "Equal")
-        {
-            if (op.m_input.size() != 2) throw std::invalid_argument(op.m_type + ": wrong number of inputs.");
-            if (op.m_output.size() != 1) throw std::invalid_argument(op.m_type + ": wrong number of outputs.");
-
-            auto& input_0 = get_tensor_data(op.m_input[0]);
-            auto& input_1 = get_tensor_data(op.m_input[1], false /* make_copy */, true /* requires_float */);
-            auto& output = op.m_output[0];
-
-            if (op.m_attributes.size())
-                throw std::invalid_argument(op.m_type + ": unrecognized attribute (not implemented).");
-
-            if (!compare_shapes(input_0.m_shape, input_1.m_shape))
-                throw std::invalid_argument(op.m_type + ": shapes of A and B not equal (broadcasting not implemented).");
-
-            if (input_0.m_type != TensorDataType::int64) throw std::invalid_argument(op.m_type + ": wrong data type of A (not implemented).");
-
-            auto& input_0_data = input_0.get_vector<int64_t>();
-
-            std::vector<size_t> output_shape(input_0.m_shape);
-
-            size_t output_num_els = 1;
-            for (auto& s : output_shape)
-                output_num_els *= s;
-
-            tensor_vector<int64_t> output_data = create_tensor_vector<int64_t>(output_num_els);
-
-            if (input_1.m_type == TensorDataType::int64)
-            {
-                if (input_1.m_type != TensorDataType::int64) throw std::invalid_argument(op.m_type + ": wrong data type of B (not implemented).");
-
-                auto& input_1_data = input_1.get_vector<int64_t>();
-
-                for (size_t i = 0; i < output_num_els; i++)
-                    output_data[i] = input_0_data[i] == input_1_data[i] ? 1 : 0;
-            }
-            else
-            {
-                if (input_1.m_type != TensorDataType::float32) throw std::invalid_argument(op.m_type + ": wrong data type of B (not implemented).");
-
-                auto& input_1_data = input_1.get_vector<float>();
-
-                for (size_t i = 0; i < output_num_els; i++)
-                    output_data[i] = input_0_data[i] == (int64_t)input_1_data[i] ? 1 : 0;
-            }
-
-            if (!check_output_shape(output_shape, output.m_shape))
-                throw std::invalid_argument(op.m_type + ": unexpected shape of output.");
-
-            output.set_vector(std::move(output_data));
-            push_tensor(std::move(output));
-        }
         else if (op.m_type == "Where")
         {
             if (op.m_input.size() != 3) throw std::invalid_argument(op.m_type + ": wrong number of inputs.");
@@ -6434,28 +6405,19 @@ void Model::run()
                 tensor_vector<int64_t>* input_2_data = nullptr;
                 tensor_vector<int64_t> temp_1, temp_2;
 
-                auto to_int64 = [](tensor_vector<float>& input) -> tensor_vector<int64_t>
-                {
-                    size_t s = input.size();
-                    auto output = create_tensor_vector<int64_t>(s);
-                    for (size_t i = 0; i < s; i++)
-                        output[i] = (int64_t)input[i];
-                    return output;
-                };
-
                 if (input_1.m_type == TensorDataType::int64)
                 {
                     input_1_data = &input_1.get_vector<int64_t>();
                 }
                 else if (input_1.m_type == TensorDataType::float32)
                 {
-                    temp_1 = to_int64(input_1.get_vector<float>());
+                    temp_1 = float_to_int64(input_1.get_vector<float>());
                     input_1_data = &temp_1;
                 }
                 else if (input_1.m_type == TensorDataType::float16)
                 {
                     auto temp = m_xnnpack->convert<uint16_t, float>(input_1.get_vector<uint16_t>());
-                    temp_1 = to_int64(temp);
+                    temp_1 = float_to_int64(temp);
                     input_1_data = &temp_1;
                 }
 
@@ -6465,13 +6427,13 @@ void Model::run()
                 }
                 else if (input_2.m_type == TensorDataType::float32)
                 {
-                    temp_2 = to_int64(input_2.get_vector<float>());
+                    temp_2 = float_to_int64(input_2.get_vector<float>());
                     input_2_data = &temp_2;
                 }
                 else if (input_2.m_type == TensorDataType::float16)
                 {
                     auto temp = m_xnnpack->convert<uint16_t, float>(input_2.get_vector<uint16_t>());
-                    temp_2 = to_int64(temp);
+                    temp_2 = float_to_int64(temp);
                     input_2_data = &temp_2;
                 }
 
@@ -6539,6 +6501,10 @@ void Model::run()
                 throw std::invalid_argument(op.m_type + ": shape must be 1D.");
             if (input.m_shape.size() == 0)
                 throw std::invalid_argument(op.m_type + ": invalid shape of input.");
+
+            while (input.m_shape.size() < shape.m_shape[0])
+                input.m_shape.insert(input.m_shape.begin(), 1);
+
             if (input.m_shape.size() != shape.m_shape[0])
                 throw std::invalid_argument(op.m_type + ": shape of input not matching 'shape'.");
 
@@ -6980,23 +6946,19 @@ void Model::run()
             push_tensor(std::move(output));
         }
         else if (op.m_type == "Less" ||
-            op.m_type == "Greater")
+            op.m_type == "Greater" ||
+            op.m_type == "Equal" ||
+            op.m_type == "And")
         {
             if (op.m_input.size() != 2) throw std::invalid_argument(op.m_type + ": wrong number of inputs.");
             if (op.m_output.size() != 1) throw std::invalid_argument(op.m_type + ": wrong number of outputs.");
 
-            auto& input_0 = get_tensor_data(op.m_input[0]);
-            auto& input_1 = get_tensor_data(op.m_input[1]);
+            auto& input_0 = get_tensor_data(op.m_input[0], false /* make_copy */, true /* requires_float */);
+            auto& input_1 = get_tensor_data(op.m_input[1], false /* make_copy */, true /* requires_float */);
             auto& output = op.m_output[0];
 
             if (op.m_attributes.size())
                 throw std::invalid_argument(op.m_type + ": unrecognized attribute (not implemented).");
-
-            if (input_0.m_type != TensorDataType::int64) throw std::invalid_argument(op.m_type + ": wrong data type of A (not implemented).");
-            if (input_1.m_type != TensorDataType::int64) throw std::invalid_argument(op.m_type + ": wrong data type of B (not implemented).");
-
-            auto& input_0_data = input_0.get_vector<int64_t>();
-            auto& input_1_data = input_1.get_vector<int64_t>();
 
             bool (*pcompare)(int64_t, int64_t) = nullptr;
 
@@ -7004,15 +6966,65 @@ void Model::run()
             {
                 pcompare = [](int64_t a, int64_t b) -> bool { return a < b; };
             }
-            else
+            else if (op.m_type == "Greater")
             {
                 pcompare = [](int64_t a, int64_t b) -> bool { return a > b; };
             }
+            else if (op.m_type == "Equal")
+            {
+                pcompare = [](int64_t a, int64_t b) -> bool { return a == b; };
+            }
+            else if (op.m_type == "And")
+            {
+                pcompare = [](int64_t a, int64_t b) -> bool { return a && b; };
+            }
+            else
+                throw std::invalid_argument(op.m_type + ": unrecognized operation.");
+
+            bool input_1_scalar = input_1.m_shape.size() == 0;
+
+            float fixed_point_const =
+                input_0.m_type == TensorDataType::float32 && input_1.m_type == TensorDataType::float32 ? 10000 : 1;
+
+            auto get_input_0_data = [&](size_t i) -> int64_t
+            {
+                if (input_0.m_type == TensorDataType::int64)
+                {
+                    if (input_0.m_type != TensorDataType::int64) throw std::invalid_argument(op.m_type + ": wrong data type of A (not implemented).");
+                    auto& input_0_data = input_0.get_vector<int64_t>();
+                    return input_0_data[i];
+                }
+                else
+                {
+                    if (input_0.m_type != TensorDataType::float32) throw std::invalid_argument(op.m_type + ": wrong data type of A (not implemented).");
+                    auto& input_0_data = input_0.get_vector<float>();
+                    return (int64_t)(input_0_data[i] * fixed_point_const);
+                }
+            };
+
+            auto get_input_1_data = [&](size_t i) -> int64_t
+            {
+                if (input_1_scalar) i = 0;
+
+                if (input_1.m_type == TensorDataType::int64)
+                {
+                    if (input_1.m_type != TensorDataType::int64) throw std::invalid_argument(op.m_type + ": wrong data type of B (not implemented).");
+                    auto& input_1_data = input_1.get_vector<int64_t>();
+                    return input_1_data[i];
+                }
+                else
+                {
+                    if (input_1.m_type != TensorDataType::float32) throw std::invalid_argument(op.m_type + ": wrong data type of B (not implemented).");
+                    auto& input_1_data = input_1.get_vector<float>();
+                    return (int64_t)(input_1_data[i] * fixed_point_const);
+                }
+            };
 
             tensor_vector<int64_t> output_data;
             std::vector<size_t> output_shape;
 
-            if (compare_shapes(input_0.m_shape, input_1.m_shape))
+            if (input_1_scalar ||
+                compare_shapes(input_0.m_shape, input_1.m_shape))
             {
                 output_shape = input_0.m_shape;
 
@@ -7023,7 +7035,7 @@ void Model::run()
                 output_data = create_tensor_vector<int64_t>(output_num_els);
 
                 for (size_t i = 0; i < output_num_els; i++)
-                    output_data[i] = pcompare(input_0_data[i], input_1_data[i]) ? 1 : 0;
+                    output_data[i] = pcompare(get_input_0_data(i), get_input_1_data(i)) ? 1 : 0;
             }
             else if (input_0.m_shape.size() == 1 &&
                 input_1.m_shape.size() == 2 &&
@@ -7043,7 +7055,7 @@ void Model::run()
                 size_t i = 0;
                 for (size_t y = 0; y < h; y++)
                     for (size_t x = 0; x < w; x++)
-                        output_data[i++] = pcompare(input_0_data[x], input_1_data[y]) ? 1 : 0;
+                        output_data[i++] = pcompare(get_input_0_data(x), get_input_1_data(y)) ? 1 : 0;
             }
             else
             {
