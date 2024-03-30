@@ -976,6 +976,9 @@ private:
     int m_ops_printf_index = 0;
 
     XnnPack* m_xnnpack = nullptr;
+
+    static tensor_vector<int64_t> float_to_int64(tensor_vector<float>& input);
+    static tensor_vector<float> int64_to_float(tensor_vector<int64_t>& input);
 };
 
 }
