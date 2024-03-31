@@ -346,7 +346,7 @@ Note by Vito: This can be achieved simply by following the approach outlined in 
 python -m onnx_simplifier model_fixed3.onnx model_simplified.onnx
 ```
 
-If your model is larger than 2GB the torch export will make use of [External Data](https://onnx.ai/onnx/repo-docs/ExternalData.html) and the normal simplifier will not work. This tool will be able to simplify it in this case: https://github.com/luchangli03/onnxsim_large_model
+With big models you might run into problems with the simplifier. This tool can sometimes help in that case: https://github.com/luchangli03/onnxsim_large_model
 
 **Note**: 
 - If you exported your model from Hugging Face, you'll need around 100GB of swap space. 
