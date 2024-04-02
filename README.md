@@ -346,6 +346,8 @@ Note by Vito: This can be achieved simply by following the approach outlined in 
 python -m onnx_simplifier model_fixed3.onnx model_simplified.onnx
 ```
 
+With big models you might run into problems with the simplifier. This tool can sometimes help in that case: https://github.com/luchangli03/onnxsim_large_model
+
 **Note**: 
 - If you exported your model from Hugging Face, you'll need around 100GB of swap space. 
 - If you manually fixed the input shapes, 16GB of RAM should suffice.
