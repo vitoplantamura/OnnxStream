@@ -2337,7 +2337,7 @@ Tensor& Model::get_tensor_data(Tensor& t, bool make_copy /*= false*/, bool requi
             if (new_type != TensorDataType::none) t.m_type = new_type;
         }
 
-        if (!load || !get_wp()->supports_getptr())
+        if (!load || !get_wp()->supports_getptr() || make_copy)
         {
             switch (t.m_type)
             {
@@ -3684,6 +3684,10 @@ void Model::run()
 
             if (!axis_found)
                 throw std::invalid_argument(op.m_type + ": axis attribute not found.");
+
+            for (auto& t : op.m_input)
+                if (t.m_shape.size() == 0)
+                    t.m_shape = { 1 };
 
             int rank = op.m_input[0].m_shape.size();
 
@@ -5717,14 +5721,22 @@ void Model::run()
                 else
                     throw std::invalid_argument(op.m_type + ": unrecognized attribute: " + a.first + ".");
 
-            if (axis != 0)
-                throw std::invalid_argument(op.m_type + ": axis must be 0 (not implemented).");
-
             auto& input = get_tensor_data(op.m_input[0]);
             auto& indices = get_tensor_data(op.m_input[1]);
             auto& output = op.m_output[0];
 
             if (indices.m_type != TensorDataType::int64) throw std::invalid_argument(op.m_type + ": wrong data type of indices.");
+
+            int prev_axis = axis;
+
+            while (axis > 0 && input.m_shape.size() && input.m_shape[0] == 1)
+            {
+                input.m_shape.erase(input.m_shape.begin());
+                axis--;
+            }
+
+            if (axis != 0)
+                throw std::invalid_argument(op.m_type + ": axis must be 0 (not implemented).");
 
             bool input_shape_1d = false;
 
@@ -5762,6 +5774,9 @@ void Model::run()
                 output_shape.clear();
             else if (indices_shape_1d)
                 output_shape.erase(output_shape.begin());
+
+            for (int i = 0; i < prev_axis; i++)
+                output_shape.insert(output_shape.begin(), 1);
 
             size_t output_num_els = 1;
             for (auto& s : output_shape)
@@ -5936,8 +5951,8 @@ void Model::run()
 
             if (start < 0)
                 start += dim;
-            if (start > dim)
-                start = dim;
+            if (start > dim - 1)
+                start = dim - 1;
 
             if (end < 0)
                 end += dim;
@@ -6981,7 +6996,14 @@ void Model::run()
             else
                 throw std::invalid_argument(op.m_type + ": unrecognized operation.");
 
-            bool input_1_scalar = input_1.m_shape.size() == 0;
+            size_t p;
+            for (p = 0; p < input_1.m_shape.size(); p++)
+                if (input_1.m_shape[p] != 1)
+                    break;
+            size_t input_1_mod =
+                p == input_1.m_shape.size() ? 1 :
+                p == input_1.m_shape.size() - 1 && input_1.m_shape.size() == input_0.m_shape.size() && input_1.m_shape[p] == input_0.m_shape[p] ? input_1.m_shape[p] :
+                0;
 
             float fixed_point_const =
                 input_0.m_type == TensorDataType::float32 && input_1.m_type == TensorDataType::float32 ? 10000 : 1;
@@ -7004,7 +7026,7 @@ void Model::run()
 
             auto get_input_1_data = [&](size_t i) -> int64_t
             {
-                if (input_1_scalar) i = 0;
+                if (input_1_mod) i = i % input_1_mod;
 
                 if (input_1.m_type == TensorDataType::int64)
                 {
@@ -7023,7 +7045,7 @@ void Model::run()
             tensor_vector<int64_t> output_data;
             std::vector<size_t> output_shape;
 
-            if (input_1_scalar ||
+            if (input_1_mod ||
                 compare_shapes(input_0.m_shape, input_1.m_shape))
             {
                 output_shape = input_0.m_shape;
@@ -7219,6 +7241,142 @@ void Model::run()
                 throw std::invalid_argument(op.m_type + ": unexpected shape of output.");
 
             output.set_vector(std::move(output_data));
+            push_tensor(std::move(output));
+        }
+        else if (op.m_type == "ScatterND")
+        {
+            if (op.m_input.size() != 3) throw std::invalid_argument(op.m_type + ": wrong number of inputs.");
+            if (op.m_output.size() != 1) throw std::invalid_argument(op.m_type + ": wrong number of outputs.");
+
+            auto& input = get_tensor_data(op.m_input[0], true /* make_copy */);
+            auto& indices = get_tensor_data(op.m_input[1]);
+            auto& updates = get_tensor_data(op.m_input[2]);
+            auto& output = op.m_output[0];
+
+            if (op.m_attributes.size())
+                throw std::invalid_argument(op.m_type + ": unrecognized attribute (not implemented).");
+
+            size_t rank = input.m_shape.size();
+
+            if (!rank ||
+                indices.m_shape.size() != rank + 1 ||
+                updates.m_shape.size() != rank ||
+                indices.m_shape[rank] != rank)
+            {
+                throw std::invalid_argument(op.m_type + ": invalid shape of one or more inputs.");
+            }
+
+            if (indices.m_type != TensorDataType::int64) throw std::invalid_argument(op.m_type + ": wrong data type of indices.");
+
+            auto& indices_data = indices.get_vector<int64_t>();
+
+            size_t sizeof_element = 0;
+            void* input_data_data = nullptr;
+            size_t input_data_size = 0;
+            void* updates_data_data = nullptr;
+            size_t updates_data_size = 0;
+
+            if (input.m_type == TensorDataType::float32)
+            {
+                if (input.m_type != TensorDataType::float32) throw std::invalid_argument(op.m_type + ": wrong data type of input.");
+                if (updates.m_type != TensorDataType::float32) throw std::invalid_argument(op.m_type + ": wrong data type of updates.");
+
+                auto& input_data = input.get_vector<float>();
+                input_data_size = input_data.size();
+
+                output.set_vector(std::move(input_data));
+                input_data_data = output.get_vector<float>().data();
+
+                sizeof_element = sizeof(float);
+
+                auto& updates_data = updates.get_vector<float>();
+                updates_data_data = updates_data.data();
+                updates_data_size = updates_data.size();
+            }
+            else
+            {
+                if (input.m_type != TensorDataType::float16) throw std::invalid_argument(op.m_type + ": wrong data type of input.");
+                if (updates.m_type != TensorDataType::float16) throw std::invalid_argument(op.m_type + ": wrong data type of updates.");
+
+                auto& input_data = input.get_vector<uint16_t>();
+                input_data_size = input_data.size();
+
+                output.set_vector(std::move(input_data));
+                input_data_data = output.get_vector<uint16_t>().data();
+
+                sizeof_element = sizeof(uint16_t);
+
+                auto& updates_data = updates.get_vector<uint16_t>();
+                updates_data_data = updates_data.data();
+                updates_data_size = updates_data.size();
+            }
+
+            if (updates_data_size * rank != indices_data.size())
+                throw std::invalid_argument(op.m_type + ": sizes of updates and indices not compatible.");
+
+            std::vector<size_t> dims(rank);
+            for (size_t i = 0; i < rank; i++)
+            {
+                size_t v = 1;
+                for (size_t j = i + 1; j < rank; j++)
+                    v *= input.m_shape[j];
+                dims[i] = v;
+            }
+
+            auto copy_4 = [](void* dst, void* src) { *(uint32_t*)dst = *(uint32_t*)src; };
+            auto copy_2 = [](void* dst, void* src) { *(uint16_t*)dst = *(uint16_t*)src; };
+
+            using ptr_type = void (*)(void*, void*);
+            ptr_type copy =
+                sizeof_element == sizeof(float) ? (ptr_type)copy_4 :
+                sizeof_element == sizeof(uint16_t) ? (ptr_type)copy_2 :
+                nullptr;
+
+            struct context
+            {
+                bool error;
+                ptr_type copy;
+                size_t rank, * dims, sizeof_element, input_data_size;
+                int64_t* indices_data;
+                void* input_data_data, * updates_data_data;
+            };
+
+            context prl_ctx;
+
+            prl_ctx.error = false;
+            prl_ctx.copy = copy;
+            prl_ctx.rank = rank;
+            prl_ctx.dims = dims.data();
+            prl_ctx.indices_data = indices_data.data();
+            prl_ctx.input_data_data = input_data_data;
+            prl_ctx.sizeof_element = sizeof_element;
+            prl_ctx.input_data_size = input_data_size;
+            prl_ctx.updates_data_data = updates_data_data;
+
+            void (*pfn)(context*, size_t) = [](context* _, size_t i)
+            {
+                int64_t* index = &_->indices_data[i * _->rank];
+
+                size_t pos = 0;
+                for (size_t j = 0; j < _->rank; j++)
+                    pos += index[j] * _->dims[j];
+                if (pos >= _->input_data_size)
+                {
+                    _->error = true;
+                    return;
+                }
+
+                _->copy((uint8_t*)_->input_data_data + pos * _->sizeof_element, (uint8_t*)_->updates_data_data + i * _->sizeof_element);
+            };
+
+            m_xnnpack->parallelize((void*)pfn, &prl_ctx, updates_data_size);
+
+            if (prl_ctx.error)
+                throw std::invalid_argument(op.m_type + ": invalid index in indices.");
+
+            if (!check_output_shape(input.m_shape, output.m_shape))
+                throw std::invalid_argument(op.m_type + ": unexpected shape of output.");
+
             push_tensor(std::move(output));
         }
         else
