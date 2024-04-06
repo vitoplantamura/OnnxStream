@@ -812,6 +812,117 @@ public:
             std::move(output_shape), std::move(output_data));
     }
 
+    template <typename T>
+    std::pair<std::vector<size_t>, tensor_vector<T>> matrix_multiply_dynamic(
+        const std::vector<size_t>& first_shape, T* first_data,
+        const std::vector<size_t>& second_shape, T* second_data,
+        std::vector<size_t>* bias_shape, T* bias_data,
+        T* output_data_override = nullptr)
+    {
+        if (first_shape.size() != 2 || second_shape.size() != 2)
+            throw std::runtime_error("XnnPack::matrix_multiply_fp32: not implemented (shape of inputs).");
+
+        if (first_shape[1] != second_shape[0])
+            throw std::runtime_error("XnnPack::matrix_multiply_fp32: invalid shape of inputs.");
+
+        std::vector<size_t> output_shape({ first_shape[0], second_shape[1] });
+
+        if (bias_data)
+        {
+            if (bias_shape->size() != output_shape.size() || (*bias_shape)[0] != output_shape[0] || (*bias_shape)[1] != output_shape[1])
+                throw std::runtime_error("XnnPack::matrix_multiply_fp32: invalid shape of bias.");
+        }
+
+        size_t output_size = output_shape[0] * output_shape[1];
+        tensor_vector<T> output_data = create_tensor_vector<T>(output_data_override ? 0 : output_size);
+
+        typedef typename std::conditional<std::is_same<T, float>::value, float, void>::type xnn_ptr_type;
+        enum xnn_status(*xnn_create_dynamic_fully_connected_nc_xxx)(float, float, uint32_t, xnn_operator_t*) = nullptr;
+        enum xnn_status(*xnn_reshape_dynamic_fully_connected_nc_xxx)(xnn_operator_t, size_t, size_t, size_t, size_t, size_t, size_t*, size_t*, pthreadpool_t) = nullptr;
+        enum xnn_status(*xnn_setup_dynamic_fully_connected_nc_xxx)(xnn_operator_t, void*, const xnn_ptr_type*, const xnn_ptr_type*, const xnn_ptr_type*, xnn_ptr_type*) = nullptr;
+
+        if constexpr (std::is_same<T, float>::value)
+        {
+            xnn_create_dynamic_fully_connected_nc_xxx = &xnn_create_dynamic_fully_connected_nc_f32;
+            xnn_reshape_dynamic_fully_connected_nc_xxx = &xnn_reshape_dynamic_fully_connected_nc_f32;
+            xnn_setup_dynamic_fully_connected_nc_xxx = &xnn_setup_dynamic_fully_connected_nc_f32;
+        }
+        else
+        {
+            xnn_create_dynamic_fully_connected_nc_xxx = &xnn_create_dynamic_fully_connected_nc_f16;
+            xnn_reshape_dynamic_fully_connected_nc_xxx = &xnn_reshape_dynamic_fully_connected_nc_f16;
+            xnn_setup_dynamic_fully_connected_nc_xxx = &xnn_setup_dynamic_fully_connected_nc_f16;
+        }
+
+        xnn_operator_t fc_op = nullptr;
+        xnn_status status;
+
+        status = xnn_create_dynamic_fully_connected_nc_xxx(
+            -std::numeric_limits<float>::infinity() /* output_min */,
+            +std::numeric_limits<float>::infinity() /* output_max */,
+            XNN_FLAG_TRANSPOSE_WEIGHTS /* flags */,
+            &fc_op /* fully_connected_op_out */);
+
+        if (status != xnn_status_success)
+            throw std::runtime_error("failed to create fully connected operation");
+
+        scope_guard __sg__([&]() {
+            xnn_status status = xnn_delete_operator(fc_op);
+            if (status != xnn_status_success)
+                throw std::runtime_error("failed to delete operator");
+            fc_op = nullptr;
+        });
+
+        size_t workspace_size = 0;
+        size_t workspace_alignment = 0;
+
+        status = xnn_reshape_dynamic_fully_connected_nc_xxx(
+            fc_op,
+            first_shape[0] /* batch_size */,
+            second_shape[0] /* input_channels */,
+            second_shape[1] /* output_channels */,
+            second_shape[0] /* input_stride */,
+            second_shape[1] /* output_stride */,
+            &workspace_size, &workspace_alignment,
+            threadpool /* threadpool */);
+        if (status != xnn_status_success)
+            throw std::runtime_error("failed to reshape fully connected operation");
+
+        if (workspace_size > m_workspace_size)
+        {
+            if (m_workspace)
+            {
+                custom_aligned_free(m_workspace);
+                m_workspace = nullptr;
+            }
+
+            m_workspace = custom_aligned_alloc(workspace_alignment, workspace_size);
+            m_workspace_size = workspace_size;
+            m_workspace_alignment = workspace_alignment;
+        }
+        else if (workspace_alignment != m_workspace_alignment)
+        {
+            throw std::runtime_error("different workspace alignments");
+        }
+
+        status = xnn_setup_dynamic_fully_connected_nc_xxx(
+            fc_op /* fully_connected_op */,
+            m_workspace,
+            first_data /* input */,
+            second_data /* kernel */,
+            !bias_data ? nullptr : bias_data /* bias */,
+            output_data_override ? output_data_override : output_data.data() /* output */);
+        if (status != xnn_status_success)
+            throw std::runtime_error("failed to setup fully connected operation");
+
+        status = xnn_run_operator(fc_op, threadpool /* thread pool */);
+        if (status != xnn_status_success)
+            throw std::runtime_error("failed to run fully connected operator");
+
+        return std::pair<std::vector<size_t>, tensor_vector<T>>(
+            std::move(output_shape), std::move(output_data));
+    };
+
     struct Qu8MatMulData
     {
         uint8_t input_zero_point;
@@ -831,6 +942,14 @@ public:
         Qu8MatMulData* qu8_data = nullptr,
         const std::string& cache_key = "")
     {
+        if (!cache_key.size())
+        {
+            if constexpr (std::is_same<T, float>::value)
+                return matrix_multiply_dynamic<float>(first_shape, first_data, second_shape, second_data, bias_shape, bias_data, output_data_override);
+            else if constexpr (std::is_same<T, uint16_t>::value)
+                return matrix_multiply_dynamic<uint16_t>(first_shape, first_data, second_shape, second_data, bias_shape, bias_data, output_data_override);
+        }
+
         if (first_shape.size() != 2 || second_shape.size() != 2)
             throw std::runtime_error("XnnPack::matrix_multiply_fp32: not implemented (shape of inputs).");
 
