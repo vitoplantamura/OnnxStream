@@ -3328,7 +3328,7 @@ void Model::run()
         if (m_ops_queue.size())
             m_ops_queue.erase(m_ops_queue.begin());
 
-        const size_t ops_to_read = 7;
+        const size_t ops_to_read = 8;
 
         if (m_ops_queue.size() < ops_to_read)
         {
@@ -3343,7 +3343,7 @@ void Model::run()
         if (!m_ops_queue.size())
             break;
 
-        if (m_fuse_ops_in_attention)
+        if (m_fuse_ops_in_attention && m_ops_queue[0].m_type == "MatMul")
         {
             bool with_scale =
                 m_ops_queue.size() >= 4 &&
@@ -3402,8 +3402,14 @@ void Model::run()
             }
         }
 
-        if (m_use_scaled_dp_attn_op)
+        if (m_use_scaled_dp_attn_op && m_ops_queue[0].m_type == "Transpose")
         {
+            auto is_output_the_input = [&](Operation& op0, Operation& op1, int index = 0) {
+                auto& name = op0.m_output[0].m_name;
+                return name == op1.m_input[index].m_name &&
+                    m_intermediate_refs[name] == 1;
+            };
+
             if (m_ops_queue.size() >= 6 &&
                 m_ops_queue[0].m_type == "Transpose" &&
                 m_ops_queue[1].m_type == "MatMul" &&
@@ -3418,12 +3424,6 @@ void Model::run()
                 Operation& add = m_ops_queue[3];
                 Operation& softmax = m_ops_queue[4];
                 Operation& matmul1 = m_ops_queue[5];
-
-                auto is_output_the_input = [&](Operation& op0, Operation& op1, int index = 0) {
-                    auto& name = op0.m_output[0].m_name;
-                    return name == op1.m_input[index].m_name &&
-                        m_intermediate_refs[name] == 1;
-                };
 
                 if (transpose.m_input.size() == 1 && transpose.m_output.size() == 1 &&
                     matmul0.m_input.size() == 2 && matmul0.m_output.size() == 1 &&
@@ -3458,6 +3458,65 @@ void Model::run()
                     op.m_output.push_back(std::move(matmul1.m_output[0]));
 
                     m_ops_queue.erase(m_ops_queue.begin(), m_ops_queue.begin() + 6);
+                    m_ops_queue.insert(m_ops_queue.begin(), std::move(op));
+
+                    m_scaled_dp_attn_op_used = true;
+                }
+            }
+            else if (m_ops_queue.size() >= 7 &&
+                m_ops_queue[0].m_type == "Transpose" &&
+                m_ops_queue[1].m_type == "Mul" &&
+                m_ops_queue[2].m_type == "Mul" &&
+                m_ops_queue[3].m_type == "MatMul" &&
+                m_ops_queue[4].m_type == "Add" &&
+                m_ops_queue[5].m_type == "Softmax" &&
+                m_ops_queue[6].m_type == "MatMul")
+            {
+                Operation& transpose = m_ops_queue[0];
+                Operation& mul0 = m_ops_queue[1];
+                Operation& mul1 = m_ops_queue[2];
+                Operation& matmul0 = m_ops_queue[3];
+                Operation& add = m_ops_queue[4];
+                Operation& softmax = m_ops_queue[5];
+                Operation& matmul1 = m_ops_queue[6];
+
+                if (transpose.m_input.size() == 1 && transpose.m_output.size() == 1 &&
+                    mul0.m_input.size() == 2 && mul0.m_output.size() == 1 &&
+                    mul1.m_input.size() == 2 && mul1.m_output.size() == 1 &&
+                    matmul0.m_input.size() == 2 && matmul0.m_output.size() == 1 &&
+                    add.m_input.size() == 2 && add.m_output.size() == 1 &&
+                    softmax.m_input.size() == 1 && softmax.m_output.size() == 1 &&
+                    softmax.m_attributes.size() == 1 && softmax.m_attributes[0].first == "axis" && softmax.m_attributes[0].second == "-1" &&
+                    matmul1.m_input.size() == 2 && matmul1.m_output.size() == 1 &&
+                    is_output_the_input(transpose, mul1) &&
+                    is_output_the_input(mul0, matmul0) &&
+                    is_output_the_input(mul1, matmul0, 1) &&
+                    is_output_the_input(matmul0, add) &&
+                    is_output_the_input(add, softmax) &&
+                    is_output_the_input(softmax, matmul1))
+                {
+                    m_intermediate_refs[transpose.m_output[0].m_name] = 0;
+                    m_intermediate_refs[mul0.m_output[0].m_name] = 0;
+                    m_intermediate_refs[mul1.m_output[0].m_name] = 0;
+                    m_intermediate_refs[matmul0.m_output[0].m_name] = 0;
+                    m_intermediate_refs[add.m_output[0].m_name] = 0;
+                    m_intermediate_refs[softmax.m_output[0].m_name] = 0;
+
+                    Operation op;
+
+                    op.m_name = transpose.m_name + "_ScaledDotProductAttention";
+                    op.m_type = "ScaledDotProductAttention";
+
+                    op.m_input.push_back(std::move(mul0.m_input[0]));
+                    op.m_input.push_back(std::move(transpose.m_input[0]));
+                    op.m_input.push_back(std::move(mul0.m_input[1]));
+                    op.m_input.push_back(std::move(add.m_input[1]));
+                    op.m_input.push_back(std::move(matmul1.m_input[1]));
+                    op.m_input.push_back(std::move(mul1.m_input[1]));
+
+                    op.m_output.push_back(std::move(matmul1.m_output[0]));
+
+                    m_ops_queue.erase(m_ops_queue.begin(), m_ops_queue.begin() + 7);
                     m_ops_queue.insert(m_ops_queue.begin(), std::move(op));
 
                     m_scaled_dp_attn_op_used = true;
@@ -7211,7 +7270,7 @@ void Model::run()
         }
         else if (op.m_type == "ScaledDotProductAttention")
         {
-            if (op.m_input.size() != 5) throw std::invalid_argument(op.m_type + ": wrong number of inputs.");
+            if (op.m_input.size() != 5 && op.m_input.size() != 6) throw std::invalid_argument(op.m_type + ": wrong number of inputs.");
             if (op.m_output.size() != 1) throw std::invalid_argument(op.m_type + ": wrong number of outputs.");
 
             auto& q = get_tensor_data(op.m_input[0]);
@@ -7219,14 +7278,17 @@ void Model::run()
             auto& s = get_tensor_data(op.m_input[2]);
             auto& m = get_tensor_data(op.m_input[3]);
             auto& v = get_tensor_data(op.m_input[4]);
+            auto* s2 = op.m_input.size() == 6 ? &get_tensor_data(op.m_input[5]) : nullptr;
             auto& output = op.m_output[0];
 
             if (q.m_shape.size() != 4) throw std::invalid_argument(op.m_type + ": invalid shape of query.");
             if (k.m_shape.size() != 4) throw std::invalid_argument(op.m_type + ": invalid shape of key.");
             if (v.m_shape.size() != 4) throw std::invalid_argument(op.m_type + ": invalid shape of value.");
 
-            if (s.m_shape.size() != 0)
+            if (s.m_shape.size() != 0 && !(s.m_shape.size() == 1 && s.m_shape[0] == 1))
                 throw std::invalid_argument(op.m_type + ": invalid shape of scale.");
+            if (s2 && s2->m_shape.size() != 0 && !(s2->m_shape.size() == 1 && s2->m_shape[0] == 1))
+                throw std::invalid_argument(op.m_type + ": invalid shape of second scale.");
             if (m.m_shape.size() != 2 && !(m.m_shape.size() == 4 && m.m_shape[0] == 1 && m.m_shape[1] == 1))
                 throw std::invalid_argument(op.m_type + ": invalid shape of mask.");
 
@@ -7245,18 +7307,20 @@ void Model::run()
                 if (v.m_type != TensorDataType::float32) throw std::invalid_argument(op.m_type + ": wrong data type of value.");
                 if (s.m_type != TensorDataType::float32) throw std::invalid_argument(op.m_type + ": wrong data type of scale.");
                 if (m.m_type != TensorDataType::float32) throw std::invalid_argument(op.m_type + ": wrong data type of mask.");
+                if (s2 && s2->m_type != TensorDataType::float32) throw std::invalid_argument(op.m_type + ": wrong data type of second scale.");
 
                 auto& q_data = q.get_vector<float>();
                 auto& k_data = k.get_vector<float>();
                 auto& v_data = v.get_vector<float>();
                 auto& s_data = s.get_vector<float>();
                 auto& m_data = m.get_vector<float>();
+                auto* s2_data = s2 ? &s2->get_vector<float>() : nullptr;
 
-                auto inv_s_data = tensor_vector<float>(query_key_channels, 1.0f / s_data[0]);
+                auto scale = tensor_vector<float>(query_key_channels, s2_data ? s2_data->data()[0] * s_data[0] : 1.0f / s_data[0]);
 
                 auto result = m_xnnpack->scaled_dot_product_attention<float>(
                     q_data, k_data, v_data,
-                    inv_s_data, m_data,
+                    scale, m_data,
                     batch_size, query_heads, query_tokens,
                     key_value_heads, key_value_tokens,
                     query_key_channels, value_channels);
@@ -7273,27 +7337,41 @@ void Model::run()
                 if (v.m_type != TensorDataType::float16) throw std::invalid_argument(op.m_type + ": wrong data type of value.");
                 if (s.m_type != TensorDataType::float16) throw std::invalid_argument(op.m_type + ": wrong data type of scale.");
                 if (m.m_type != TensorDataType::float16) throw std::invalid_argument(op.m_type + ": wrong data type of mask.");
+                if (s2 && s2->m_type != TensorDataType::float16) throw std::invalid_argument(op.m_type + ": wrong data type of second scale.");
 
                 auto& q_data = q.get_vector<uint16_t>();
                 auto& k_data = k.get_vector<uint16_t>();
                 auto& v_data = v.get_vector<uint16_t>();
                 auto& s_data = s.get_vector<uint16_t>();
                 auto& m_data = m.get_vector<uint16_t>();
+                auto* s2_data = s2 ? &s2->get_vector<uint16_t>() : nullptr;
 
                 float val = 0;
                 if (!m_xnnpack->convert<uint16_t, float>(s_data.data(), &val, 1))
                     throw std::invalid_argument(op.m_type + ": fp16 to fp32 conversion error.");
 
-                val = 1.0f / val;
-                uint16_t inv = 0;
-                if (!m_xnnpack->convert<float, uint16_t>(&val, &inv, 1))
+                if (s2_data)
+                {
+                    float val2 = 0;
+                    if (!m_xnnpack->convert<uint16_t, float>(s2_data->data(), &val2, 1))
+                        throw std::invalid_argument(op.m_type + ": fp16 to fp32 conversion error.");
+
+                    val = val2 * val;
+                }
+                else
+                {
+                    val = 1.0f / val;
+                }
+
+                uint16_t val16 = 0;
+                if (!m_xnnpack->convert<float, uint16_t>(&val, &val16, 1))
                     throw std::invalid_argument(op.m_type + ": fp32 to fp16 conversion error.");
 
-                auto inv_s_data = tensor_vector<uint16_t>(query_key_channels, inv);
+                auto scale = tensor_vector<uint16_t>(query_key_channels, val16);
 
                 auto result = m_xnnpack->scaled_dot_product_attention<uint16_t>(
                     q_data, k_data, v_data,
-                    inv_s_data, m_data,
+                    scale, m_data,
                     batch_size, query_heads, query_tokens,
                     key_value_heads, key_value_tokens,
                     query_key_channels, value_channels);
