@@ -32,6 +32,7 @@
 #include <unordered_set>
 #include <vector>
 #include <cstring>
+#include <filesystem>
 
 #if USE_NCNN
 #include "benchmark.h"
@@ -61,6 +62,8 @@ struct MainArgs
     bool m_tiled = true;
     bool m_rpi_lowmem = false;
     bool m_ram = false;
+    bool m_download = false;
+    std::string m_curl_parallel = "4";
 };
 
 static MainArgs g_main_args;
@@ -1871,6 +1874,14 @@ int main(int argc, char** argv)
         {
             str = &g_main_args.m_seed;
         }
+        else if (arg == "--download")
+        {
+            g_main_args.m_download = true;
+        }
+        else if (arg == "--curl-parallel")
+        {
+            str = &g_main_args.m_curl_parallel;
+        }
         else
         {
             printf(("Invalid command line argument: \"" + arg + "\".\n\n").c_str());
@@ -1889,6 +1900,8 @@ int main(int argc, char** argv)
             printf("--decoder-calibrate (ONLY SD 1.5) Calibrates the quantized version of the VAE decoder.\n");
             printf("--not-tiled         (ONLY SDXL 1.0) Don't use the tiled VAE decoder.\n");
             printf("--ram               Uses the RAM WeightsProvider (Experimental).\n");
+            printf("--download          Forces the (re)download of the current model.\n");
+            printf("--curl-parallel     Sets the number of parallel downloads with CURL. Default is 4.\n");
             printf("--rpi               Configures the models to run on a Raspberry Pi.\n");
             printf("--rpi-lowmem        Configures the models to run on a Raspberry Pi Zero 2.\n");
 
@@ -1917,6 +1930,179 @@ int main(int argc, char** argv)
     if (!g_main_args.m_turbo && std::stoi(g_main_args.m_steps) < 3)
     {
         printf("--steps must be >= 3.");
+        return -1;
+    }
+
+    try
+    {
+        int curl_parallel = std::stoi(g_main_args.m_curl_parallel);
+        if (curl_parallel < 1 || curl_parallel > 128)
+            throw std::invalid_argument("--curl-parallel must be between 1 and 128.");
+
+        std::string repo_name;
+        std::string full_repo_name;
+        std::vector<std::string> dirs;
+        std::vector<std::string> files;
+
+        if (g_main_args.m_turbo)
+        {
+            repo_name = "stable-diffusion-xl-turbo-1.0-onnxstream";
+            full_repo_name = "AeroX2/" + repo_name;
+            dirs = {
+                "sdxl_tokenizer",
+                "sdxl_text_encoder_1_fp32",
+                "sdxl_text_encoder_2_fp32",
+                "sdxl_unet_fp16",
+                "sdxl_vae_decoder_32x32_fp16",
+                "sdxl_vae_decoder_fp16" };
+            files = {
+                "sdxl_tokenizer/vocab.txt",
+                "sdxl_tokenizer/merges.txt",
+                "sdxl_text_encoder_1_fp32/model.txt",
+                "sdxl_text_encoder_2_fp32/model.txt",
+                "sdxl_unet_fp16/model.txt",
+                "sdxl_vae_decoder_32x32_fp16/model.txt",
+                "sdxl_vae_decoder_fp16/model.txt" };
+        }
+        else if (g_main_args.m_xl)
+        {
+            repo_name = "stable-diffusion-xl-base-1.0-onnxstream";
+            full_repo_name = "vitoplantamura/" + repo_name;
+            dirs = {
+                "sdxl_tokenizer",
+                "sdxl_text_encoder_1_fp32",
+                "sdxl_text_encoder_2_fp32",
+                "sdxl_unet_fp16",
+                "sdxl_vae_decoder_32x32_fp16",
+                "sdxl_vae_decoder_fp16" };
+            files = {
+                "sdxl_tokenizer/vocab.txt",
+                "sdxl_tokenizer/merges.txt",
+                "sdxl_text_encoder_1_fp32/model.txt",
+                "sdxl_text_encoder_2_fp32/model.txt",
+                "sdxl_unet_fp16/model.txt",
+                "sdxl_vae_decoder_32x32_fp16/model.txt",
+                "sdxl_vae_decoder_fp16/model.txt" };
+        }
+        else
+        {
+            repo_name = "stable-diffusion-1.5-onnxstream";
+            full_repo_name = "vitoplantamura/" + repo_name;
+            dirs = {
+                "tokenizer",
+                "text_encoder_fp32",
+                "unet_fp16",
+                "vae_decoder_fp16",
+                "vae_decoder_qu8" };
+            files = {
+                "tokenizer/vocab.txt",
+                "tokenizer/merges.txt",
+                "text_encoder_fp32/model.txt",
+                "unet_fp16/model.txt",
+                "vae_decoder_fp16/model.txt",
+                "vae_decoder_qu8/model.txt",
+                "vae_decoder_qu8/range_data.txt" };
+        }
+
+        if (!g_main_args.m_download)
+        {
+            auto does_exist = [](const std::string& f) -> bool
+            {
+                FILE* test = fopen(f.c_str(), "r");
+                if (test)
+                    fclose(test);
+                return test ? true : false;
+            };
+
+            if (!does_exist(g_main_args.m_path_with_slash + files.back()))
+            {
+                g_main_args.m_path_with_slash += repo_name + "/";
+                if (!does_exist(g_main_args.m_path_with_slash + files.back()))
+                    g_main_args.m_download = true;
+            }
+        }
+
+        if (g_main_args.m_download)
+        {
+            std::string url_with_slash = "https://huggingface.co/" + full_repo_name + "/resolve/main/";
+
+            std::filesystem::create_directory(g_main_args.m_path_with_slash);
+
+            for (auto& dir : dirs)
+                std::filesystem::create_directory(g_main_args.m_path_with_slash + dir);
+
+            auto download_file = [](const std::vector<std::pair<std::string, std::string>>& urls) -> void
+            {
+#ifdef _WIN32
+                std::string null_device = "NUL";
+#else
+                std::string null_device = "/dev/null";
+#endif
+                std::string command = "curl --location --fail --silent --show-error --parallel ";
+
+                for (const auto& url : urls)
+                    command += " -o \"" + url.second + "\" \"" + url.first + "\" ";
+                command += " >" + null_device + " 2>&1";
+
+                if (system(command.c_str()))
+                    throw std::invalid_argument("Download error.");
+            };
+
+            {
+                std::vector<std::pair<std::string, std::string>> downloads;
+                for (auto& file : files)
+                    downloads.emplace_back(url_with_slash + file, g_main_args.m_path_with_slash + file);
+                download_file(downloads);
+            }
+
+            {
+                std::vector<std::string> fullnames;
+
+                for (auto& file : files)
+                {
+                    size_t pos = file.find("/model.txt");
+                    if (pos != std::string::npos && pos == file.size() - 10)
+                    {
+                        auto path = file.substr(0, pos);
+
+                        Model model;
+                        model.set_weights_provider(CollectNamesWeightsProvider());
+                        model.read_file((g_main_args.m_path_with_slash + file).c_str());
+                        model.init();
+                        auto& names = model.get_weights_provider<CollectNamesWeightsProvider>().m_names;
+
+                        for (auto& name : names)
+                        {
+                            auto fn = path + "/" + name;
+                            auto lpos = fn.find("_nchw.bin");
+                            if (lpos != std::string::npos)
+                                fn = fn.substr(0, lpos) + "_nhwc.bin";
+                            fullnames.push_back(fn);
+                        }
+                    }
+                }
+
+                int counter = 0;
+                std::vector<std::pair<std::string, std::string>> bin_files;
+                for (auto& fullname : fullnames)
+                {
+                    printf("\rDownloading weights: %i/%i...", ++counter, (int)fullnames.size());
+                    fflush(stdout);
+                    bin_files.emplace_back(url_with_slash + fullname, g_main_args.m_path_with_slash + fullname);
+                    if (counter % curl_parallel == 0 || counter == (int)fullnames.size())
+                    {
+                        download_file(bin_files);
+                        bin_files.clear();
+                    }
+                }
+
+                printf(" done!\n");
+            }
+        }
+    }
+    catch (const std::exception& e)
+    {
+        printf("=== ERROR === %s\n", e.what());
         return -1;
     }
 
