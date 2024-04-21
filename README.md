@@ -109,11 +109,11 @@ A comparison between SDXL 1.0 and SDXL Turbo run in OnnxStream with respect to t
 - Static quantization (W8A8 unsigned, asymmetric, percentile)
 - Easy calibration of a quantized model
 - FP16 support (with or without FP16 arithmetic)
-- 35 ONNX operators implemented (the most common)
+- 39 ONNX operators implemented (the most common)
 - Operations executed sequentially but ~~all~~ most operators are multithreaded
 - Single implementation file + header file
 - XNNPACK calls wrapped in the `XnnPack` class (for future replacement)
-- Initial GPU support (cuBLAS)
+- Initial GPU support with cuBLAS (only FP16 and FP32 and only for the [LLM app](https://github.com/vitoplantamura/OnnxStream/blob/master/assets/LLM.md))
 
 OnnxStream depends on [XNNPACK](https://github.com/google/XNNPACK) for some (accelerated) primitives: MatMul, Convolution, element-wise Add/Sub/Mul/Div, Sigmoid and Softmax.
 
@@ -251,7 +251,17 @@ cmake --build . --config Release
 
 Now you can run the Stable Diffusion example.
 
-In the case of **Stable Diffusion 1.5**, the weights for the example can be downloaded from the Releases of this repo (about 2GB). In the case of **Stable Diffusion XL 1.0 Base**, the weights can be downloaded from Hugging Face (about 8GB):
+<details>
+<summary>The most recent version of the application downloads the weights of the selected model automatically at the first run. Click here for how to download the weights manually.</summary>
+
+In the case of **Stable Diffusion 1.5**, the weights can be downloaded here (about 2GB).
+
+```
+git lfs install
+git clone --depth=1 https://huggingface.co/vitoplantamura/stable-diffusion-1.5-onnxstream
+```
+
+In the case of **Stable Diffusion XL 1.0 Base**, the weights can be downloaded here (about 8GB):
 
 ```
 git lfs install
@@ -264,6 +274,8 @@ In the case of **Stable Diffusion XL Turbo 1.0**, the weights can be downloaded 
 git lfs install
 git clone --depth=1 https://huggingface.co/AeroX2/stable-diffusion-xl-turbo-1.0-onnxstream
 ```
+
+</details>
 
 These are the command line options of the Stable Diffusion example:
 
@@ -282,9 +294,13 @@ These are the command line options of the Stable Diffusion example:
 --decoder-calibrate (ONLY SD 1.5) Calibrates the quantized version of the VAE decoder.
 --not-tiled         (ONLY SDXL 1.0) Don't use the tiled VAE decoder.
 --ram               Uses the RAM WeightsProvider (Experimental).
+--download          Forces the (re)download of the current model.
+--curl-parallel     Sets the number of parallel downloads with CURL. Default is 4.
 --rpi               Configures the models to run on a Raspberry Pi.
 --rpi-lowmem        Configures the models to run on a Raspberry Pi Zero 2.
 ```
+
+Options you're probably interested in: `--xl`, `--turbo`, `--prompt`, `--steps`, `--rpi`.
 
 # How to Convert and Run a Custom Stable Diffusion 1.5 Model with OnnxStream (by @GaelicThunder)
 
