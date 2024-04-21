@@ -2004,7 +2004,11 @@ int main(int argc, char** argv)
                 "vae_decoder_qu8/range_data.txt" };
         }
 
-        if (!g_main_args.m_download)
+        if (g_main_args.m_download)
+        {
+            g_main_args.m_path_with_slash += repo_name + "/";
+        }
+        else
         {
             auto does_exist = [](const std::string& f) -> bool
             {
