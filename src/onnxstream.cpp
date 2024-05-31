@@ -7226,7 +7226,7 @@ void Model::run()
             if (input_1_mod ||
                 compare_shapes(input_0.m_shape, input_1.m_shape))
             {
-                output_shape = input_0.m_shape;
+                output_shape = input_1_mod ? input_1.m_shape : input_0.m_shape;
 
                 size_t output_num_els = 1;
                 for (auto& s : output_shape)
