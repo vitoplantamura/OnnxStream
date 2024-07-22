@@ -1254,7 +1254,7 @@ inline static ncnn::Mat prompt_solve(std::unordered_map<std::string, int>& token
             for (std::string token : tokens)
             {
                 printf("Token: \"%s\"\n", token.c_str());
-                if (tokenizer_token2idx.find(token) != tokenizer_token2idx.end()) 
+                if (tokenizer_token2idx.find(token) != tokenizer_token2idx.end())
                     ids.push_back(tokenizer_token2idx[token]);
                 else
                     printf("Warning token: \"%s\" was ignored\n", token.c_str());
