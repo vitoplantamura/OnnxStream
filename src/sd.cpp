@@ -33,6 +33,7 @@
 #include <vector>
 #include <cstring>
 #include <filesystem>
+#include <regex>
 
 #if USE_NCNN
 #include "benchmark.h"
@@ -1205,16 +1206,16 @@ inline static std::vector<std::string> bpe(std::string str, std::unordered_map<s
     return word;
 }
 
+std::regex clip_pat_regex_pattern(R"(<\|startoftext\|>|<\|endoftext\|>|'s|'t|'re|'ve|'m|'ll|'d|[A-Za-z]+|\d|[^ \t\nA-Za-z\d])");
 inline static std::vector<std::string> split(std::string str, std::unordered_map<std::pair<std::string, std::string>, int, pair_hash>& tokenizer_bperankings)
 {
-    std::string const delims { "., " };
+    std::smatch match;
+    std::string::const_iterator search_start(str.cbegin());
     
-    size_t beg, pos = 0;
     std::vector<std::string> result;
-    while ((beg = str.find_first_not_of(delims, pos)) != std::string::npos)
+    while (std::regex_search(search_start, str.cend(), match, clip_pat_regex_pattern))
     {
-        pos = str.find_first_of(delims, beg + 1);
-        std::string s = str.substr(beg, pos - beg);
+        std::string s = match.str();
 
         if (tokenizer_bperankings.size() > 0)
         {
@@ -1223,13 +1224,15 @@ inline static std::vector<std::string> split(std::string str, std::unordered_map
         }
         else 
         {
-            std::string pat = std::string(1, str[pos]);
+            std::string pat = std::string(1, str[match.position()]);
             if (s.length() > 0)
                 result.push_back(s + "</w>");
 
             if (pat != " ")
                 result.push_back(pat + "</w>");
         }
+
+        search_start = match.suffix().first;
     }
 
     return result;
@@ -1251,7 +1254,7 @@ inline static ncnn::Mat prompt_solve(std::unordered_map<std::string, int>& token
             for (std::string token : tokens)
             {
                 printf("Token: \"%s\"\n", token.c_str());
-                if (tokenizer_token2idx.find(token) != tokenizer_token2idx.end())
+                if (tokenizer_token2idx.find(token) != tokenizer_token2idx.end()) 
                     ids.push_back(tokenizer_token2idx[token]);
                 else
                     printf("Warning token: \"%s\" was ignored\n", token.c_str());
