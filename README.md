@@ -226,7 +226,7 @@ Since the function prototypes of XnnPack can change at any time, I've included a
 ```
 git clone https://github.com/google/XNNPACK.git
 cd XNNPACK
-git checkout 579de32260742a24166ecd13213d2e60af862675
+git checkout 1c8ee1b68f3a3e0847ec3c53c186c5909fa3fbd3
 mkdir build
 cd build
 cmake -DXNNPACK_BUILD_TESTS=OFF -DXNNPACK_BUILD_BENCHMARKS=OFF ..

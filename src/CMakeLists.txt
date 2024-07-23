@@ -44,7 +44,7 @@ elseif(WIN32)
 	target_include_directories(${ONNXSTREAM_PROJECT_NAME} PRIVATE "${XNNPACK_DIR}/include")
 	target_include_directories(${ONNXSTREAM_PROJECT_NAME} PRIVATE "${XNNPACK_DIR}/build/pthreadpool-source/include")
 	target_link_libraries(${ONNXSTREAM_PROJECT_NAME} PRIVATE "${XNNPACK_DIR}/build/Release/XNNPACK.lib")
-  target_link_libraries(${ONNXSTREAM_PROJECT_NAME} PRIVATE "${XNNPACK_DIR}/build/pthreadpool/Release/pthreadpool.lib")
+	target_link_libraries(${ONNXSTREAM_PROJECT_NAME} PRIVATE "${XNNPACK_DIR}/build/pthreadpool/Release/pthreadpool.lib")
 	target_link_libraries(${ONNXSTREAM_PROJECT_NAME} PRIVATE "${XNNPACK_DIR}/build/cpuinfo/Release/cpuinfo.lib")
 
 	if(MAX_SPEED)
