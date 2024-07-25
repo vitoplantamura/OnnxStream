@@ -1128,8 +1128,8 @@ public:
         tensor_vector<T> output_data = create_tensor_vector<T>(output_size);
 
         typedef typename std::conditional<std::is_same<T, float>::value, float, void>::type xnn_ptr_type;
-        enum xnn_status(*xnn_create_sigmoid_nc_xxx)(size_t, size_t, size_t, uint32_t, xnn_operator_t*) = nullptr;
-        enum xnn_status(*xnn_reshape_sigmoid_nc_xxx)(xnn_operator_t, size_t, pthreadpool_t) = nullptr;
+        enum xnn_status(*xnn_create_sigmoid_nc_xxx)(uint32_t, xnn_operator_t*) = nullptr;
+        enum xnn_status(*xnn_reshape_sigmoid_nc_xxx)(xnn_operator_t, size_t, size_t, size_t, size_t, pthreadpool_t) = nullptr;
         enum xnn_status(*xnn_setup_sigmoid_nc_xxx)(xnn_operator_t, const xnn_ptr_type*, xnn_ptr_type*) = nullptr;
 
         if constexpr (std::is_same<T, float>::value)
@@ -1147,7 +1147,6 @@ public:
 
         xnn_operator_t sigmoid_op = nullptr;
         xnn_status status = xnn_create_sigmoid_nc_xxx(
-            1 /* channels */, 1 /* input stride */, 1 /* output stride */,
             0 /* flags */, &sigmoid_op);
         if (status != xnn_status_success || sigmoid_op == nullptr)
             throw std::runtime_error("failed to create Sigmoid operator");
@@ -1162,6 +1161,7 @@ public:
         status = xnn_reshape_sigmoid_nc_xxx(
             sigmoid_op,
             output_size /* batch_size */,
+            1 /* channels */, 1 /* input stride */, 1 /* output stride */,
             threadpool /* thread pool */);
         if (status != xnn_status_success)
             throw std::runtime_error("failed to reshape Sigmoid operator");
@@ -1248,8 +1248,8 @@ public:
             uint8_t>::type>::type xnn_ptr_type;
 
         enum xnn_status(*xnn_create_convolution2d_nhwc_xxx)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, size_t, size_t, size_t, size_t, const xnn_ptr_type*, const xnn_ptr_type*, float, float, uint32_t, xnn_code_cache_t, xnn_weights_cache_t, xnn_operator_t*) = nullptr;
-        enum xnn_status(*xnn_reshape_convolution2d_nhwc_xxx)(xnn_operator_t, size_t, size_t, size_t, size_t*, size_t*, pthreadpool_t) = nullptr;
-        enum xnn_status(*xnn_setup_convolution2d_nhwc_xxx)(xnn_operator_t, const xnn_ptr_type*, xnn_ptr_type*) = nullptr;
+        enum xnn_status(*xnn_reshape_convolution2d_nhwc_xxx)(xnn_operator_t, size_t, size_t, size_t, size_t*, size_t*, size_t*, size_t*, pthreadpool_t) = nullptr;
+        enum xnn_status(*xnn_setup_convolution2d_nhwc_xxx)(xnn_operator_t, void*, const xnn_ptr_type*, xnn_ptr_type*) = nullptr;
 
         if constexpr (std::is_same<T, float>::value)
         {
@@ -1312,8 +1312,11 @@ public:
             convolution_op = nullptr;
         });
 
+        size_t workspace_size = 0;
+        size_t workspace_alignment = 0;
         status = xnn_reshape_convolution2d_nhwc_xxx(
             convolution_op, batch_size, input_height, input_width,
+            &workspace_size, &workspace_alignment,
             /*output_height_out=*/nullptr, /*output_width_out=*/nullptr,
             /*threadpool=*/ threadpool);
         if (status != xnn_status_success)
@@ -1321,6 +1324,7 @@ public:
 
         status = xnn_setup_convolution2d_nhwc_xxx(
             convolution_op,
+            nullptr,
             x_data.data(), output_data.data());
         if (status != xnn_status_success)
             throw std::runtime_error("failed to setup FP32 Convolution operator");
@@ -1763,8 +1767,8 @@ public:
             typename std::conditional<std::is_same<T, uint16_t>::value, void,
             uint8_t>::type>::type xnn_ptr_type;
 
-        enum xnn_status(*xnn_create_softmax_nc_xxx)(size_t, size_t, size_t, uint32_t, xnn_operator_t*) = nullptr;
-        enum xnn_status(*xnn_reshape_softmax_nc_xxx)(xnn_operator_t, size_t, pthreadpool_t) = nullptr;
+        enum xnn_status(*xnn_create_softmax_nc_xxx)(uint32_t, xnn_operator_t*) = nullptr;
+        enum xnn_status(*xnn_reshape_softmax_nc_xxx)(xnn_operator_t, size_t, size_t, size_t, size_t, pthreadpool_t) = nullptr;
         enum xnn_status(*xnn_setup_softmax_nc_xxx)(xnn_operator_t, const xnn_ptr_type*, xnn_ptr_type*) = nullptr;
 
         if constexpr (std::is_same<T, float>::value)
@@ -1795,13 +1799,11 @@ public:
         if constexpr (!std::is_same<T, uint8_t>::value)
         {
             status = xnn_create_softmax_nc_xxx(
-                channels /* channels */, channels /* input stride */, channels /* output stride */,
                 0 /* flags */, &softmax_op);
         }
         else
         {
             status = xnn_create_softmax_nc_qu8(
-                channels /* channels */, channels /* input stride */, channels /* output stride */,
                 qu8_data->input_scale,
                 qu8_data->output_zero_point,
                 qu8_data->output_scale,
@@ -1820,6 +1822,7 @@ public:
 
         status = xnn_reshape_softmax_nc_xxx(
             softmax_op,
+            channels /* channels */, channels /* input stride */, channels /* output stride */,
             batch_size /* batch_size */,
             threadpool /* thread pool */);
         if (status != xnn_status_success)
