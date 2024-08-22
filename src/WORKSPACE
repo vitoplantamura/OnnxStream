@@ -1,0 +1,107 @@
+#
+# Based on https://raw.githubusercontent.com/tensorflow/tfjs/master/WORKSPACE
+#
+
+workspace(name = "onnxstream")
+
+load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+
+# Emscripten toolchain
+http_archive(
+    name = "emsdk",
+    # TODO: Remove repo_mapping when emsdk updates to rules_nodejs 5
+    # repo_mapping = {"@nodejs": "@nodejs_host"},
+    sha256 = "b8270749b99d8d14922d1831b93781a5560fba6f7bce65cd477fc1b6aa262535",
+    strip_prefix = "emsdk-3.1.28/bazel",
+    urls = ["https://github.com/emscripten-core/emsdk/archive/refs/tags/3.1.28.tar.gz"],
+)
+
+load("@emsdk//:deps.bzl", emsdk_deps = "deps")
+
+emsdk_deps()
+
+load("@emsdk//:emscripten_deps.bzl", emsdk_emscripten_deps = "emscripten_deps")
+
+emsdk_emscripten_deps()
+
+load("@emsdk//:toolchains.bzl", "register_emscripten_toolchains")
+
+register_emscripten_toolchains()
+
+load("@bazel_tools//tools/build_defs/repo:git.bzl", "git_repository")
+
+# xnnpack used for fast vectorized wasm operations
+git_repository(
+    name = "xnnpack",
+    commit = "1c8ee1b68f3a3e0847ec3c53c186c5909fa3fbd3",
+    remote = "https://github.com/google/XNNPACK.git",
+    # shallow_since = "1643627844 -0800",
+)
+
+# The libraries below are transitive dependencies of XNNPACK that we need to
+# explicitly enumerate here. See https://docs.bazel.build/versions/master/external.html#transitive-dependencies
+
+# FP16 library, used for half-precision conversions
+http_archive(
+    name = "FP16",
+    build_file = "@xnnpack//third_party:FP16.BUILD",
+    sha256 = "e66e65515fa09927b348d3d584c68be4215cfe664100d01c9dbc7655a5716d70",
+    strip_prefix = "FP16-0a92994d729ff76a58f692d3028ca1b64b145d91",
+    urls = [
+        "https://github.com/Maratyszcza/FP16/archive/0a92994d729ff76a58f692d3028ca1b64b145d91.zip",
+    ],
+)
+
+# FXdiv library, used for repeated integer division by the same factor
+http_archive(
+    name = "FXdiv",
+    sha256 = "ab7dfb08829bee33dca38405d647868fb214ac685e379ec7ef2bebcd234cd44d",
+    strip_prefix = "FXdiv-b408327ac2a15ec3e43352421954f5b1967701d1",
+    urls = [
+        "https://github.com/Maratyszcza/FXdiv/archive/b408327ac2a15ec3e43352421954f5b1967701d1.zip",
+    ],
+)
+
+# pthreadpool library, used for parallelization
+http_archive(
+    name = "pthreadpool",
+    sha256 = "a4cf06de57bfdf8d7b537c61f1c3071bce74e57524fe053e0bbd2332feca7f95",
+    strip_prefix = "pthreadpool-4fe0e1e183925bf8cfa6aae24237e724a96479b8",
+    urls = [
+        "https://github.com/Maratyszcza/pthreadpool/archive/4fe0e1e183925bf8cfa6aae24237e724a96479b8.zip",
+    ],
+)
+
+# clog library, used for logging
+# http_archive(
+#    name = "clog",
+#    build_file = "@xnnpack//third_party:clog.BUILD",
+#    sha256 = "3f2dc1970f397a0e59db72f9fca6ff144b216895c1d606f6c94a507c1e53a025",
+#    strip_prefix = "cpuinfo-d5e37adf1406cf899d7d9ec1d317c47506ccb970",
+#    urls = [
+#        "https://github.com/pytorch/cpuinfo/archive/d5e37adf1406cf899d7d9ec1d317c47506ccb970.tar.gz",
+#    ],
+#)
+
+# cpuinfo library, used for detecting processor characteristics
+http_archive(
+    name = "cpuinfo",
+    build_file = "@xnnpack//third_party:cpuinfo.BUILD",
+    patches = ["@xnnpack//third_party:cpuinfo.patch"],
+    sha256 = "5d7f00693e97bd7525753de94be63f99b0490ae6855df168f5a6b2cfc452e49e",
+    strip_prefix = "cpuinfo-3c8b1533ac03dd6531ab6e7b9245d488f13a82a5",
+    urls = [
+        "https://github.com/pytorch/cpuinfo/archive/3c8b1533ac03dd6531ab6e7b9245d488f13a82a5.zip",
+    ],
+)
+
+# psimd library, used for fallback 128-bit SIMD micro-kernels
+# http_archive(
+#    name = "psimd",
+#    build_file = "@xnnpack//third_party:psimd.BUILD",
+#    sha256 = "dc615342bcbe51ca885323e51b68b90ed9bb9fa7df0f4419dbfa0297d5e837b7",
+#    strip_prefix = "psimd-072586a71b55b7f8c584153d223e95687148a900",
+#    urls = [
+#        "https://github.com/Maratyszcza/psimd/archive/072586a71b55b7f8c584153d223e95687148a900.zip",
+#    ],
+#)

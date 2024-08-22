@@ -1,0 +1,132 @@
+#
+# Based on https://raw.githubusercontent.com/tensorflow/tfjs/master/tfjs-backend-wasm/src/cc/BUILD.bazel
+#
+# This file is only used to build the Wasm binaries of OnnxStream.
+#
+# To build:
+#
+# bazel build -c opt --copt="-Wno-unused-function" --copt="-Wno-unused-but-set-variable" //:onnxstream-wasm
+# bazel build -c opt --copt="-Wno-unused-function" --copt="-Wno-unused-but-set-variable" --copt="-msimd128" //:onnxstream-wasm-simd
+# bazel build -c opt --copt="-Wno-unused-function" --copt="-Wno-unused-but-set-variable" --copt="-pthread" --copt="-msimd128" //:onnxstream-wasm-threaded-simd
+#
+
+load("@emsdk//emscripten_toolchain:wasm_rules.bzl", "wasm_cc_binary")
+
+BASE_LINKOPTS = [
+    "-s ALLOW_MEMORY_GROWTH=1",
+    "-s MAXIMUM_MEMORY=4GB",
+    "-s DEFAULT_LIBRARY_FUNCS_TO_INCLUDE=[]",
+    "-s DISABLE_EXCEPTION_CATCHING=1",
+    "-s FILESYSTEM=0",
+    "-s EXIT_RUNTIME=0",
+    "-s EXPORTED_FUNCTIONS='[\"_malloc\", \"_free\"]'",
+    "-s EXPORTED_RUNTIME_METHODS='[\"cwrap\"]'",
+    "-s MODULARIZE=1",
+    "-s MALLOC=emmalloc",
+    # "--pre-js $(location :pre.js)",
+    # "--post-js $(location :post.js)",
+    "-fexceptions",
+]
+
+cc_binary(
+    name = "onnxstream-wasm.js",
+    # srcs = ["wasm.cpp"], # + KERNELS_WITH_KEEPALIVE,
+    # additional_linker_inputs = [
+    #    "pre.js",
+    #    "post.js",
+    # ],
+    linkopts = BASE_LINKOPTS + [
+        "-s EXPORT_NAME=WasmBackendModule",
+    ],
+    deps = [
+        # ":all_kernels",
+        # ":backend",
+        "onnxstream"
+    ],
+)
+
+cc_binary(
+    name = "onnxstream-wasm-simd.js",
+    # srcs = ["wasm.cpp"], # + KERNELS_WITH_KEEPALIVE,
+    # additional_linker_inputs = [
+    #    "pre.js",
+    #    "post.js",
+    #],
+    copts = [
+        "-msimd128",
+    ],
+    linkopts = BASE_LINKOPTS,
+    deps = [
+        # ":all_kernels",
+        # ":backend",
+        "onnxstream"
+    ],
+)
+
+cc_binary(
+    name = "onnxstream-wasm-threaded-simd.js",
+    # srcs = ["wasm.cpp"], # + KERNELS_WITH_KEEPALIVE,
+    # additional_linker_inputs = [
+    #    "pre.js",
+    #    "post.js",
+    #],
+    copts = [
+        "-msimd128",
+        "-pthread",
+    ],
+    linkopts = BASE_LINKOPTS + [
+        "-s EXPORT_NAME=WasmBackendModuleThreadedSimd",
+        "-s MALLOC=emmalloc",
+        "-s USE_PTHREADS=1",
+        # Pre-create 8 webworkers (threads). The actual number of threads that
+        # will be used by XNNPACK for creating the threadpool might be fewer. It
+        # is by default set to the number of logical cores which in most cases
+        # should be fewer than 8. It can also be set manually by calling the
+        # `setThreadsCount` API.
+        "-s PTHREAD_POOL_SIZE=8",
+    ],
+    deps = [
+        # ":all_kernels",
+        # ":backend",
+        "onnxstream"
+    ],
+)
+
+wasm_cc_binary(
+    name = "onnxstream-wasm",
+    cc_target = ":onnxstream-wasm.js",
+    tags = ["local"],
+)
+
+wasm_cc_binary(
+    name = "onnxstream-wasm-simd",
+    cc_target = ":onnxstream-wasm-simd.js",
+    simd = True,
+    tags = ["local"],
+)
+
+wasm_cc_binary(
+    name = "onnxstream-wasm-threaded-simd",
+    cc_target = ":onnxstream-wasm-threaded-simd.js",
+    simd = True,
+    tags = ["local"],
+    threads = "emscripten",
+)
+
+cc_library(
+    name = "onnxstream",
+    srcs = ["wasm.cpp", "onnxstream.cpp"],
+    hdrs = ["onnxstream.h"],
+    copts = [
+        "-fexceptions",
+        "--std=c++20",
+        "-Wno-dangling-else",
+        "-Wno-pessimizing-move",
+        "-Wno-switch",
+        "-Wno-shift-op-parentheses",
+        "-Wno-exceptions",
+    ],
+    deps = [
+        "@xnnpack//:xnnpack_for_tfjs",
+    ],
+)
