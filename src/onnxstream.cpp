@@ -2235,6 +2235,7 @@ void Model::read_string(const char* string, const char* path_with_slash /*= "./"
     m_model.clear();
 
     size_t len = std::strlen(string);
+    m_model.reserve(len);
     for (size_t i = 0; i < len; i++)
         m_model.push_back(string[i]);
 
