@@ -293,9 +293,22 @@ class CollectNamesWeightsProvider : public WeightsProvider
 {
 public:
 
-    std::set<std::string> m_names;
+    bool m_use_vector = false;
 
-    virtual void on_init(TensorDataType type, const std::string& name, size_t size) { m_names.insert(name); }
+    std::set<std::string> m_names;
+    std::vector<std::string> m_names_vec;
+
+    CollectNamesWeightsProvider(bool use_vector = false)
+        : m_use_vector(use_vector)
+    {}
+
+    virtual void on_init(TensorDataType type, const std::string& name, size_t size)
+    {
+        if (!m_use_vector)
+            m_names.insert(name);
+        else
+            m_names_vec.push_back(name);
+    }
 
     virtual tensor_vector<uint8_t> get_uint8(const std::string& name) { throw std::invalid_argument("Not implemented."); }
     virtual tensor_vector<uint16_t> get_float16(const std::string& name) { throw std::invalid_argument("Not implemented."); }
@@ -718,6 +731,10 @@ private:
 
 public:
 
+    RamWeightsProvider()
+    {
+    }
+
     RamWeightsProvider(T&& reader)
     {
         m_reader = std::make_shared<T>(std::move(reader));
@@ -847,6 +864,19 @@ public:
     virtual std::shared_ptr<tensor_vector<int64_t>> getptr_int64(const std::string& name)
     {
         return provide<int64_t>(name);
+    }
+
+public:
+
+    template <typename U>
+    void* add_empty_and_return_ptr(const std::string& name, size_t size)
+    {
+        Entry e;
+        e.m_name = name;
+        e.m_data = std::make_shared<tensor_vector<U>>(tensor_vector<U>(size));
+        m_weights.push_back(std::move(e));
+
+        return std::get<std::shared_ptr<tensor_vector<U>>>(m_weights.back().m_data)->data();
     }
 };
 
