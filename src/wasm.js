@@ -5,6 +5,8 @@ function Model(Module)
     var model_read_string = Module.cwrap('model_read_string', null, ['number', 'string']);
     var model_get_weights_names = Module.cwrap('model_get_weights_names', 'number', ['number']);
     var model_add_weights_file = Module.cwrap('model_add_weights_file', 'number', ['number', 'string', 'number']);
+    var model_add_tensor = Module.cwrap('model_add_tensor', 'number', ['number', 'string', 'number', 'number']);
+    var model_get_tensor = Module.cwrap('model_get_tensor', 'number', ['number', 'string']);
 
     var instance = model_new();
 
@@ -27,5 +29,32 @@ function Model(Module)
         var ta = new Float32Array(buffer);
         var ptr = model_add_weights_file(instance, name, ta.length);
         Module.HEAPU8.set(new Uint8Array(ta.buffer), ptr >>> 0);
+    };
+
+    this.add_tensor = function (name, shape, buffer) {
+        var ta32 = new Uint32Array(shape);
+        var ta8 = new Uint8Array(ta32.buffer);
+        var buf = Module._malloc(ta8.length);
+        Module.HEAPU8.set(ta8, buf >>> 0);
+        var ptr = model_add_tensor(instance, name, ta32.length, buf);
+        Module._free(buf);
+        var taData = new Float32Array(buffer);
+        Module.HEAPU8.set(new Uint8Array(taData.buffer), ptr >>> 0);
+    };
+
+    this.get_tensor = function (name) {
+        var buf = model_get_tensor(instance, name);
+        if (!buf)
+            return null;
+        var ta = new Uint32Array(Module.HEAPU8.buffer, buf >>> 0, 4);
+        var dims_num = ta[0];
+        var dims = ta[1];
+        var data_num = ta[2];
+        var data = ta[3];
+        Module._free(buf);
+        return {
+            shape: new Uint32Array(Module.HEAPU8.buffer, dims, dims_num),
+            data: new Float32Array(Module.HEAPU8.buffer, data, data_num)
+        };
     };
 }

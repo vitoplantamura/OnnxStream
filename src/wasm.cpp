@@ -70,3 +70,53 @@ ONNXSTREAM_EXPORT void* model_add_weights_file(ModelContext* obj, char* name, un
 {
 	return obj->m_model.get_weights_provider<RamWeightsProvider<WeightsProvider>>().add_empty_and_return_ptr<float>(name, size);
 }
+
+ONNXSTREAM_EXPORT void* model_add_tensor(ModelContext* obj, char* name, unsigned int dims_num, unsigned int* dims)
+{
+	Tensor t;
+	t.m_name = name;
+
+	size_t num_els = 1;
+	t.m_shape.reserve(dims_num);
+	for (size_t i = 0; i < dims_num; i++)
+	{
+		t.m_shape.push_back(dims[i]);
+		num_els *= dims[i];
+	}
+
+	tensor_vector<float> data(num_els);
+	t.set_vector(std::move(data));
+	obj->m_model.push_tensor(std::move(t));
+
+	return obj->m_model.m_data.back().get_vector<float>().data();
+}
+
+ONNXSTREAM_EXPORT void* model_get_tensor(ModelContext* obj, char* name)
+{
+	Tensor* t = nullptr;
+	for (auto& tensor : obj->m_model.m_data)
+		if (tensor.m_name == name)
+		{
+			t = &tensor;
+			break;
+		}
+	if (!t)
+		return nullptr;
+
+	struct ReturnLayout
+	{
+		size_t dims_num;
+		size_t* dims;
+		size_t data_num;
+		float* data;
+	};
+
+	ReturnLayout* c_ret = (ReturnLayout*)::malloc(sizeof(ReturnLayout));
+
+	c_ret->dims_num = t->m_shape.size();
+	c_ret->dims = t->m_shape.data();
+	c_ret->data_num = t->get_vector<float>().size();
+	c_ret->data = t->get_vector<float>().data();
+
+	return c_ret;
+}
