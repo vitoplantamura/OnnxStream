@@ -51,7 +51,18 @@ ONNXSTREAM_EXPORT char* model_get_weights_names(ModelContext* obj)
 
 	for (auto& name : names)
 	{
-		auto fn = name;
+		if (name.m_type == TensorDataType::uint8)
+			ret += "uint8:";
+		else if (name.m_type == TensorDataType::float16)
+			ret += "float16:";
+		else if (name.m_type == TensorDataType::float32)
+			ret += "float32:";
+		else if (name.m_type == TensorDataType::int64)
+			ret += "int64:";
+		else
+			throw std::invalid_argument("Unsupported tensor data format.");
+
+		auto fn = name.m_name;
 		auto lpos = fn.find("_nchw.bin");
 		if (lpos != std::string::npos)
 			fn = fn.substr(0, lpos) + "_nhwc.bin";
@@ -66,12 +77,23 @@ ONNXSTREAM_EXPORT char* model_get_weights_names(ModelContext* obj)
 	return c_ret;
 }
 
-ONNXSTREAM_EXPORT void* model_add_weights_file(ModelContext* obj, char* name, unsigned int size)
+ONNXSTREAM_EXPORT void* model_add_weights_file(ModelContext* obj, char* type, char* name, unsigned int size)
 {
-	return obj->m_model.get_weights_provider<RamWeightsProvider<WeightsProvider>>().add_empty_and_return_ptr<float>(name, size);
+	auto& wp = obj->m_model.get_weights_provider<RamWeightsProvider<WeightsProvider>>();
+
+	if (!::strcmp(type, "uint8"))
+		return wp.add_empty_and_return_ptr<uint8_t>(name, size / sizeof(uint8_t));
+	else if (!::strcmp(type, "float16"))
+		return wp.add_empty_and_return_ptr<uint16_t>(name, size / sizeof(uint16_t));
+	else if (!::strcmp(type, "float32"))
+		return wp.add_empty_and_return_ptr<float>(name, size / sizeof(float));
+	else if (!::strcmp(type, "int64"))
+		return wp.add_empty_and_return_ptr<int64_t>(name, size / sizeof(int64_t));
+	else
+		throw std::invalid_argument("Unsupported tensor data format.");
 }
 
-ONNXSTREAM_EXPORT void* model_add_tensor(ModelContext* obj, char* name, unsigned int dims_num, unsigned int* dims)
+ONNXSTREAM_EXPORT void* model_add_tensor(ModelContext* obj, char* type, char* name, unsigned int dims_num, unsigned int* dims)
 {
 	Tensor t;
 	t.m_name = name;
@@ -84,11 +106,27 @@ ONNXSTREAM_EXPORT void* model_add_tensor(ModelContext* obj, char* name, unsigned
 		num_els *= dims[i];
 	}
 
-	tensor_vector<float> data(num_els);
-	t.set_vector(std::move(data));
+	if (!::strcmp(type, "float32"))
+	{
+		tensor_vector<float> data(num_els);
+		t.set_vector(std::move(data));
+	}
+	else if (!::strcmp(type, "int64"))
+	{
+		tensor_vector<int64_t> data(num_els);
+		t.set_vector(std::move(data));
+	}
+	else
+		throw std::invalid_argument("Unsupported tensor data format.");
+
 	obj->m_model.push_tensor(std::move(t));
 
-	return obj->m_model.m_data.back().get_vector<float>().data();
+	if (!::strcmp(type, "float32"))
+		return obj->m_model.m_data.back().get_vector<float>().data();
+	else if (!::strcmp(type, "int64"))
+		return obj->m_model.m_data.back().get_vector<int64_t>().data();
+	else
+		throw std::invalid_argument("Unsupported tensor data format.");
 }
 
 ONNXSTREAM_EXPORT void* model_get_tensor(ModelContext* obj, char* name)

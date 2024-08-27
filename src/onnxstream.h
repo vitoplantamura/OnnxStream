@@ -293,10 +293,21 @@ class CollectNamesWeightsProvider : public WeightsProvider
 {
 public:
 
+    struct Entry
+    {
+        TensorDataType m_type;
+        std::string m_name;
+        size_t m_size;
+
+        Entry(TensorDataType type, const std::string& name, size_t size)
+            : m_type(type), m_name(name), m_size(size)
+        {}
+    };
+
     bool m_use_vector = false;
 
     std::set<std::string> m_names;
-    std::vector<std::string> m_names_vec;
+    std::vector<Entry> m_names_vec;
 
     CollectNamesWeightsProvider(bool use_vector = false)
         : m_use_vector(use_vector)
@@ -307,7 +318,7 @@ public:
         if (!m_use_vector)
             m_names.insert(name);
         else
-            m_names_vec.push_back(name);
+            m_names_vec.emplace_back(type, name, size);
     }
 
     virtual tensor_vector<uint8_t> get_uint8(const std::string& name) { throw std::invalid_argument("Not implemented."); }

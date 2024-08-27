@@ -4,8 +4,8 @@ function Model(Module)
     var model_delete = Module.cwrap('model_delete', null, ['number']);
     var model_read_string = Module.cwrap('model_read_string', null, ['number', 'number']);
     var model_get_weights_names = Module.cwrap('model_get_weights_names', 'number', ['number']);
-    var model_add_weights_file = Module.cwrap('model_add_weights_file', 'number', ['number', 'string', 'number']);
-    var model_add_tensor = Module.cwrap('model_add_tensor', 'number', ['number', 'string', 'number', 'number']);
+    var model_add_weights_file = Module.cwrap('model_add_weights_file', 'number', ['number', 'string', 'string', 'number']);
+    var model_add_tensor = Module.cwrap('model_add_tensor', 'number', ['number', 'string', 'string', 'number', 'number']);
     var model_get_tensor = Module.cwrap('model_get_tensor', 'number', ['number', 'string']);
     var model_run = Module.cwrap('model_run', null, ['number']);
     var model_clear_tensors = Module.cwrap('model_clear_tensors', null, ['number']);
@@ -32,20 +32,21 @@ function Model(Module)
         return ret;
     };
 
-    this.add_weights_file = function (name, buffer) {
-        var ta = new Float32Array(buffer);
-        var ptr = model_add_weights_file(instance, name, ta.length);
-        Module.HEAPU8.set(new Uint8Array(ta.buffer), ptr >>> 0);
+    this.add_weights_file = function (type, name, buffer) {
+        var ta = new Uint8Array(buffer);
+        var ptr = model_add_weights_file(instance, type, name, ta.length);
+        Module.HEAPU8.set(ta, ptr >>> 0);
     };
 
-    this.add_tensor = function (name, shape, buffer) {
+    this.add_tensor = function (name, shape, buffer, type) {
+        type = typeof type == "string" ? type : "float32";
         var ta32 = new Uint32Array(shape);
         var ta8 = new Uint8Array(ta32.buffer);
         var buf = Module._malloc(ta8.length);
         Module.HEAPU8.set(ta8, buf >>> 0);
-        var ptr = model_add_tensor(instance, name, ta32.length, buf);
+        var ptr = model_add_tensor(instance, type, name, ta32.length, buf);
         Module._free(buf);
-        var taData = new Float32Array(buffer);
+        var taData = type == "int64" ? new BigInt64Array(buffer) : new Float32Array(buffer);
         Module.HEAPU8.set(new Uint8Array(taData.buffer), ptr >>> 0);
     };
 
