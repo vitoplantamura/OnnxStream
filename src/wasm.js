@@ -2,7 +2,7 @@ function Model(Module)
 {
     var model_new = Module.cwrap('model_new', 'number', []);
     var model_delete = Module.cwrap('model_delete', null, ['number']);
-    var model_read_string = Module.cwrap('model_read_string', null, ['number', 'string']);
+    var model_read_string = Module.cwrap('model_read_string', null, ['number', 'number']);
     var model_get_weights_names = Module.cwrap('model_get_weights_names', 'number', ['number']);
     var model_add_weights_file = Module.cwrap('model_add_weights_file', 'number', ['number', 'string', 'number']);
     var model_add_tensor = Module.cwrap('model_add_tensor', 'number', ['number', 'string', 'number', 'number']);
@@ -18,7 +18,11 @@ function Model(Module)
     };
 
     this.read_string = function (str) {
-        model_read_string(instance, str);
+        var len = (str.length << 2) + 1;
+        var buf = Module._malloc(len);
+        Module.stringToUTF8(str, buf, len);
+        model_read_string(instance, buf);
+        Module._free(buf);
     };
 
     this.get_weights_names = function () {

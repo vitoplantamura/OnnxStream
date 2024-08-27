@@ -20,7 +20,7 @@ BASE_LINKOPTS = [
     "-s FILESYSTEM=0",
     "-s EXIT_RUNTIME=0",
     "-s EXPORTED_FUNCTIONS='[\"_malloc\", \"_free\", \"_model_new\", \"_model_delete\", \"_model_read_string\", \"_model_get_weights_names\", \"_model_add_weights_file\", \"_model_add_tensor\", \"_model_get_tensor\", \"_model_run\", \"_model_clear_tensors\", \"_model_set_option\"]'",
-    "-s EXPORTED_RUNTIME_METHODS='[\"cwrap\", \"UTF8ToString\"]'",
+    "-s EXPORTED_RUNTIME_METHODS='[\"cwrap\", \"UTF8ToString\", \"stringToUTF8\"]'",
     "-s MODULARIZE=1",
     "-s MALLOC=emmalloc",
     # "--pre-js $(location :pre.js)",
