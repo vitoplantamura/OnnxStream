@@ -120,3 +120,39 @@ ONNXSTREAM_EXPORT void* model_get_tensor(ModelContext* obj, char* name)
 
 	return c_ret;
 }
+
+ONNXSTREAM_EXPORT void model_run(ModelContext* obj)
+{
+	try
+	{
+		obj->m_model.run();
+	}
+	catch (const std::exception& e)
+	{
+		printf("=== ERROR === %s\n", e.what());
+		throw;
+	}
+}
+
+ONNXSTREAM_EXPORT void model_clear_tensors(ModelContext* obj)
+{
+	obj->m_model.m_data.clear();
+}
+
+ONNXSTREAM_EXPORT void model_set_option(ModelContext* obj, char* name, unsigned int value)
+{
+#define DEFINE_OPTION_BOOL(O) if (!::strcmp(name, #O)) obj->m_model.m_##O = value ? true : false;
+	DEFINE_OPTION_BOOL(use_fp16_arithmetic)
+	DEFINE_OPTION_BOOL(use_uint8_qdq)
+	DEFINE_OPTION_BOOL(use_uint8_arithmetic)
+	DEFINE_OPTION_BOOL(do_multipart_quantization)
+	DEFINE_OPTION_BOOL(fuse_ops_in_attention)
+	DEFINE_OPTION_BOOL(force_fp16_storage)
+	DEFINE_OPTION_BOOL(support_dynamic_shapes)
+	DEFINE_OPTION_BOOL(use_ops_cache)
+	DEFINE_OPTION_BOOL(use_scaled_dp_attn_op)
+	DEFINE_OPTION_BOOL(use_next_op_cache)
+	DEFINE_OPTION_BOOL(ops_printf)
+	DEFINE_OPTION_BOOL(ops_times_printf)
+#undef DEFINE_OPTION_BOOL
+}

@@ -656,6 +656,7 @@ class RamWeightsProvider : public WeightsProvider
 private:
 
     std::shared_ptr<T> m_reader;
+    bool m_reader_specified = true;
 
 private:
 
@@ -733,6 +734,7 @@ public:
 
     RamWeightsProvider()
     {
+        m_reader_specified = false;
     }
 
     RamWeightsProvider(T&& reader)
@@ -748,7 +750,7 @@ public:
     {
         if (m_reader)
             m_reader->on_init(type, name, size);
-        else
+        else if (m_reader_specified)
             throw std::invalid_argument("RamWeightsProvider::on_init: invalid call to on_init.");
     }
 

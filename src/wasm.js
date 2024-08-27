@@ -7,6 +7,9 @@ function Model(Module)
     var model_add_weights_file = Module.cwrap('model_add_weights_file', 'number', ['number', 'string', 'number']);
     var model_add_tensor = Module.cwrap('model_add_tensor', 'number', ['number', 'string', 'number', 'number']);
     var model_get_tensor = Module.cwrap('model_get_tensor', 'number', ['number', 'string']);
+    var model_run = Module.cwrap('model_run', null, ['number']);
+    var model_clear_tensors = Module.cwrap('model_clear_tensors', null, ['number']);
+    var model_set_option = Module.cwrap('model_set_option', null, ['number', 'string', 'number']);
 
     var instance = model_new();
 
@@ -56,5 +59,17 @@ function Model(Module)
             shape: new Uint32Array(Module.HEAPU8.buffer, dims, dims_num),
             data: new Float32Array(Module.HEAPU8.buffer, data, data_num)
         };
+    };
+
+    this.run = function () {
+        model_run(instance);
+    };
+
+    this.clear_tensors = function () {
+        model_clear_tensors(instance);
+    };
+
+    this.set_option = function (name, value) {
+        model_set_option(instance, name, value ? 1 : 0);
     };
 }
