@@ -36,7 +36,7 @@ cc_binary(
     #    "post.js",
     # ],
     linkopts = BASE_LINKOPTS + [
-        "-s EXPORT_NAME=WasmBackendModule",
+        "-s EXPORT_NAME=OnnxStreamModule",
     ],
     deps = [
         # ":all_kernels",
@@ -55,7 +55,9 @@ cc_binary(
     copts = [
         "-msimd128",
     ],
-    linkopts = BASE_LINKOPTS,
+    linkopts = BASE_LINKOPTS + [
+        "-s EXPORT_NAME=OnnxStreamModuleSimd",
+    ],
     deps = [
         # ":all_kernels",
         # ":backend",
@@ -75,7 +77,7 @@ cc_binary(
         "-pthread",
     ],
     linkopts = BASE_LINKOPTS + [
-        "-s EXPORT_NAME=WasmBackendModuleThreadedSimd",
+        "-s EXPORT_NAME=OnnxStreamModuleThreadedSimd",
         "-s MALLOC=emmalloc",
         "-s USE_PTHREADS=1",
         # Pre-create 8 webworkers (threads). The actual number of threads that

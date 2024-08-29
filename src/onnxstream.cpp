@@ -492,9 +492,9 @@ public:
 
 public:
 
-    XnnPack()
+    XnnPack(int threads_count)
     {
-        threadpool = pthreadpool_create(0);
+        threadpool = pthreadpool_create(threads_count);
         if (threadpool == nullptr)
             throw std::runtime_error("failed to create threadpool");
 
@@ -2199,9 +2199,10 @@ const size_t Model::m_float16_buffer_size = m_perthread_buffer_size / sizeof(uin
 const size_t Model::m_float32_buffer_size = m_perthread_buffer_size / sizeof(float);
 const size_t Model::m_float32_buffer_size_w_extra_bytes = m_float32_buffer_size + XNN_EXTRA_BYTES / sizeof(float);
 
-Model::Model()
+Model::Model(int threads_count /*= 0*/)
 {
-    m_xnnpack = new XnnPack();
+    if (threads_count >= 0)
+        m_xnnpack = new XnnPack(threads_count);
 }
 
 Model::~Model()

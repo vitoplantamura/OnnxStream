@@ -14,13 +14,28 @@ class ModelContext
 {
 public:
 
+	ModelContext(int threads_count)
+		: m_model(threads_count)
+	{
+	}
+
 	Model m_model;
 	std::string m_def;
 };
 
 ONNXSTREAM_EXPORT ModelContext* model_new()
 {
-	ModelContext* obj = new ModelContext();
+	int threads_count = 0;
+
+#ifdef __EMSCRIPTEN_PTHREADS__
+	threads_count = emscripten_num_logical_cores() / 2;
+	if (threads_count < 1)
+		threads_count = 1;
+	else if (threads_count > 8)
+		threads_count = 8;
+#endif
+
+	ModelContext* obj = new ModelContext(threads_count);
 
 	obj->m_model.set_weights_provider(RamWeightsProvider<WeightsProvider>());
 
@@ -40,7 +55,7 @@ ONNXSTREAM_EXPORT void model_read_string(ModelContext* obj, char* str)
 
 ONNXSTREAM_EXPORT char* model_get_weights_names(ModelContext* obj)
 {
-	Model model;
+	Model model(/* threads_count */ -1);
 	model.m_support_dynamic_shapes = true;
 	model.set_weights_provider(CollectNamesWeightsProvider(/* use_vector */ true));
 	model.read_string(obj->m_def.c_str());

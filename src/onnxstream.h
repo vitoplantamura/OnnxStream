@@ -908,7 +908,7 @@ class Model
 {
 public:
 
-    Model();
+    Model(int threads_count = 0);
     ~Model();
 
     template <typename T>
