@@ -5669,8 +5669,9 @@ void Model::run()
             if (axis < 0 || axis >= input.m_shape.size())
                 throw std::invalid_argument(op.m_type + ": invalid axis attribute.");
 
-            if (axis != input.m_shape.size() - 1)
-                throw std::invalid_argument(op.m_type + ": split supported on last axis only (not implemented).");
+            size_t group_size = 1;
+            for (size_t i = axis + 1; i < input.m_shape.size(); i++)
+                group_size *= input.m_shape[i];
 
             if (op.m_output.size() != split_data.size()) throw std::invalid_argument(op.m_type + ": wrong number of outputs.");
 
@@ -5706,11 +5707,11 @@ void Model::run()
                     output_ptr = output.get_vector<uint16_t>().data();
                 }
 
-                size_t ops_num = output_num_els / dim;
+                size_t ops_num = (output_num_els / dim) / group_size;
 
                 struct context
                 {
-                    size_t input_index, input_stride, sizeof_element;
+                    size_t input_index, input_stride, sizeof_element, group_size;
                     int64_t dim;
                     void* input_ptr, * output_ptr;
                 };
@@ -5718,18 +5719,19 @@ void Model::run()
                 context prl_ctx;
 
                 prl_ctx.input_index = start_input_index;
-                prl_ctx.input_stride = input.m_shape[axis];
+                prl_ctx.input_stride = input.m_shape[axis] * group_size;
                 prl_ctx.sizeof_element = sizeof_element;
+                prl_ctx.group_size = group_size;
                 prl_ctx.dim = dim;
                 prl_ctx.input_ptr = input_ptr;
                 prl_ctx.output_ptr = output_ptr;
 
                 void (*pfn)(context*, size_t) = [](context* _, size_t j)
                 {
-                    memcpy(
-                        (uint8_t*)_->output_ptr + j * _->dim * _->sizeof_element,
-                        (uint8_t*)_->input_ptr + (_->input_index + j * _->input_stride) * _->sizeof_element,
-                        _->dim * _->sizeof_element);
+                        memcpy(
+                            (uint8_t*)_->output_ptr + j * _->dim * _->group_size * _->sizeof_element,
+                            (uint8_t*)_->input_ptr + (_->input_index + j * _->input_stride) * _->sizeof_element,
+                            _->dim * _->group_size * _->sizeof_element);
                 };
 
                 m_xnnpack->parallelize((void*)pfn, &prl_ctx, ops_num);
@@ -5739,7 +5741,7 @@ void Model::run()
 
                 push_tensor(std::move(output));
 
-                start_input_index += dim;
+                start_input_index += dim * group_size;
             }
         }
         else if (op.m_type == "Resize")
