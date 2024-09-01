@@ -1872,7 +1872,8 @@ public:
     std::pair<std::vector<size_t>, tensor_vector<T>> softmax(
         std::vector<size_t>& input_shape, T* input_data,
         T* output_data_override = nullptr,
-        Qu8SoftmaxData* qu8_data = nullptr)
+        Qu8SoftmaxData* qu8_data = nullptr,
+        size_t channels_override = 0)
     {
         std::vector<size_t> output_shape(input_shape);
 
@@ -1910,7 +1911,7 @@ public:
             xnn_setup_softmax_nc_xxx = &xnn_setup_softmax_nc_qu8;
         }
 
-        size_t channels = input_shape.back();
+        size_t channels = channels_override ? channels_override : input_shape.back();
         size_t batch_size = output_size / channels;
 
         xnn_operator_t softmax_op = nullptr;
@@ -5683,8 +5684,9 @@ void Model::run()
             if (axis < 0 || axis >= input_base.m_shape.size())
                 throw std::invalid_argument(op.m_type + ": invalid axis attribute.");
 
-            if (axis != input_base.m_shape.size() - 1)
-                throw std::invalid_argument(op.m_type + ": softmax supported on last axis only (not implemented).");
+            size_t channels = 1;
+            for (size_t i = axis; i < input_base.m_shape.size(); i++)
+                channels *= input_base.m_shape[i];
 
             TensorDataType base_type = input_base.m_type;
 
@@ -5700,7 +5702,7 @@ void Model::run()
 
                     auto& input_data = input.get_vector<float>();
 
-                    auto result = m_xnnpack->softmax(input.m_shape, input_data.data());
+                    auto result = m_xnnpack->softmax<float>(input.m_shape, input_data.data(), nullptr /* output_data_override */, nullptr /* qu8_data */, channels /* channels_override */);
 
                     if (!check_output_shape(result.first, output.m_shape))
                         throw std::invalid_argument(op.m_type + ": unexpected shape of output.");
@@ -5713,7 +5715,7 @@ void Model::run()
 
                     auto& input_data = input.get_vector<uint16_t>();
 
-                    auto result = m_xnnpack->softmax(input.m_shape, input_data.data());
+                    auto result = m_xnnpack->softmax<uint16_t>(input.m_shape, input_data.data(), nullptr /* output_data_override */, nullptr /* qu8_data */, channels /* channels_override */);
 
                     if (!check_output_shape(result.first, output.m_shape))
                         throw std::invalid_argument(op.m_type + ": unexpected shape of output.");
@@ -5732,7 +5734,7 @@ void Model::run()
                     qu8_data.output_zero_point = output.m_zero_point = 0;
                     qu8_data.output_scale = output.m_scale = 0x1.0p-8f;
 
-                    auto result = m_xnnpack->softmax<uint8_t>(input.m_shape, input_data.data(), nullptr, &qu8_data);
+                    auto result = m_xnnpack->softmax<uint8_t>(input.m_shape, input_data.data(), nullptr /* output_data_override */, &qu8_data /* qu8_data */, channels /* channels_override */);
 
                     if (!check_output_shape(result.first, output.m_shape))
                         throw std::invalid_argument(op.m_type + ": unexpected shape of output.");
