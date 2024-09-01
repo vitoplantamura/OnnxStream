@@ -1337,6 +1337,126 @@ public:
             std::move(output_shape), std::move(output_data));
     }
 
+    template <typename T>
+    std::pair<std::vector<size_t>, tensor_vector<T>> maxpool_nhwc(
+        std::vector<size_t>& x_shape, tensor_vector<T>& x_data,
+        std::vector<int>& dilations, std::vector<int>& poolings, std::vector<int>& pads, std::vector<int>& strides)
+    {
+        if (x_shape.size() != 4 ||
+            dilations.size() != 2 || dilations[0] != dilations[1] ||
+            poolings.size() != 2 || pads.size() != 4 ||
+            strides.size() != 2 || strides[0] != strides[1])
+        {
+            throw std::runtime_error("XnnPack::maxpool_nhwc: one or more arguments are invalid.");
+        }
+
+        const size_t batch_size = 1;
+        const size_t input_height = x_shape[1];
+        const size_t input_width = x_shape[2];
+        const size_t channels = x_shape[3];
+        const size_t padding_height = (size_t)(pads[0] + pads[2]);
+        const size_t padding_width = (size_t)(pads[1] + pads[3]);
+        const size_t padding_left = padding_width / 2;
+        const size_t padding_top = padding_height / 2;
+        const size_t padding_right = padding_width - padding_left;
+        const size_t padding_bottom = padding_height - padding_top;
+        const size_t pooling_height = poolings[0];
+        const size_t pooling_width = poolings[1];
+        const size_t stride_height = strides[0];
+        const size_t stride_width = strides[1];
+        const size_t dilation_height = dilations[0];
+        const size_t dilation_width = dilations[1];
+        const size_t subsampling = strides[0];
+        const size_t dilation = dilations[0];
+        const size_t effective_kernel_height = (pooling_height - 1) * dilation + 1;
+        const size_t effective_kernel_width = (pooling_width - 1) * dilation + 1;
+        const size_t output_height = (input_height + padding_height - effective_kernel_height) / subsampling + 1;
+        const size_t output_width = (input_width + padding_width - effective_kernel_width) / subsampling + 1;
+
+        const size_t output_elements = batch_size * output_height * output_width * channels;
+
+        if (x_data.size() != batch_size * input_height * input_width * channels)
+            throw std::runtime_error("XnnPack::maxpool_nhwc: invalid size of X.");
+
+        std::vector<size_t> output_shape({ 1, output_height, output_width, channels });
+
+        tensor_vector<T> output_data = create_tensor_vector<T>(output_elements);
+
+        typedef typename std::conditional<std::is_same<T, float>::value, float, void>::type xnn_ptr_type;
+        enum xnn_status(*xnn_create_max_pooling2d_nhwc_xxx)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, float, float, uint32_t, xnn_operator_t*);
+        enum xnn_status(*xnn_reshape_max_pooling2d_nhwc_xxx)(xnn_operator_t, size_t, size_t, size_t, size_t, size_t, size_t, size_t*, size_t*, pthreadpool_t);
+        enum xnn_status(*xnn_setup_max_pooling2d_nhwc_xxx)(xnn_operator_t, const xnn_ptr_type*, xnn_ptr_type*);
+
+        if constexpr (std::is_same<T, float>::value)
+        {
+            xnn_create_max_pooling2d_nhwc_xxx = &xnn_create_max_pooling2d_nhwc_f32;
+            xnn_reshape_max_pooling2d_nhwc_xxx = &xnn_reshape_max_pooling2d_nhwc_f32;
+            xnn_setup_max_pooling2d_nhwc_xxx = &xnn_setup_max_pooling2d_nhwc_f32;
+        }
+        else
+        {
+            xnn_create_max_pooling2d_nhwc_xxx = &xnn_create_max_pooling2d_nhwc_f16;
+            xnn_reshape_max_pooling2d_nhwc_xxx = &xnn_reshape_max_pooling2d_nhwc_f16;
+            xnn_setup_max_pooling2d_nhwc_xxx = &xnn_setup_max_pooling2d_nhwc_f16;
+        }
+
+        xnn_operator_t maxpool_op = nullptr;
+        xnn_status status;
+
+        status = xnn_create_max_pooling2d_nhwc_xxx(
+            padding_top,
+            padding_right,
+            padding_bottom,
+            padding_left,
+            pooling_height,
+            pooling_width,
+            stride_height,
+            stride_width,
+            dilation_height,
+            dilation_width,
+            -std::numeric_limits<float>::infinity(),
+            +std::numeric_limits<float>::infinity(),
+            /*flags*/ 0,
+            &maxpool_op);
+        if (status != xnn_status_success)
+            throw std::runtime_error("failed to create maxpool operator");
+
+        scope_guard __sg__([&maxpool_op]() {
+            xnn_status status = xnn_delete_operator(maxpool_op);
+            if (status != xnn_status_success)
+                throw std::runtime_error("failed to delete operator");
+            maxpool_op = nullptr;
+            });
+
+        status = xnn_reshape_max_pooling2d_nhwc_xxx(
+            maxpool_op,
+            batch_size,
+            input_height,
+            input_width,
+            channels,
+            /*input_pixel_stride*/ channels,
+            /*output_pixel_stride*/ channels,
+            /*output_height_out*/ nullptr,
+            /*output_width_out*/ nullptr,
+            threadpool);
+        if (status != xnn_status_success)
+            throw std::runtime_error("failed to reshape maxpool operator");
+
+        status = xnn_setup_max_pooling2d_nhwc_xxx(
+            maxpool_op,
+            x_data.data(),
+            output_data.data());
+        if (status != xnn_status_success)
+            throw std::runtime_error("failed to setup maxpool operator");
+
+        status = xnn_run_operator(maxpool_op, threadpool /* thread pool */);
+        if (status != xnn_status_success)
+            throw std::runtime_error("failed to run maxpool operator");
+
+        return std::pair<std::vector<size_t>, tensor_vector<T>>(
+            std::move(output_shape), std::move(output_data));
+    }
+
     struct Qu8AddData
     {
         uint8_t input1_zero_point;
@@ -7580,6 +7700,80 @@ void Model::run()
 
             if (!check_output_shape(input.m_shape, output.m_shape))
                 throw std::invalid_argument(op.m_type + ": unexpected shape of output.");
+
+            push_tensor(std::move(output));
+        }
+        else if (op.m_type == "MaxPool")
+        {
+            if (op.m_input.size() != 1) throw std::invalid_argument(op.m_type + ": wrong number of inputs.");
+            if (op.m_output.size() != 1) throw std::invalid_argument(op.m_type + ": wrong number of outputs.");
+
+            std::vector<int> dilations, kernel_shape, pads, strides;
+            int ceil_mode = 0;
+
+            for (auto& a : op.m_attributes)
+                if (a.first == "dilations")
+                    dilations = string_to_int_vec<int>(a.second);
+                else if (a.first == "ceil_mode")
+                    ceil_mode = std::stoi(a.second);
+                else if (a.first == "kernel_shape")
+                    kernel_shape = string_to_int_vec<int>(a.second);
+                else if (a.first == "pads")
+                    pads = string_to_int_vec<int>(a.second);
+                else if (a.first == "strides")
+                    strides = string_to_int_vec<int>(a.second);
+                else
+                    throw std::invalid_argument(op.m_type + ": unrecognized attribute: " + a.first + ".");
+
+            if (!are_all_equal(dilations, { 1, 1 }))
+                throw std::invalid_argument(op.m_type + ": invalid dilations attribute value (not implemented).");
+            if (ceil_mode != 0)
+                throw std::invalid_argument(op.m_type + ": invalid ceil_mode attribute value (not implemented).");
+
+            auto& x = get_tensor_data(op.m_input[0], false /* make_copy */, false /* requires_float */, TensorDataLayout::nhwc /* required_layout */);
+            auto& output = op.m_output[0];
+
+            if (x.m_layout != TensorDataLayout::nhwc) throw std::invalid_argument(op.m_type + ": wrong layout of X.");
+
+            std::vector<size_t> result_first;
+
+            if (x.m_type == TensorDataType::float32)
+            {
+                if (x.m_type != TensorDataType::float32) throw std::invalid_argument(op.m_type + ": wrong data type of X.");
+
+                auto& x_data = x.get_vector<float>();
+
+                auto result = m_xnnpack->maxpool_nhwc<float>(
+                    x.m_shape, x_data,
+                    dilations, kernel_shape, pads, strides);
+
+                result_first = std::move(result.first);
+
+                output.set_vector(std::move(result.second));
+            }
+            else
+            {
+                if (x.m_type != TensorDataType::float16) throw std::invalid_argument(op.m_type + ": wrong data type of X.");
+
+                auto& x_data = x.get_vector<uint16_t>();
+
+                auto result = m_xnnpack->maxpool_nhwc<uint16_t>(
+                    x.m_shape, x_data,
+                    dilations, kernel_shape, pads, strides);
+
+                result_first = std::move(result.first);
+
+                output.set_vector(std::move(result.second));
+            }
+
+            if (result_first.size() != 4 ||
+                !check_output_shape({ result_first[0], result_first[3], result_first[1], result_first[2] }, output.m_shape))
+            {
+                throw std::invalid_argument(op.m_type + ": unexpected shape of output.");
+            }
+
+            output.m_layout = TensorDataLayout::nhwc;
+            output.m_shape = std::move(result_first);
 
             push_tensor(std::move(output));
         }
