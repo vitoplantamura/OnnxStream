@@ -1194,7 +1194,7 @@ public:
     std::pair<std::vector<size_t>, tensor_vector<T>> convolution_nhwc(
         std::vector<size_t>& x_shape, tensor_vector<T>& x_data,
         std::vector<size_t>& w_shape, tensor_vector<T>& w_data,
-        std::vector<size_t>& b_shape, U* b_data, size_t b_data_size,
+        U* b_data, size_t b_data_size,
         std::vector<int>& dilations, std::vector<int>& kernel_shape, std::vector<int>& pads, std::vector<int>& strides, int groups,
         Qu8ConvData* qu8_data = nullptr)
     {
@@ -1235,7 +1235,7 @@ public:
             throw std::runtime_error("XnnPack::convolution_nhwc_fp32: invalid size of X.");
         if (w_data.size() != groups * group_output_channels * kernel_height * kernel_width * group_input_channels)
             throw std::runtime_error("XnnPack::convolution_nhwc_fp32: invalid size of W.");
-        if (b_data_size != groups * group_output_channels)
+        if (b_data && b_data_size != groups * group_output_channels)
             throw std::runtime_error("XnnPack::convolution_nhwc_fp32: invalid size of B.");
 
         std::vector<size_t> output_shape({ 1, output_height, output_width, group_output_channels });
@@ -4324,7 +4324,7 @@ void Model::run()
         }
         else if (op.m_type == "Conv")
         {
-            if (op.m_input.size() != 3) throw std::invalid_argument(op.m_type + ": wrong number of inputs. 2 inputs case not implemented.");
+            if (op.m_input.size() != 3 && op.m_input.size() != 2) throw std::invalid_argument(op.m_type + ": wrong number of inputs.");
             if (op.m_output.size() != 1) throw std::invalid_argument(op.m_type + ": wrong number of outputs.");
 
             std::vector<int> dilations, kernel_shape, pads, strides;
@@ -4355,7 +4355,7 @@ void Model::run()
 
             auto& x = get_tensor_data(op.m_input[0], false /* make_copy */, false /* requires_float */, TensorDataLayout::nhwc /* required_layout */);
             auto& w = get_tensor_data(op.m_input[1], false /* make_copy */, false /* requires_float */, TensorDataLayout::nhwc /* required_layout */);
-            auto& b = get_tensor_data(op.m_input[2], true /* make_copy */);
+            auto* b = op.m_input.size() > 2 ? &get_tensor_data(op.m_input[2], true /* make_copy */) : nullptr;
             auto& output = op.m_output[0];
 
             if (x.m_layout != TensorDataLayout::nhwc) throw std::invalid_argument(op.m_type + ": wrong layout of X.");
@@ -4370,16 +4370,16 @@ void Model::run()
             {
                 if (x.m_type != TensorDataType::float32) throw std::invalid_argument(op.m_type + ": wrong data type of X.");
                 if (w.m_type != TensorDataType::float32) throw std::invalid_argument(op.m_type + ": wrong data type of W.");
-                if (b.m_type != TensorDataType::float32) throw std::invalid_argument(op.m_type + ": wrong data type of B.");
+                if (b && b->m_type != TensorDataType::float32) throw std::invalid_argument(op.m_type + ": wrong data type of B.");
 
                 auto& x_data = x.get_vector<float>();
                 auto& w_data = w.get_vector<float>();
-                auto& b_data = b.get_vector<float>();
+                auto* b_data = b ? &b->get_vector<float>() : nullptr;
 
                 auto result = m_xnnpack->convolution_nhwc<float, float>(
                     x.m_shape, x_data,
                     w.m_shape, w_data,
-                    b.m_shape, b_data.data(), b_data.size(),
+                    b_data ? b_data->data() : nullptr, b_data ? b_data->size() : 0,
                     dilations, kernel_shape, pads, strides, group);
 
                 result_first = std::move(result.first);
@@ -4390,16 +4390,16 @@ void Model::run()
             {
                 if (x.m_type != TensorDataType::float16) throw std::invalid_argument(op.m_type + ": wrong data type of X.");
                 if (w.m_type != TensorDataType::float16) throw std::invalid_argument(op.m_type + ": wrong data type of W.");
-                if (b.m_type != TensorDataType::float16) throw std::invalid_argument(op.m_type + ": wrong data type of B.");
+                if (b && b->m_type != TensorDataType::float16) throw std::invalid_argument(op.m_type + ": wrong data type of B.");
 
                 auto& x_data = x.get_vector<uint16_t>();
                 auto& w_data = w.get_vector<uint16_t>();
-                auto& b_data = b.get_vector<uint16_t>();
+                auto* b_data = b ? &b->get_vector<uint16_t>() : nullptr;
 
                 auto result = m_xnnpack->convolution_nhwc<uint16_t, uint16_t>(
                     x.m_shape, x_data,
                     w.m_shape, w_data,
-                    b.m_shape, b_data.data(), b_data.size(),
+                    b_data ? b_data->data() : nullptr, b_data ? b_data->size() : 0,
                     dilations, kernel_shape, pads, strides, group);
 
                 result_first = std::move(result.first);
@@ -4410,31 +4410,34 @@ void Model::run()
             {
                 if (x.m_type != TensorDataType::uint8) throw std::invalid_argument(op.m_type + ": wrong data type of X.");
                 if (w.m_type != TensorDataType::uint8) throw std::invalid_argument(op.m_type + ": wrong data type of W.");
-                if (b.m_type != TensorDataType::float32) throw std::invalid_argument(op.m_type + ": wrong data type of B.");
+                if (b && b->m_type != TensorDataType::float32) throw std::invalid_argument(op.m_type + ": wrong data type of B.");
 
                 auto& x_data = x.get_vector<uint8_t>();
                 auto& w_data = w.get_vector<uint8_t>();
-                auto& b_data = b.get_vector<float>();
+                auto* b_data = b ? &b->get_vector<float>() : nullptr;
 
-                struct context
+                if (b_data)
                 {
-                    float* ptr;
-                    float scale;
-                };
+                    struct context
+                    {
+                        float* ptr;
+                        float scale;
+                    };
 
-                context prl_ctx;
+                    context prl_ctx;
 
-                prl_ctx.ptr = b_data.data();
-                prl_ctx.scale = x.m_scale * w.m_scale;
+                    prl_ctx.ptr = b_data->data();
+                    prl_ctx.scale = x.m_scale * w.m_scale;
 
-                void (*pfn)(context*, size_t) = nullptr;
+                    void (*pfn)(context*, size_t) = nullptr;
 
-                pfn = [](context* _, size_t i)
-                {
-                    *(int32_t*)(_->ptr + i) = (int32_t)(_->ptr[i] / _->scale);
-                };
+                    pfn = [](context* _, size_t i)
+                        {
+                            *(int32_t*)(_->ptr + i) = (int32_t)(_->ptr[i] / _->scale);
+                        };
 
-                m_xnnpack->parallelize((void*)pfn, &prl_ctx, b_data.size());
+                    m_xnnpack->parallelize((void*)pfn, &prl_ctx, b_data->size());
+                }
 
                 XnnPack::Qu8ConvData qu8_data;
 
@@ -4452,7 +4455,7 @@ void Model::run()
                 auto result = m_xnnpack->convolution_nhwc<uint8_t, int32_t>(
                     x.m_shape, x_data,
                     w.m_shape, w_data,
-                    b.m_shape, (int32_t*)b_data.data(), b_data.size(),
+                    b_data ? (int32_t*)b_data->data() : nullptr, b_data ? b_data->size() : 0,
                     dilations, kernel_shape, pads, strides, group,
                     &qu8_data);
 
