@@ -5687,9 +5687,22 @@ void Model::run()
             if (axis < 0 || axis >= input_base.m_shape.size())
                 throw std::invalid_argument(op.m_type + ": invalid axis attribute.");
 
-            size_t channels = 1;
-            for (size_t i = axis; i < input_base.m_shape.size(); i++)
-                channels *= input_base.m_shape[i];
+            std::vector<size_t> transpose_in, transpose_out;
+
+            if (axis != input_base.m_shape.size() - 1)
+            {
+                for (size_t i = 0; i < input_base.m_shape.size(); i++)
+                    if (i != axis)
+                        transpose_in.push_back(i);
+                transpose_in.push_back(axis);
+
+                for (size_t i = 0; i < input_base.m_shape.size() - 1; i++)
+                {
+                    if (i == axis)
+                        transpose_out.push_back(input_base.m_shape.size() - 1);
+                    transpose_out.push_back(i);
+                }
+            }
 
             TensorDataType base_type = input_base.m_type;
 
@@ -5703,9 +5716,26 @@ void Model::run()
                 {
                     if (input.m_type != TensorDataType::float32) throw std::invalid_argument(op.m_type + ": wrong data type of input.");
 
-                    auto& input_data = input.get_vector<float>();
+                    auto& input_vec = input.get_vector<float>();
+                    float* input_data = input_vec.data();
+                    std::vector<size_t>* input_shape = &input.m_shape;
 
-                    auto result = m_xnnpack->softmax<float>(input.m_shape, input_data.data(), nullptr /* output_data_override */, nullptr /* qu8_data */, channels /* channels_override */);
+                    std::pair<std::vector<size_t>, tensor_vector<float>> aux;
+
+                    if (transpose_in.size())
+                    {
+                        aux = m_xnnpack->transpose<float>(*input_shape, input_vec, transpose_in);
+                        input_data = aux.second.data();
+                        input_shape = &aux.first;
+                    }
+
+                    auto result = m_xnnpack->softmax<float>(*input_shape, input_data, nullptr /* output_data_override */, nullptr /* qu8_data */, 0 /* channels_override */);
+
+                    if (transpose_out.size())
+                    {
+                        aux = m_xnnpack->transpose<float>(result.first, result.second, transpose_out);
+                        result = std::move(aux);
+                    }
 
                     if (!check_output_shape(result.first, output.m_shape))
                         throw std::invalid_argument(op.m_type + ": unexpected shape of output.");
@@ -5716,9 +5746,26 @@ void Model::run()
                 {
                     if (input.m_type != TensorDataType::float16) throw std::invalid_argument(op.m_type + ": wrong data type of input.");
 
-                    auto& input_data = input.get_vector<uint16_t>();
+                    auto& input_vec = input.get_vector<uint16_t>();
+                    uint16_t* input_data = input_vec.data();
+                    std::vector<size_t>* input_shape = &input.m_shape;
 
-                    auto result = m_xnnpack->softmax<uint16_t>(input.m_shape, input_data.data(), nullptr /* output_data_override */, nullptr /* qu8_data */, channels /* channels_override */);
+                    std::pair<std::vector<size_t>, tensor_vector<uint16_t>> aux;
+
+                    if (transpose_in.size())
+                    {
+                        aux = m_xnnpack->transpose<uint16_t>(*input_shape, input_vec, transpose_in);
+                        input_data = aux.second.data();
+                        input_shape = &aux.first;
+                    }
+
+                    auto result = m_xnnpack->softmax<uint16_t>(*input_shape, input_data, nullptr /* output_data_override */, nullptr /* qu8_data */, 0 /* channels_override */);
+
+                    if (transpose_out.size())
+                    {
+                        aux = m_xnnpack->transpose<uint16_t>(result.first, result.second, transpose_out);
+                        result = std::move(aux);
+                    }
 
                     if (!check_output_shape(result.first, output.m_shape))
                         throw std::invalid_argument(op.m_type + ": unexpected shape of output.");
@@ -5729,7 +5776,9 @@ void Model::run()
                 {
                     if (input.m_type != TensorDataType::uint8) throw std::invalid_argument(op.m_type + ": wrong data type of input.");
 
-                    auto& input_data = input.get_vector<uint8_t>();
+                    auto& input_vec = input.get_vector<uint8_t>();
+                    uint8_t* input_data = input_vec.data();
+                    std::vector<size_t>* input_shape = &input.m_shape;
 
                     XnnPack::Qu8SoftmaxData qu8_data;
 
@@ -5737,7 +5786,22 @@ void Model::run()
                     qu8_data.output_zero_point = output.m_zero_point = 0;
                     qu8_data.output_scale = output.m_scale = 0x1.0p-8f;
 
-                    auto result = m_xnnpack->softmax<uint8_t>(input.m_shape, input_data.data(), nullptr /* output_data_override */, &qu8_data /* qu8_data */, channels /* channels_override */);
+                    std::pair<std::vector<size_t>, tensor_vector<uint8_t>> aux;
+
+                    if (transpose_in.size())
+                    {
+                        aux = m_xnnpack->transpose<uint8_t>(*input_shape, input_vec, transpose_in);
+                        input_data = aux.second.data();
+                        input_shape = &aux.first;
+                    }
+
+                    auto result = m_xnnpack->softmax<uint8_t>(*input_shape, input_data, nullptr /* output_data_override */, &qu8_data /* qu8_data */, 0 /* channels_override */);
+
+                    if (transpose_out.size())
+                    {
+                        aux = m_xnnpack->transpose<uint8_t>(result.first, result.second, transpose_out);
+                        result = std::move(aux);
+                    }
 
                     if (!check_output_shape(result.first, output.m_shape))
                         throw std::invalid_argument(op.m_type + ": unexpected shape of output.");
