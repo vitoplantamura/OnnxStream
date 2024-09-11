@@ -1191,7 +1191,8 @@ public:
     };
 
     template <typename T, typename U>
-    std::pair<std::vector<size_t>, tensor_vector<T>> convolution_nhwc(
+    std::pair<std::vector<size_t>, tensor_vector<T>> convolution(
+        bool nchw,
         std::vector<size_t>& x_shape, tensor_vector<T>& x_data,
         std::vector<size_t>& w_shape, tensor_vector<T>& w_data,
         U* b_data, size_t b_data_size,
@@ -1207,15 +1208,15 @@ public:
         }
 
         const size_t batch_size = 1;
-        const size_t input_height = x_shape[1];
-        const size_t input_width = x_shape[2];
+        const size_t input_height = nchw ? x_shape[2] : x_shape[1];
+        const size_t input_width = nchw ? x_shape[3] : x_shape[2];
         const size_t kernel_height = kernel_shape[0];
         const size_t kernel_width = kernel_shape[1];
         const size_t padding_height = (size_t)(pads[0] + pads[2]);
         const size_t padding_width = (size_t)(pads[1] + pads[3]);
         const size_t subsampling = strides[0];
         const size_t dilation = dilations[0];
-        const size_t group_input_channels = x_shape[3];
+        const size_t group_input_channels = nchw ? x_shape[1] : x_shape[3];
         const size_t group_output_channels = w_shape[0];
 
         const size_t output_pixel_stride = groups * group_output_channels;
@@ -1232,15 +1233,85 @@ public:
         const size_t output_elements = batch_size * output_height * output_width * output_pixel_stride;
 
         if (x_data.size() != batch_size * input_height * input_width * input_pixel_stride)
-            throw std::runtime_error("XnnPack::convolution_nhwc_fp32: invalid size of X.");
+            throw std::runtime_error("XnnPack::convolution: invalid size of X.");
         if (w_data.size() != groups * group_output_channels * kernel_height * kernel_width * group_input_channels)
-            throw std::runtime_error("XnnPack::convolution_nhwc_fp32: invalid size of W.");
+            throw std::runtime_error("XnnPack::convolution: invalid size of W.");
         if (b_data && b_data_size != groups * group_output_channels)
-            throw std::runtime_error("XnnPack::convolution_nhwc_fp32: invalid size of B.");
+            throw std::runtime_error("XnnPack::convolution: invalid size of B.");
 
         std::vector<size_t> output_shape({ 1, output_height, output_width, group_output_channels });
 
         tensor_vector<T> output_data = create_tensor_vector<T>(output_elements);
+
+        enum xnn_status(*xnn_reshape_convolution2d_nchw_f32_)(xnn_operator_t, size_t, size_t, size_t, size_t*, size_t*, size_t*, size_t*, pthreadpool_t) =
+            [](
+                xnn_operator_t convolution_op,
+                size_t batch_size,
+                size_t input_height,
+                size_t input_width,
+                size_t* workspace_size,
+                size_t* workspace_alignment,
+                size_t* output_height_out,
+                size_t* output_width_out,
+                pthreadpool_t threadpool)
+            {
+                return xnn_reshape_convolution2d_nchw_f32(
+                    convolution_op,
+                    batch_size,
+                    input_height,
+                    input_width,
+                    output_height_out,
+                    output_width_out,
+                    threadpool);
+            };
+
+        enum xnn_status(*xnn_setup_convolution2d_nchw_f32_)(xnn_operator_t, void*, const float*, float*) =
+            [](
+                xnn_operator_t convolution_op,
+                void* workspace,
+                const float* input,
+                float* output)
+            {
+                return xnn_setup_convolution2d_nchw_f32(
+                    convolution_op,
+                    input,
+                    output);
+            };
+
+        enum xnn_status(*xnn_reshape_convolution2d_nchw_f16_)(xnn_operator_t, size_t, size_t, size_t, size_t*, size_t*, size_t*, size_t*, pthreadpool_t) =
+            [](
+                xnn_operator_t convolution_op,
+                size_t batch_size,
+                size_t input_height,
+                size_t input_width,
+                size_t* workspace_size,
+                size_t* workspace_alignment,
+                size_t* output_height_out,
+                size_t* output_width_out,
+                pthreadpool_t threadpool)
+            {
+                return xnn_reshape_convolution2d_nchw_f16(
+                    convolution_op,
+                    batch_size,
+                    input_height,
+                    input_width,
+                    output_height_out,
+                    output_width_out,
+                    threadpool);
+            };
+
+        enum xnn_status(*xnn_setup_convolution2d_nchw_f16_)(xnn_operator_t, void*, const void*, void*) =
+            [](
+                xnn_operator_t convolution_op,
+                void* workspace,
+                const void* input,
+                void* output)
+            {
+                return xnn_setup_convolution2d_nchw_f16(
+                    convolution_op,
+                    input,
+                    output);
+            };
 
         typedef
             typename std::conditional<std::is_same<T, float>::value, float,
@@ -1253,18 +1324,20 @@ public:
 
         if constexpr (std::is_same<T, float>::value)
         {
-            xnn_create_convolution2d_nhwc_xxx = &xnn_create_convolution2d_nhwc_f32;
-            xnn_reshape_convolution2d_nhwc_xxx = &xnn_reshape_convolution2d_nhwc_f32;
-            xnn_setup_convolution2d_nhwc_xxx = &xnn_setup_convolution2d_nhwc_f32;
+            xnn_create_convolution2d_nhwc_xxx = nchw ? &xnn_create_convolution2d_nchw_f32 : &xnn_create_convolution2d_nhwc_f32;
+            xnn_reshape_convolution2d_nhwc_xxx = nchw ? xnn_reshape_convolution2d_nchw_f32_ : &xnn_reshape_convolution2d_nhwc_f32;
+            xnn_setup_convolution2d_nhwc_xxx = nchw ? xnn_setup_convolution2d_nchw_f32_ : &xnn_setup_convolution2d_nhwc_f32;
         }
         else if constexpr (std::is_same<T, uint16_t>::value)
         {
-            xnn_create_convolution2d_nhwc_xxx = &xnn_create_convolution2d_nhwc_f16;
-            xnn_reshape_convolution2d_nhwc_xxx = &xnn_reshape_convolution2d_nhwc_f16;
-            xnn_setup_convolution2d_nhwc_xxx = &xnn_setup_convolution2d_nhwc_f16;
+            xnn_create_convolution2d_nhwc_xxx = nchw ? &xnn_create_convolution2d_nchw_f16 : &xnn_create_convolution2d_nhwc_f16;
+            xnn_reshape_convolution2d_nhwc_xxx = nchw ? xnn_reshape_convolution2d_nchw_f16_ : &xnn_reshape_convolution2d_nhwc_f16;
+            xnn_setup_convolution2d_nhwc_xxx = nchw ? xnn_setup_convolution2d_nchw_f16_ : &xnn_setup_convolution2d_nhwc_f16;
         }
         else
         {
+            if (nchw) throw std::runtime_error("XnnPack::convolution: layout not supported: nchw.");
+
             xnn_create_convolution2d_nhwc_xxx = nullptr;
             xnn_reshape_convolution2d_nhwc_xxx = &xnn_reshape_convolution2d_nhwc_qu8;
             xnn_setup_convolution2d_nhwc_xxx = &xnn_setup_convolution2d_nhwc_qu8;
@@ -2551,14 +2624,15 @@ Tensor& Model::get_tensor_data(Tensor& t, bool make_copy /*= false*/, bool requi
     {
         std::string& fn = t.m_name;
 
-        if (required_layout == TensorDataLayout::nhwc)
+        auto lpos = fn.find("_nchw.bin");
+        if (lpos == std::string::npos)
         {
-            auto lpos = fn.find("_nchw.bin");
-            if (lpos == std::string::npos)
-            {
+            if (required_layout == TensorDataLayout::nhwc)
                 throw std::invalid_argument("Model::get_tensor_data: unable to determine tensor data file compatible with required_layout.");
-            }
-            else
+        }
+        else
+        {
+            if (required_layout == TensorDataLayout::nhwc)
             {
                 if (t.m_layout != TensorDataLayout::unspecified)
                     throw std::invalid_argument("Model::get_tensor_data: tensor data layout already set.");
@@ -2569,9 +2643,13 @@ Tensor& Model::get_tensor_data(Tensor& t, bool make_copy /*= false*/, bool requi
                     throw std::invalid_argument("Model::get_tensor_data: layout is nhwc but invalid shape.");
                 else
                     t.m_shape = { t.m_shape[0], t.m_shape[2], t.m_shape[3], t.m_shape[1] };
-
-                fn = fn.substr(0, lpos) + "_nhwc.bin";
             }
+            else
+            {
+                throw std::invalid_argument("Model::get_tensor_data: nchw layout not supported. (not implemented)");
+            }
+
+            fn = fn.substr(0, lpos) + "_nhwc.bin";
         }
 
         load = !m_weights_exclusion_set.contains(fn);
@@ -4353,13 +4431,13 @@ void Model::run()
             if (group != 1)
                 throw std::invalid_argument(op.m_type + ": invalid group attribute value (not implemented).");
 
-            auto& x = get_tensor_data(op.m_input[0], false /* make_copy */, false /* requires_float */, TensorDataLayout::nhwc /* required_layout */);
-            auto& w = get_tensor_data(op.m_input[1], false /* make_copy */, false /* requires_float */, TensorDataLayout::nhwc /* required_layout */);
+            auto& x = get_tensor_data(op.m_input[0], false /* make_copy */, false /* requires_float */, m_use_nchw_convs ? TensorDataLayout::unspecified : TensorDataLayout::nhwc /* required_layout */);
+            auto& w = get_tensor_data(op.m_input[1], false /* make_copy */, false /* requires_float */, m_use_nchw_convs ? TensorDataLayout::unspecified : TensorDataLayout::nhwc /* required_layout */);
             auto* b = op.m_input.size() > 2 ? &get_tensor_data(op.m_input[2], true /* make_copy */) : nullptr;
             auto& output = op.m_output[0];
 
-            if (x.m_layout != TensorDataLayout::nhwc) throw std::invalid_argument(op.m_type + ": wrong layout of X.");
-            if (w.m_layout != TensorDataLayout::nhwc) throw std::invalid_argument(op.m_type + ": wrong layout of W.");
+            if (x.m_layout != (m_use_nchw_convs ? TensorDataLayout::unspecified : TensorDataLayout::nhwc)) throw std::invalid_argument(op.m_type + ": wrong layout of X.");
+            if (w.m_layout != (m_use_nchw_convs ? TensorDataLayout::unspecified : TensorDataLayout::nhwc)) throw std::invalid_argument(op.m_type + ": wrong layout of W.");
 
             if (w.m_shape.size() != 4 || !are_all_equal(kernel_shape, { w.m_shape[1], w.m_shape[2] }))
                 throw std::invalid_argument(op.m_type + ": invalid shape of W or invalid kernel_shape (not implemented?).");
@@ -4376,7 +4454,8 @@ void Model::run()
                 auto& w_data = w.get_vector<float>();
                 auto* b_data = b ? &b->get_vector<float>() : nullptr;
 
-                auto result = m_xnnpack->convolution_nhwc<float, float>(
+                auto result = m_xnnpack->convolution<float, float>(
+                    m_use_nchw_convs /* nchw */,
                     x.m_shape, x_data,
                     w.m_shape, w_data,
                     b_data ? b_data->data() : nullptr, b_data ? b_data->size() : 0,
@@ -4396,7 +4475,8 @@ void Model::run()
                 auto& w_data = w.get_vector<uint16_t>();
                 auto* b_data = b ? &b->get_vector<uint16_t>() : nullptr;
 
-                auto result = m_xnnpack->convolution_nhwc<uint16_t, uint16_t>(
+                auto result = m_xnnpack->convolution<uint16_t, uint16_t>(
+                    m_use_nchw_convs /* nchw */,
                     x.m_shape, x_data,
                     w.m_shape, w_data,
                     b_data ? b_data->data() : nullptr, b_data ? b_data->size() : 0,
@@ -4452,7 +4532,8 @@ void Model::run()
                 qu8_data.output_zero_point = s.second;
                 qu8_data.output_scale = s.first;
 
-                auto result = m_xnnpack->convolution_nhwc<uint8_t, int32_t>(
+                auto result = m_xnnpack->convolution<uint8_t, int32_t>(
+                    m_use_nchw_convs /* nchw */,
                     x.m_shape, x_data,
                     w.m_shape, w_data,
                     b_data ? (int32_t*)b_data->data() : nullptr, b_data ? b_data->size() : 0,
@@ -4473,7 +4554,7 @@ void Model::run()
                 throw std::invalid_argument(op.m_type + ": unexpected shape of output.");
             }
 
-            output.m_layout = TensorDataLayout::nhwc;
+            output.m_layout = m_use_nchw_convs ? TensorDataLayout::unspecified : TensorDataLayout::nhwc;
             output.m_shape = std::move(result_first);
 
             push_tensor(std::move(output));

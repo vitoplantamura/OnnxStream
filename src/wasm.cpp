@@ -207,5 +207,6 @@ ONNXSTREAM_EXPORT void model_set_option(ModelContext* obj, char* name, unsigned 
 	DEFINE_OPTION_BOOL(use_next_op_cache)
 	DEFINE_OPTION_BOOL(ops_printf)
 	DEFINE_OPTION_BOOL(ops_times_printf)
+	DEFINE_OPTION_BOOL(use_nchw_convs)
 #undef DEFINE_OPTION_BOOL
 }

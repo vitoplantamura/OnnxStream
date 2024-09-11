@@ -956,6 +956,7 @@ public:
     bool m_use_scaled_dp_attn_op = false;
     std::set<std::string> m_outputs_convert_set;
     bool m_use_next_op_cache = false;
+    bool m_use_nchw_convs = false;
 
     void set_cuda_options(const CudaOptions& options);
 
