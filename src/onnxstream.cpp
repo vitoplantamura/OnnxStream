@@ -1197,7 +1197,8 @@ public:
         std::vector<size_t>& w_shape, tensor_vector<T>& w_data,
         U* b_data, size_t b_data_size,
         std::vector<int>& dilations, std::vector<int>& kernel_shape, std::vector<int>& pads, std::vector<int>& strides, int groups,
-        Qu8ConvData* qu8_data = nullptr)
+        Qu8ConvData* qu8_data,
+        const std::string& cache_key)
     {
         if (x_shape.size() != 4 || w_shape.size() != 4 ||
             dilations.size() != 2 || dilations[0] != dilations[1] ||
@@ -1232,9 +1233,19 @@ public:
 
         const size_t output_elements = batch_size * output_height * output_width * output_pixel_stride;
 
+        xnn_operator_t convolution_op = nullptr;
+        bool from_ops_cache = false;
+
+        if (cache_key.size() &&
+            m_ops_cache.count(cache_key))
+        {
+            convolution_op = m_ops_cache[cache_key].m_op;
+            from_ops_cache = true;
+        }
+
         if (x_data.size() != batch_size * input_height * input_width * input_pixel_stride)
             throw std::runtime_error("XnnPack::convolution: invalid size of X.");
-        if (w_data.size() != groups * group_output_channels * kernel_height * kernel_width * group_input_channels)
+        if (!from_ops_cache && w_data.size() != groups * group_output_channels * kernel_height * kernel_width * group_input_channels)
             throw std::runtime_error("XnnPack::convolution: invalid size of W.");
         if (b_data && b_data_size != groups * group_output_channels)
             throw std::runtime_error("XnnPack::convolution: invalid size of B.");
@@ -1343,40 +1354,42 @@ public:
             xnn_setup_convolution2d_nhwc_xxx = &xnn_setup_convolution2d_nhwc_qu8;
         }
 
-        xnn_operator_t convolution_op = nullptr;
         xnn_status status;
 
-        if constexpr (!std::is_same<T, uint8_t>::value)
+        if (!convolution_op)
         {
-            status = xnn_create_convolution2d_nhwc_xxx(
-                padding_top, padding_right, padding_bottom, padding_left,
-                kernel_height, kernel_width,
-                subsampling, subsampling,
-                dilation, dilation,
-                groups, group_input_channels, group_output_channels,
-                input_pixel_stride, output_pixel_stride,
-                w_data.data(), b_data,
-                -std::numeric_limits<float>::infinity(), +std::numeric_limits<float>::infinity(),
-                0 /* flags */, nullptr, nullptr, &convolution_op);
-        }
-        else
-        {
-            status = xnn_create_convolution2d_nhwc_qu8(
-                padding_top, padding_right, padding_bottom, padding_left,
-                kernel_height, kernel_width,
-                subsampling, subsampling,
-                dilation, dilation,
-                groups, group_input_channels, group_output_channels,
-                input_pixel_stride, output_pixel_stride,
-                qu8_data->input_zero_point, qu8_data->input_scale, qu8_data->kernel_zero_point, qu8_data->kernel_scale,
-                w_data.data(), b_data,
-                qu8_data->output_zero_point, qu8_data->output_scale,
-                0, 255,
-                0 /* flags */, nullptr, nullptr, &convolution_op);
-        }
+            if constexpr (!std::is_same<T, uint8_t>::value)
+            {
+                status = xnn_create_convolution2d_nhwc_xxx(
+                    padding_top, padding_right, padding_bottom, padding_left,
+                    kernel_height, kernel_width,
+                    subsampling, subsampling,
+                    dilation, dilation,
+                    groups, group_input_channels, group_output_channels,
+                    input_pixel_stride, output_pixel_stride,
+                    w_data.data(), b_data,
+                    -std::numeric_limits<float>::infinity(), +std::numeric_limits<float>::infinity(),
+                    0 /* flags */, nullptr, nullptr, &convolution_op);
+            }
+            else
+            {
+                status = xnn_create_convolution2d_nhwc_qu8(
+                    padding_top, padding_right, padding_bottom, padding_left,
+                    kernel_height, kernel_width,
+                    subsampling, subsampling,
+                    dilation, dilation,
+                    groups, group_input_channels, group_output_channels,
+                    input_pixel_stride, output_pixel_stride,
+                    qu8_data->input_zero_point, qu8_data->input_scale, qu8_data->kernel_zero_point, qu8_data->kernel_scale,
+                    w_data.data(), b_data,
+                    qu8_data->output_zero_point, qu8_data->output_scale,
+                    0, 255,
+                    0 /* flags */, nullptr, nullptr, &convolution_op);
+            }
 
-        if (status != xnn_status_success)
-            throw std::runtime_error("failed to create FP32 Convolution operator");
+            if (status != xnn_status_success)
+                throw std::runtime_error("failed to create FP32 Convolution operator");
+        }
 
         scope_guard __sg__([&convolution_op]() {
             xnn_status status = xnn_delete_operator(convolution_op);
@@ -1385,15 +1398,26 @@ public:
             convolution_op = nullptr;
         });
 
-        size_t workspace_size = 0;
-        size_t workspace_alignment = 0;
-        status = xnn_reshape_convolution2d_nhwc_xxx(
-            convolution_op, batch_size, input_height, input_width,
-            &workspace_size, &workspace_alignment,
-            /*output_height_out=*/nullptr, /*output_width_out=*/nullptr,
-            /*threadpool=*/ threadpool);
-        if (status != xnn_status_success)
-            throw std::runtime_error("failed to reshape Convolution operator");
+        if (cache_key.size())
+        {
+            __sg__.m_active = false;
+
+            if (m_ops_cache.count(cache_key) == 0)
+                m_ops_cache[cache_key].m_op = convolution_op;
+        }
+
+        if (!from_ops_cache)
+        {
+            size_t workspace_size = 0;
+            size_t workspace_alignment = 0;
+            status = xnn_reshape_convolution2d_nhwc_xxx(
+                convolution_op, batch_size, input_height, input_width,
+                &workspace_size, &workspace_alignment,
+                /*output_height_out=*/nullptr, /*output_width_out=*/nullptr,
+                /*threadpool=*/ threadpool);
+            if (status != xnn_status_success)
+                throw std::runtime_error("failed to reshape Convolution operator");
+        }
 
         status = xnn_setup_convolution2d_nhwc_xxx(
             convolution_op,
@@ -4436,6 +4460,23 @@ void Model::run()
             auto* b = op.m_input.size() > 2 ? &get_tensor_data(op.m_input[2], true /* make_copy */) : nullptr;
             auto& output = op.m_output[0];
 
+            std::string cache_key;
+            if (m_use_ops_cache && w.m_is_static_weights && (!b || b->m_is_static_weights))
+            {
+                cache_key = op.m_name;
+                if (m_first_run)
+                {
+                    m_weights_exclusion_set.insert(w.m_name);
+                    get_wp()->remove(w.m_name);
+
+                    if (b)
+                    {
+                        m_weights_exclusion_set.insert(b->m_name);
+                        get_wp()->remove(b->m_name);
+                    }
+                }
+            }
+
             if (x.m_layout != (m_use_nchw_convs ? TensorDataLayout::unspecified : TensorDataLayout::nhwc)) throw std::invalid_argument(op.m_type + ": wrong layout of X.");
             if (w.m_layout != (m_use_nchw_convs ? TensorDataLayout::unspecified : TensorDataLayout::nhwc)) throw std::invalid_argument(op.m_type + ": wrong layout of W.");
 
@@ -4459,7 +4500,8 @@ void Model::run()
                     x.m_shape, x_data,
                     w.m_shape, w_data,
                     b_data ? b_data->data() : nullptr, b_data ? b_data->size() : 0,
-                    dilations, kernel_shape, pads, strides, group);
+                    dilations, kernel_shape, pads, strides, group,
+                    nullptr /* qu8_data */, cache_key);
 
                 result_first = std::move(result.first);
 
@@ -4480,7 +4522,8 @@ void Model::run()
                     x.m_shape, x_data,
                     w.m_shape, w_data,
                     b_data ? b_data->data() : nullptr, b_data ? b_data->size() : 0,
-                    dilations, kernel_shape, pads, strides, group);
+                    dilations, kernel_shape, pads, strides, group,
+                    nullptr /* qu8_data */, cache_key);
 
                 result_first = std::move(result.first);
 
@@ -4538,7 +4581,7 @@ void Model::run()
                     w.m_shape, w_data,
                     b_data ? (int32_t*)b_data->data() : nullptr, b_data ? b_data->size() : 0,
                     dilations, kernel_shape, pads, strides, group,
-                    &qu8_data);
+                    &qu8_data, cache_key);
 
                 result_first = std::move(result.first);
 
