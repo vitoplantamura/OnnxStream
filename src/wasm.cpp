@@ -194,7 +194,9 @@ ONNXSTREAM_EXPORT void model_clear_tensors(ModelContext* obj)
 
 ONNXSTREAM_EXPORT void model_set_option(ModelContext* obj, char* name, unsigned int value)
 {
-#define DEFINE_OPTION_BOOL(O) if (!::strcmp(name, #O)) obj->m_model.m_##O = value ? true : false;
+	bool set = false;
+
+#define DEFINE_OPTION_BOOL(O) if (!::strcmp(name, #O)) { obj->m_model.m_##O = value ? true : false; set = true; }
 	DEFINE_OPTION_BOOL(use_fp16_arithmetic)
 	DEFINE_OPTION_BOOL(use_uint8_qdq)
 	DEFINE_OPTION_BOOL(use_uint8_arithmetic)
@@ -209,4 +211,11 @@ ONNXSTREAM_EXPORT void model_set_option(ModelContext* obj, char* name, unsigned 
 	DEFINE_OPTION_BOOL(ops_times_printf)
 	DEFINE_OPTION_BOOL(use_nchw_convs)
 #undef DEFINE_OPTION_BOOL
+
+	if (!set)
+	{
+		const char* err = "model_set_option: 'name' not found.";
+		printf("=== ERROR === %s\n", err);
+		throw std::invalid_argument(err);
+	}
 }
