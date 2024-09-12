@@ -732,7 +732,7 @@ private:
             Entry& e = m_weights[m_index++];
 
             if (name != e.m_name)
-                throw std::invalid_argument("RamWeightsProvider::provide: invalid name.");
+                throw std::invalid_argument("RamWeightsProvider::provide: invalid name (requested: '" + name + "', available: '" + e.m_name + "').");
 
             if (!std::holds_alternative<std::shared_ptr<tensor_vector<U>>>(e.m_data))
                 throw std::invalid_argument("RamWeightsProvider::provide: invalid data type.");
@@ -777,6 +777,10 @@ public:
             if (m_weights[i].m_name == name)
             {
                 m_weights.erase(m_weights.begin() + i);
+
+                if (!m_reader_specified && m_index > i)
+                    m_index--;
+
                 return;
             }
 
