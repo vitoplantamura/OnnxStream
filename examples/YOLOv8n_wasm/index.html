@@ -1,0 +1,512 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no">
+    <title>OnnxStream (WASM) inferencing YOLOv8n in the browser</title>
+</head>
+
+<body>
+
+    <div id="mainDiv">
+
+        <h2 id="pageTitle">OnnxStream (WASM) inferencing YOLOv8n in the browser</h2>
+
+        <span>
+            This is a demo of the WASM build of OnnxStream.
+            The JavaScript API is very similar to the C++ API: you can specify a model as a series of operations in text format, you can add input tensors, read output tensors etc.
+            The YOLOv8n model is converted to the text format compatible with OnnxStream using <a href="https://github.com/vitoplantamura/OnnxStream/blob/master/onnx2txt/onnx2txt.ipynb" target="_blank">onnx2txt</a>.
+            Feel free to view the source of this page: it is about 400 lines of JS code that demonstrate how to use the API (specifically the "initModel" and "runModel" functions).
+        </span>
+
+        <div id="cnt">
+            <video id="vd1" onplay="onPlayFn()" autoPlay muted></video>
+            <canvas id="cv1"></canvas>
+        </div>
+        <canvas id="cv2" width="640" height="640"></canvas>
+
+        <pre id="log"></pre>
+
+        <label for="scoreThreshold">Threshold:</label>
+        <input type="text" size="5" id="scoreThreshold" value="0.2" />
+        <label for="iouThreshold">IOU Threshold:</label>
+        <input type="text" size="5" id="iouThreshold" value="0.45" />
+        <button onclick="onStopFn(this)">Stop</button>
+        <button onclick="onOpsPrintfFn()">Ops Printf</button>
+
+    </div>
+
+    <style>
+
+        body {
+            margin: 0;
+        }
+
+        span {
+            display: inline-block;
+            margin-bottom: 20px;
+        }
+
+        #mainDiv {
+            width: 800px;
+            margin: 0 auto;
+        }
+
+        #pageTitle {
+            text-align: center;
+        }
+
+        #cnt {
+            position: relative;
+            margin-left: 80px;
+        }
+
+        #vd1 {
+            position: relative;
+            top: 0;
+            left: 0;
+            z-index: 0;
+        }
+
+        #cv1 {
+            position: absolute;
+            top: 0;
+            left: 0;
+            z-index: 10;
+        }
+
+        #cv2 {
+            display: none;
+        }
+
+        #log {
+            background-color: black;
+            color: Lime;
+            width: 796px;
+            height: 10pc;
+            overflow-y: scroll;
+            border-left: 4px solid black;
+            border-right: 0px solid black;
+            border-top: 3px solid black;
+            border-bottom: 3px solid black;
+        }
+
+        button {
+            float: right;
+            margin-left: 10px;
+            width: 100px;
+        }
+
+        input {
+            margin-right: 10px;
+        }
+    </style>
+
+    <script type="text/javascript" src="OnnxStreamModel.js"></script>
+    <script type="text/javascript" src="NonMaxSuppression.js"></script>
+
+    <script type="text/javascript">
+
+        function logLine(s) {
+
+            var log = document.getElementById("log");
+            log.innerHTML += s + '\n';
+            log.scrollTop = log.scrollHeight;
+        }
+
+        document.addEventListener("DOMContentLoaded", function () {
+
+            // start the webcam streaming
+
+            if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+                navigator.mediaDevices
+                    .getUserMedia({
+                        audio: false,
+                        video: {
+                            facingMode: "environment",
+                        },
+                    })
+                    .then((stream) => {
+                        document.getElementById('vd1').srcObject = stream;
+                    })
+                    .catch((error) => {
+                        alert(error);
+                    });
+            }
+            else {
+                alert("Can't open Webcam!");
+            }
+        });
+
+        async function onPlayFn() {
+
+            try {
+
+                // resize the video and canvas elements and their container
+
+                var vd = document.getElementById('vd1');
+                var videoW = vd.videoWidth;
+                var videoH = vd.videoHeight;
+
+                var ratio = 640 / videoW;
+                videoW *= ratio;
+                videoH *= ratio;
+
+                var setSize = function (name) {
+
+                    var el = document.getElementById(name);
+                    el.width = videoW;
+                    el.height = videoH;
+                };
+
+                setSize("cnt");
+                setSize("vd1");
+                setSize("cv1");
+
+                // initialize the model if not already initialized
+
+                if (window.modelInited != true) {
+
+                    window.modelInited = true;
+
+                    // load the WASM module; try with different versions, starting with the most performant one
+
+                    var loadModule = function (name) {
+
+                        return new Promise((resolve, reject) => {
+
+                            var script = document.createElement('script');
+
+                            script.setAttribute('src', name);
+
+                            script.onload = function () {
+
+                                try {
+
+                                    var obj = {
+                                        print: function (e) {
+                                            logLine(e);
+                                        },
+                                        onRuntimeInitialized: function (e) {
+                                            window.model = new Model(this);
+                                            window.moduleName = name;
+                                            resolve(true);
+                                        }
+                                    };
+
+                                    switch (name) {
+                                        case 'onnxstream-wasm.js':
+                                            new OnnxStreamModule(obj);
+                                            break;
+                                        case 'onnxstream-wasm-simd.js':
+                                            new OnnxStreamModuleSimd(obj);
+                                            break;
+                                        case 'onnxstream-wasm-threaded-simd.js':
+                                            new OnnxStreamModuleThreadedSimd(obj);
+                                            break;
+                                        default:
+                                            reject();
+                                    }
+                                }
+                                catch (e) {
+                                    resolve(false);
+                                }
+                            };
+
+                            document.body.appendChild(script);
+                        });
+                    };
+
+                    if (!await loadModule('onnxstream-wasm-threaded-simd.js') &&
+                        !await loadModule('onnxstream-wasm-simd.js') &&
+                        !await loadModule('onnxstream-wasm.js')) {
+
+                        throw new Error('Unable to instantiate module');
+                    }
+
+                    logLine("WASM Module => Multithreading: " +
+                        (window.moduleName.includes("threaded") ? "YES" : "NO") + ". SIMD: " +
+                        (window.moduleName.includes("simd") ? "YES" : "NO") + ".");
+
+                    // now we can initialize the Model object and download the weights
+
+                    await initModel();
+                }
+
+                // draw the current frame of the webcam stream onto our hidden canvas
+
+                var ctx = document.getElementById('cv2').getContext("2d", { willReadFrequently: true });
+                var w = ctx.canvas.width;
+                var h = ctx.canvas.height;
+                ctx.clearRect(0, 0, w, h);
+                var dW = 0, dH = 0, dX = 0, dY = 0;
+                var r = videoW / videoH;
+                if (videoW > videoH) {
+                    dW = w;
+                    dH = dW / r;
+                }
+                else {
+                    dH = h;
+                    dW = dH * r;
+                }
+                ctx.drawImage(document.getElementById('vd1'), dX, dY, dW, dH);
+
+                // get the contents of the hidden canvas (as an ArrayBuffer of floats) and run the model
+
+                var imageData = ctx.getImageData(0, 0, w, h);
+                var buffer = imageData.data.buffer;
+
+                res = await runModel(new Float32Array(new Uint8Array(buffer)).buffer);
+
+                // draw the bounding boxes in the overlay canvas (on top of the webcam stream)
+
+                var labels = [
+                    "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train", "truck", "boat", "traffic light", "fire hydrant", "stop sign", "parking meter", "bench", "bird",
+                    "cat", "dog", "horse", "sheep", "cow", "elephant", "bear", "zebra", "giraffe", "backpack", "umbrella", "handbag", "tie", "suitcase", "frisbee", "skis", "snowboard",
+                    "sports ball", "kite", "baseball bat", "baseball glove", "skateboard", "surfboard", "tennis racket", "bottle", "wine glass", "cup", "fork", "knife", "spoon", "bowl",
+                    "banana", "apple", "sandwich", "orange", "broccoli", "carrot", "hot dog", "pizza", "donut", "cake", "chair", "couch", "potted plant", "bed", "dining table", "toilet",
+                    "tv", "laptop", "mouse", "remote", "keyboard", "cell phone", "microwave", "oven", "toaster", "sink", "refrigerator", "book", "clock", "vase", "scissors", "teddy bear",
+                    "hair drier", "toothbrush"
+                ];
+
+                var colors = [
+                    "rgba(255,56,56,1)", "rgba(255,157,151,1)", "rgba(255,112,31,1)", "rgba(255,178,29,1)", "rgba(207,210,49,1)", "rgba(72,249,10,1)", "rgba(146,204,23,1)",
+                    "rgba(61,219,134,1)", "rgba(26,147,52,1)", "rgba(0,212,187,1)", "rgba(44,153,168,1)", "rgba(0,194,255,1)", "rgba(52,69,147,1)", "rgba(100,115,255,1)",
+                    "rgba(0,24,236,1)", "rgba(132,56,255,1)", "rgba(82,0,133,1)", "rgba(203,56,255,1)", "rgba(255,149,200,1)", "rgba(255,55,199,1)"
+                ];
+
+                var overlayCtx = document.getElementById('cv1').getContext("2d");
+
+                var fontHeight = Math.max(Math.round(overlayCtx.canvas.width / 40), 14);
+                overlayCtx.font = fontHeight + "px Arial";
+                overlayCtx.textBaseline = "top";
+
+                overlayCtx.clearRect(0, 0, overlayCtx.canvas.width, overlayCtx.canvas.height);
+
+                var rX = videoW / dW;
+                var rY = videoH / dH;
+
+                var lineWidth = Math.max(overlayCtx.canvas.width / 200, 2.5);
+
+                for (var i = 0; i < res.indices.length; i++) {
+
+                    var ind = res.indices[i];
+
+                    var y0 = res.boxes[ind * 4 + 0] * rY;
+                    var x0 = res.boxes[ind * 4 + 1] * rX;
+                    var y1 = res.boxes[ind * 4 + 2] * rY;
+                    var x1 = res.boxes[ind * 4 + 3] * rX;
+
+                    var color = colors[res.classes[ind] % colors.length];
+                    var cls = labels[res.classes[ind]];
+                    var score = (res.scores[ind] * 100).toFixed(1);
+
+                    overlayCtx.strokeStyle = color;
+                    overlayCtx.lineWidth = lineWidth;
+                    overlayCtx.strokeRect(x0, y0, x1 - x0, y1 - y0);
+
+                    overlayCtx.fillStyle = color;
+                    var textWidth = overlayCtx.measureText(cls + " - " + score + "%").width;
+                    var textHeight = parseInt(fontHeight, 10);
+                    var yText = y0 - (textHeight + overlayCtx.lineWidth);
+                    overlayCtx.fillRect(x0 - 1, yText < 0 ? 0 : yText, textWidth + overlayCtx.lineWidth, textHeight + overlayCtx.lineWidth);
+
+                    overlayCtx.fillStyle = "#ffffff";
+                    overlayCtx.fillText(cls + " - " + score + "%", x0 - 1, yText < 0 ? 0 : yText);
+                }
+
+                // will call this same function on the next window update
+
+                var fn = function () { requestAnimationFrame(onPlayFn); };
+
+                if (window.resumeFn === true)
+                    window.resumeFn = fn;
+                else
+                    fn();
+            }
+            catch (e) {
+
+                alert(e);
+            }
+        }
+
+        function getThresholds() {
+
+            var scoreThreshold = parseFloat(document.getElementById("scoreThreshold").value) || 0;
+            var iouThreshold = parseFloat(document.getElementById("iouThreshold").value) || 0;
+
+            return { scoreThreshold, iouThreshold };
+        }
+
+        function onStopFn(btn) {
+
+            if (typeof window.resumeFn === 'function') {
+
+                window.resumeFn();
+                window.resumeFn = false;
+                btn.innerHTML = "Stop";
+            }
+            else {
+
+                window.resumeFn = true;
+                btn.innerHTML = "Resume";
+            }
+        }
+
+        async function downloadFile(name, type) {
+
+            var r = await fetch("yolov8n_fp32/" + name);
+
+            if (!r.ok)
+                throw new Error("Unable to download " + name);
+
+            if (type == "text")
+                return await r.text();
+            else if (type == "buffer")
+                return await r.arrayBuffer();
+            else
+                throw new Error("downloadFile: invalid type.");
+        }
+
+        function showProgress(pos, total) {
+
+            var chrs = 75;
+
+            var log = document.getElementById("log");
+
+            if (pos == null) {
+
+                logLine("Downloading weights: [" + ".".repeat(chrs) + "]");
+            }
+            else if (pos == total - 1) {
+
+                var html = log.innerHTML;
+                log.innerHTML = html.substring(0, html.length - chrs - 3) + "done!\n";
+            }
+            else {
+
+                var n = parseInt((pos / total) * chrs);
+
+                var html = log.innerHTML;
+                var i = html.length - chrs - 2 + n;
+                log.innerHTML = html.substring(0, i) + "#" + html.substring(i + 1);
+            }
+        }
+
+        async function initModel() {
+
+            // enable some features during inference
+
+            window.model.set_option("support_dynamic_shapes", true); // allow dynamic shapes for the outputs
+            window.model.set_option("use_ops_cache", true); // cache the XNNPACK convolution operator
+            window.model.set_option("use_next_op_cache", true); // parse the model.txt file only once
+
+            // download the model.txt file
+
+            var model_txt = await downloadFile("model.txt", "text");
+
+            // since model.txt is a text file, we can add several operations to perform before and after the actual model's operations
+
+            window.model.read_string(
+                "pre_0:Slice*input:images_raw();slice_start();slice_end();slice_axis()*output:slice_output()\n" + // output shape: 1,640,640,3
+                "pre_1:Transpose*input:slice_output()*output:trans_output()*perm:0,3,1,2\n" + // output shape: 1,3,640,640
+                "pre_2:Div*input:trans_output();div_value()*output:images()\n" + // output shape: 1,3,640,640
+                model_txt + "\n" +
+                "post_0:Transpose*input:output0()*output:trans2_output()*perm:0,2,1\n" + // output shape: 1,8400,84
+                "post_1:Split*input:trans2_output();split_arg()*output:output0_0();output0_1()*axis:2" // output shapes: 1,8400,4 and 1,8400,80
+            );
+
+            // get the filenames of the weights, download them and add them to the model
+
+            showProgress();
+            var weights = window.model.get_weights_names().split('|');
+            for (var i = 0; i < weights.length; i++) {
+                var parts = weights[i].split(':');
+                var type = parts[0];
+                var name = parts[1];
+                var buf = await downloadFile(name, "buffer");
+                window.model.add_weights_file(type, name, buf);
+                showProgress(i, weights.length);
+            }
+        }
+
+        function onOpsPrintfFn() {
+
+            window.opsPrintfRequested = true;
+        }
+
+        async function runModel(rawData) {
+
+            if (rawData.byteLength != 4 * 640 * 640 * 4)
+                throw new Error("runModel: invalid size of rawData.");
+
+            model.set_option("ops_printf", window.opsPrintfRequested === true ? true : false);
+            window.opsPrintfRequested = false;
+
+            // add the input tensors to the model
+
+            model.clear_tensors();
+
+            model.add_tensor('images_raw', [1, 640, 640, 4], rawData);
+            model.add_tensor('slice_start', [1], [0n], "int64");
+            model.add_tensor('slice_end', [1], [3n], "int64");
+            model.add_tensor('slice_axis', [1], [3n], "int64");
+            model.add_tensor('div_value', [1], [255.0]);
+            model.add_tensor('split_arg', [2], [4n, 80n], "int64");
+
+            // run the model
+
+            model.run();
+
+            // get the output tensors
+
+            var b = model.get_tensor('output0_0');
+            var s = model.get_tensor('output0_1');
+            var n = b.shape[1];
+            var clsN = s.shape[2];
+
+            // prepare and return some typed arrays with the resulting bounding box info
+
+            var boxes = new Float32Array(n * 4);
+            var scores = new Float32Array(n);
+            var classes = new Int32Array(n);
+
+            for (var i = 0; i < n; i++) {
+
+                var o = i * 4;
+                var w = b.data[o + 2];
+                var h = b.data[o + 3];
+                var x = b.data[o + 0] - w / 2;
+                var y = b.data[o + 1] - h / 2;
+                boxes[o + 0] = y;
+                boxes[o + 1] = x;
+                boxes[o + 2] = y + h;
+                boxes[o + 3] = x + w;
+
+                o = i * clsN;
+                var pos = 0;
+                var max = -1;
+                for (var j = 0; j < clsN; j++) {
+
+                    var v = s.data[o + j];
+                    if (v > max) {
+                        pos = j;
+                        max = v;
+                    }
+                }
+                classes[i] = pos;
+                scores[i] = max;
+            }
+
+            var ts = getThresholds();
+            var indices = nonMaxSuppressionV3Impl(boxes, scores, 500, ts.iouThreshold, ts.scoreThreshold);
+
+            return { boxes, scores, classes, indices: indices.selectedIndices };
+        }
+
+    </script>
+
+</body>
+
+</html>
