@@ -1,5 +1,6 @@
 ﻿#### News 📣
 
+- September 19, 2024: Added WebAssembly support for the library! Demo of the YOLOv8 object detection model [here](https://yolo.vitoplantamura.com/).
 - January 14, 2024: Added LLM chat application (**TinyLlama 1.1B and Mistral 7B**) with initial GPU support! More info [here](https://github.com/vitoplantamura/OnnxStream/blob/master/assets/LLM.md).
 - December 14, 2023: Added support for **Stable Diffusion XL Turbo 1.0**! (thanks to @AeroX2)
 - October 3, 2023: Added support for **Stable Diffusion XL 1.0 Base**!
@@ -109,13 +110,14 @@ A comparison between SDXL 1.0 and SDXL Turbo run in OnnxStream with respect to t
 - Static quantization (W8A8 unsigned, asymmetric, percentile)
 - Easy calibration of a quantized model
 - FP16 support (with or without FP16 arithmetic)
-- 39 ONNX operators implemented (the most common)
+- 40 ONNX operators implemented (the most common)
 - Operations executed sequentially but ~~all~~ most operators are multithreaded
 - Single implementation file + header file
 - XNNPACK calls wrapped in the `XnnPack` class (for future replacement)
 - Initial GPU support with cuBLAS (only FP16 and FP32 and only for the [LLM app](https://github.com/vitoplantamura/OnnxStream/blob/master/assets/LLM.md))
+- WebAssembly builds available (with multithreading and SIMD support; Demo [here](https://yolo.vitoplantamura.com/))
 
-OnnxStream depends on [XNNPACK](https://github.com/google/XNNPACK) for some (accelerated) primitives: MatMul, Convolution, element-wise Add/Sub/Mul/Div, Sigmoid and Softmax.
+OnnxStream depends on [XNNPACK](https://github.com/google/XNNPACK) for some (accelerated) primitives: MatMul, Convolution, element-wise Add/Sub/Mul/Div, Sigmoid, Softmax, MaxPool and Transpose.
 
 # Performance
 
