@@ -14,6 +14,7 @@
 #include <optional>
 #include <set>
 #include <memory>
+#include <algorithm>
 
 namespace onnxstream {
 
