@@ -1,6 +1,6 @@
 ﻿#### News 📣
 
-- September 19, 2024: Added WebAssembly support for the library! Demo of the YOLOv8 object detection model [here](https://yolo.vitoplantamura.com/).
+- September 19, 2024: Added WebAssembly support for the library! Demo of the **YOLOv8** object detection model [here](https://yolo.vitoplantamura.com/) (running in the browser).
 - January 14, 2024: Added LLM chat application (**TinyLlama 1.1B and Mistral 7B**) with initial GPU support! More info [here](https://github.com/vitoplantamura/OnnxStream/blob/master/assets/LLM.md).
 - December 14, 2023: Added support for **Stable Diffusion XL Turbo 1.0**! (thanks to @AeroX2)
 - October 3, 2023: Added support for **Stable Diffusion XL 1.0 Base**!
@@ -12,11 +12,12 @@
 - **[Stable Diffusion XL 1.0 Base](https://github.com/vitoplantamura/OnnxStream#stable-diffusion-xl-10-base)**
 - **[Stable Diffusion XL Turbo 1.0](https://github.com/vitoplantamura/OnnxStream#stable-diffusion-xl-turbo-10)**
 - **[TinyLlama 1.1B and Mistral 7B](https://github.com/vitoplantamura/OnnxStream/blob/master/assets/LLM.md)**
+- **[YOLOv8](https://yolo.vitoplantamura.com/)** (running in the browser)
 - [Features of OnnxStream](https://github.com/vitoplantamura/OnnxStream#features-of-onnxstream)
 - [Performance](https://github.com/vitoplantamura/OnnxStream#performance)
 - [Attention Slicing and Quantization](https://github.com/vitoplantamura/OnnxStream#attention-slicing-and-quantization)
 - [How OnnxStream Works](https://github.com/vitoplantamura/OnnxStream#how-onnxstream-works)
-- **[How to Build](https://github.com/vitoplantamura/OnnxStream#how-to-build-the-stable-diffusion-example-on-linuxmacwindowstermux)**
+- **[How to Build](https://github.com/vitoplantamura/OnnxStream#how-to-build-the-stable-diffusion-example-on-linuxmacwindowstermuxfreebsd)** (Linux/Mac/Windows/Termux/FreeBSD)
 - [How to Convert SD 1.5 Model](https://github.com/vitoplantamura/OnnxStream#how-to-convert-and-run-a-custom-stable-diffusion-15-model-with-onnxstream-by-gaelicthunder)
 - [Related Projects](https://github.com/vitoplantamura/OnnxStream#related-projects)
 - [Credits](https://github.com/vitoplantamura/OnnxStream#credits)
@@ -216,10 +217,66 @@ Some things must be considered when exporting a Pytorch `nn.Module` (in our case
 1. When calling `torch.onnx.export`, `dynamic_axes` should be left empty, since OnnxStream doesn't support inputs with a dynamic shape.
 2. It is strongly recommended to run the excellent [ONNX Simplifier](https://github.com/daquexian/onnx-simplifier) on the exported ONNX file before its conversion to a `model.txt` file.
 
-# How to Build the Stable Diffusion example on Linux/Mac/Windows/Termux
+# How to Build the Stable Diffusion example on Linux/Mac/Windows/Termux/FreeBSD
 
 - **Windows only**: start the following command prompt: `Visual Studio Tools` > `x64 Native Tools Command Prompt`.
 - **Mac only**: make sure to install cmake: `brew install cmake`.
+
+<details>
+<summary>--> FreeBSD only <--</summary>
+
+**ADVANCED!**
+
+XNNPACK does not support building on FreeBSD at the time of writing. However it is possible to build it on FreeBSD with small changes to its CMake files.
+
+The incompatibility concerns these two main points:
+
+1) The two variables **CMAKE_SYSTEM_NAME** and **CMAKE_SYSTEM_PROCESSOR**.
+
+2) The [cpuinfo](https://github.com/pytorch/cpuinfo) dependency: FreeBSD support in this project was added recently, so we need to instruct XNNPACK to download a newer version.
+
+For example these are the changes to successfully build commit **1c8ee1b68f3a3e0847ec3c53c186c5909fa3fbd3** of XNNPACK on FreeBSD:
+
+```patch
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index d33268bd9..4efd58b86 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -88,7 +88,7 @@ ELSEIF(CMAKE_GENERATOR MATCHES "^Visual Studio " AND CMAKE_GENERATOR_PLATFORM)
+   ENDIF()
+ ELSEIF(CMAKE_SYSTEM_PROCESSOR MATCHES "^i[3-7]86$")
+   SET(XNNPACK_TARGET_PROCESSOR "x86")
+-ELSEIF(CMAKE_SYSTEM_PROCESSOR STREQUAL "AMD64")
++ELSEIF(CMAKE_SYSTEM_PROCESSOR STREQUAL "AMD64" OR CMAKE_SYSTEM_PROCESSOR STREQUAL "amd64")
+   SET(XNNPACK_TARGET_PROCESSOR "x86_64")
+ ELSEIF(CMAKE_SYSTEM_PROCESSOR MATCHES "^armv[5-8]")
+   SET(XNNPACK_TARGET_PROCESSOR "arm")
+@@ -249,7 +249,7 @@ ENDIF()
+ # ---[ Build flags
+ IF(NOT CMAKE_SYSTEM_NAME)
+   MESSAGE(FATAL_ERROR "CMAKE_SYSTEM_NAME not defined")
+-ELSEIF(NOT CMAKE_SYSTEM_NAME MATCHES "^(Android|Darwin|iOS|Linux|Windows|CYGWIN|MSYS|QURT)$")
++ELSEIF(NOT CMAKE_SYSTEM_NAME MATCHES "^(Android|Darwin|iOS|Linux|Windows|CYGWIN|MSYS|QURT|FreeBSD)$")
+   MESSAGE(FATAL_ERROR "Unrecognized CMAKE_SYSTEM_NAME value \"${CMAKE_SYSTEM_NAME}\"")
+ ENDIF()
+ IF(CMAKE_SYSTEM_NAME MATCHES "Windows")
+diff --git a/cmake/DownloadCpuinfo.cmake b/cmake/DownloadCpuinfo.cmake
+index 01e4b9806..4dfff8f6f 100644
+--- a/cmake/DownloadCpuinfo.cmake
++++ b/cmake/DownloadCpuinfo.cmake
+@@ -17,8 +17,8 @@ ENDIF()
+ 
+ INCLUDE(ExternalProject)
+ ExternalProject_Add(cpuinfo
+-  URL https://github.com/pytorch/cpuinfo/archive/3c8b1533ac03dd6531ab6e7b9245d488f13a82a5.zip
+-  URL_HASH SHA256=5d7f00693e97bd7525753de94be63f99b0490ae6855df168f5a6b2cfc452e49e
++  URL https://github.com/pytorch/cpuinfo/archive/cebb0933058d7f181c979afd50601dc311e1bf8c.zip
++  URL_HASH SHA256=52e0ffd7998d8cb3a927d8a6e1145763744d866d2be09c4eccea27fc157b6bb0
+   SOURCE_DIR "${CMAKE_BINARY_DIR}/cpuinfo-source"
+   BINARY_DIR "${CMAKE_BINARY_DIR}/cpuinfo"
+   CONFIGURE_COMMAND ""
+```
+</details>
 
 First you need to build [XNNPACK](https://github.com/google/XNNPACK).
 
