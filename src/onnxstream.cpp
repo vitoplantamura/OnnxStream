@@ -3881,6 +3881,28 @@ void Model::run()
 
                     output.set_vector(std::move(result.second));
                 }
+                else if (input_0.m_type == TensorDataType::int64)
+                {
+                    if (input_0.m_type != TensorDataType::int64) throw std::invalid_argument(op.m_type + ": wrong data type of input 0.");
+                    if (input_1.m_type != TensorDataType::int64) throw std::invalid_argument(op.m_type + ": wrong data type of input 1.");
+
+                    auto& input_0_data = input_0.get_vector<int64_t>();
+                    auto& input_1_data = input_1.get_vector<int64_t>();
+
+                    auto input_0_data_fp32 = int64_to_float(input_0_data);
+                    auto input_1_data_fp32 = int64_to_float(input_1_data);
+
+                    auto result = m_xnnpack->multiply(input_0.m_shape, input_0_data_fp32.data(), input_1.m_shape, input_1_data_fp32.data());
+
+                    if (input_0.m_shape.size() == 0 && input_1.m_shape.size() == 0)
+                        result.first.clear();
+
+                    if (!check_output_shape(result.first, output.m_shape))
+                        throw std::invalid_argument(op.m_type + ": unexpected shape of output.");
+
+                    auto result_i64 = float_to_int64(result.second);
+                    output.set_vector(std::move(result_i64));
+                }
                 else if (input_0.m_type == TensorDataType::float16)
                 {
                     if (input_0.m_type != TensorDataType::float16) throw std::invalid_argument(op.m_type + ": wrong data type of input 0.");
@@ -6633,10 +6655,15 @@ void Model::run()
                 sizeof_element = sizeof(uint16_t);
             }
 
-            if (q.m_shape[1] % m_attention_fused_ops_parts)
+            size_t parts = m_attention_fused_ops_parts;
+
+            if (q.m_shape[1] < parts)
                 throw std::invalid_argument(op.m_type + ": m_attention_fused_ops_parts is not valid.");
 
-            std::vector<size_t> aux_shape({ q.m_shape[1] / m_attention_fused_ops_parts, k.m_shape[2] });
+            while (q.m_shape[1] % parts)
+                ++parts;
+
+            std::vector<size_t> aux_shape({ q.m_shape[1] / parts, k.m_shape[2] });
 
             size_t aux_num_els = 1;
             for (auto& s : aux_shape)
@@ -6645,11 +6672,11 @@ void Model::run()
             tensor_vector<uint8_t> aux_0 = create_tensor_vector<uint8_t>(aux_num_els * sizeof_element);
             tensor_vector<uint8_t> aux_1 = create_tensor_vector<uint8_t>(aux_num_els * sizeof_element);
 
-            std::vector<size_t> q_part_shape({ q.m_shape[1] / m_attention_fused_ops_parts, q.m_shape[2] });
+            std::vector<size_t> q_part_shape({ q.m_shape[1] / parts, q.m_shape[2] });
 
             for (size_t i = 0; i < n; i++)
             {
-                for (size_t j = 0; j < m_attention_fused_ops_parts; j++)
+                for (size_t j = 0; j < parts; j++)
                 {
                     std::vector<size_t> result_shape;
 
