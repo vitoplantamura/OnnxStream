@@ -274,7 +274,7 @@ In the case of **Stable Diffusion XL Turbo 1.0**, the weights can be downloaded 
 
 ```
 git lfs install
-git clone --depth=1 https://huggingface.co/AeroX2/stable-diffusion-xl-turbo-1.0-onnxstream
+git clone --depth=1 https://huggingface.co/vitoplantamura/stable-diffusion-xl-turbo-1.0-anyshape-onnxstream
 ```
 
 </details>
@@ -294,10 +294,11 @@ These are the command line options of the Stable Diffusion example:
 --seed              Sets the seed.
 --save-latents      After the diffusion, saves the latents in the specified file.
 --decoder-calibrate (ONLY SD 1.5) Calibrates the quantized version of the VAE decoder.
---not-tiled         (ONLY SDXL 1.0) Don't use the tiled VAE decoder.
+--not-tiled         (ONLY SDXL 1.0 and TURBO) Don't use the tiled VAE decoder.
+--res               (ONLY TURBO) Sets the output PNG file resolution. Default is "512x512".
 --ram               Uses the RAM WeightsProvider (Experimental).
 --download          Forces the (re)download of the current model.
---curl-parallel     Sets the number of parallel downloads with CURL. Default is 4.
+--curl-parallel     Sets the number of parallel downloads with CURL. Default is 16.
 --rpi               Configures the models to run on a Raspberry Pi.
 --rpi-lowmem        Configures the models to run on a Raspberry Pi Zero 2.
 ```
