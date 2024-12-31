@@ -467,6 +467,7 @@ This guide is designed to be a comprehensive resource for those looking to run a
 
 - [OnnxStreamGui](https://github.com/ThomAce/OnnxStreamGui) by @ThomAce: a web and desktop user interface for OnnxStream.
 - [Auto epaper art](https://github.com/rvdveen/epaper-slow-generative-art) by @rvdveen: a self-contained image generation picture frame showing news.
+- [PaperPiAI](https://github.com/dylski/PaperPiAI) by @dylski: Raspberry Pi Zero powered AI-generated e-ink picture frame.
 
 # Credits
 
