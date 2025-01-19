@@ -6081,23 +6081,69 @@ void Model::run()
         }
         else if (op.m_type == "Resize")
         {
-            if (op.m_input.size() != 3) throw std::invalid_argument(op.m_type + ": wrong number of inputs (not implemented).");
+            if (op.m_input.size() != 3 && op.m_input.size() != 4) throw std::invalid_argument(op.m_type + ": wrong number of inputs (not implemented).");
             if (op.m_output.size() != 1) throw std::invalid_argument(op.m_type + ": wrong number of outputs.");
 
             if (op.m_input[1].m_name.size() != 0) throw std::invalid_argument(op.m_type + ": 'roi' input not supported (not implemented).");
 
             auto& input = get_tensor_data(op.m_input[0]);
-            auto& scales = get_tensor_data(op.m_input[2], false /* make_copy */, true /* requires_float */);
             auto& output = op.m_output[0];
 
-            if (scales.m_type != TensorDataType::float32) throw std::invalid_argument(op.m_type + ": wrong data type of scales.");
-
-            auto& scales_data = scales.get_vector<float>();
-
             if (input.m_shape.size() != 4) throw std::invalid_argument(op.m_type + ": input must be 4D (not implemented).");
-            if (scales_data.size() != input.m_shape.size()) throw std::invalid_argument(op.m_type + ": invalid data size of scales.");
             if (input.m_shape[0] != 1) throw std::invalid_argument(op.m_type + ": first dimension of input's shape must be 1 (not implemented).");
-            if (scales_data[0] != 1 || scales_data[1] != 1) throw std::invalid_argument(op.m_type + ": first and second value of scales must be 1 (not implemented).");
+
+            float* scales_data = nullptr;
+            tensor_vector<float> scales_storage;
+            std::vector<size_t> output_shape;
+
+            if (op.m_input.size() == 3)
+            {
+                auto& scales = get_tensor_data(op.m_input[2], false /* make_copy */, true /* requires_float */);
+
+                if (scales.m_type != TensorDataType::float32)
+                    throw std::invalid_argument(op.m_type + ": wrong data type of scales.");
+
+                auto& scales_vector = scales.get_vector<float>();
+
+                if (scales_vector.size() != input.m_shape.size())
+                    throw std::invalid_argument(op.m_type + ": invalid data size of scales.");
+                if (scales_vector[0] != 1 || scales_vector[1] != 1)
+                    throw std::invalid_argument(op.m_type + ": first and second value of scales must be 1 (not implemented).");
+
+                for (size_t i = 0; i < input.m_shape.size(); i++)
+                    output_shape.push_back(input.m_shape[i] * scales_vector[i]);
+
+                scales_data = scales_vector.data();
+            }
+            else if (op.m_input.size() == 4)
+            {
+                auto& sizes = get_tensor_data(op.m_input[3]);
+
+                if (sizes.m_type != TensorDataType::int64)
+                    throw std::invalid_argument(op.m_type + ": wrong data type of sizes.");
+
+                auto& sizes_data = sizes.get_vector<int64_t>();
+
+                if (sizes_data.size() != input.m_shape.size())
+                    throw std::invalid_argument(op.m_type + ": invalid data size of sizes.");
+
+                size_t c = sizes_data.size();
+                scales_storage.resize(c);
+                for (size_t i = 0; i < c; i++)
+                    scales_storage[i] = (float)sizes_data[i] / (float)input.m_shape[i];
+
+                if (scales_storage[0] != 1 || scales_storage[1] != 1)
+                    throw std::invalid_argument(op.m_type + ": first and second value of scales (calculated from sizes) must be 1 (not implemented).");
+
+                for (int64_t s : sizes_data)
+                    output_shape.push_back((size_t)s);
+
+                scales_data = scales_storage.data();
+            }
+            else
+            {
+                throw std::invalid_argument(op.m_type + ": wrong number of inputs (not implemented).");
+            }
 
             std::string coordinate_transformation_mode, mode, nearest_mode;
             float cubic_coeff_a = 0;
@@ -6116,10 +6162,6 @@ void Model::run()
 
             if (coordinate_transformation_mode != "asymmetric" || mode != "nearest" || nearest_mode != "floor")
                 throw std::invalid_argument(op.m_type + ": one or more attributes are not supported (not implemented).");
-
-            std::vector<size_t> output_shape;
-            for (size_t i = 0; i < input.m_shape.size(); i++)
-                output_shape.push_back(input.m_shape[i] * scales_data[i]);
 
             size_t output_num_els = 1;
             for (auto& s : output_shape)
@@ -6212,6 +6254,11 @@ void Model::run()
                     {
                         size_t x_input = x_output / _->x_scale;
                         size_t y_input = y_output / _->y_scale;
+
+                        if (x_input >= _->x_input_size)
+                            x_input = _->x_input_size - 1;
+                        if (y_input >= _->y_input_size)
+                            y_input = _->y_input_size - 1;
 
                         size_t final_output = pos_output + y_output * _->x_output_size + x_output;
                         size_t final_input = pos_input + y_input * _->x_input_size + x_input;
