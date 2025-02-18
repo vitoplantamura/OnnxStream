@@ -5545,6 +5545,28 @@ void Model::run()
 
                 output.set_vector(std::move(result.second));
             }
+            else if (input_0.m_type == TensorDataType::int64)
+            {
+                if (input_0.m_type != TensorDataType::int64) throw std::invalid_argument(op.m_type + ": wrong data type of input 0.");
+                if (input_1.m_type != TensorDataType::int64) throw std::invalid_argument(op.m_type + ": wrong data type of input 1.");
+
+                auto& input_0_data = input_0.get_vector<int64_t>();
+                auto& input_1_data = input_1.get_vector<int64_t>();
+
+                auto input_0_data_fp32 = int64_to_float(input_0_data);
+                auto input_1_data_fp32 = int64_to_float(input_1_data);
+
+                auto result = m_xnnpack->divide(input_0.m_shape, input_0_data_fp32, input_1.m_shape, input_1_data_fp32);
+
+                if (input_0.m_shape.size() == 0 && input_1.m_shape.size() == 0)
+                    result.first.clear();
+
+                if (!check_output_shape(result.first, output.m_shape))
+                    throw std::invalid_argument(op.m_type + ": unexpected shape of output.");
+
+                auto result_i64 = float_to_int64(result.second);
+                output.set_vector(std::move(result_i64));
+            }
             else
             {
                 if (input_0.m_type != TensorDataType::float16) throw std::invalid_argument(op.m_type + ": wrong data type of input 0.");
