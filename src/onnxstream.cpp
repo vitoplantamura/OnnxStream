@@ -6352,8 +6352,20 @@ void Model::run()
 
             if (indices.m_shape.size() != 2 || indices.m_shape[0] != 1)
                 throw std::invalid_argument(op.m_type + ": shape of indices must be (1,D) (not implemented).");
+
+            std::vector<size_t> output_shape_override;
+            if (input.m_shape.size() > 2)
+            {
+                output_shape_override = input.m_shape;
+                output_shape_override.erase(output_shape_override.begin());
+                size_t num_els = 1;
+                for (auto& s : output_shape_override)
+                    num_els *= s;
+                input.m_shape = { input.m_shape[0], num_els };
+            }
+
             if (input.m_shape.size() != 2)
-                throw std::invalid_argument(op.m_type + ": input must be 2D (not implemented).");
+                throw std::invalid_argument(op.m_type + ": input must be 2D or more.");
 
             auto& indices_data = indices.get_vector<int64_t>();
 
@@ -6366,6 +6378,9 @@ void Model::run()
 
             for (int i = 0; i < prev_axis; i++)
                 output_shape.insert(output_shape.begin(), 1);
+
+            if (output_shape_override.size())
+                output_shape = output_shape_override;
 
             size_t output_num_els = 1;
             for (auto& s : output_shape)
