@@ -5618,7 +5618,8 @@ void Model::run()
             else if (input_0.m_shape.size() == 2)
             {
                 input_0.m_shape.insert(input_0.m_shape.begin(), 1);
-                first_shape_is_2d = true;
+                if (input_1.m_shape.size() != 3)
+                    first_shape_is_2d = true;
             }
 
             if (input_0.m_shape.size() != 3)
