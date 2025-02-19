@@ -6493,161 +6493,187 @@ void Model::run()
             auto& data = get_tensor_data(op.m_input[0]);
             auto& starts = get_tensor_data(op.m_input[1]);
             auto& ends = get_tensor_data(op.m_input[2]);
+            auto* axes = op.m_input.size() > 3 ? &get_tensor_data(op.m_input[3]) : nullptr;
+            auto* steps = op.m_input.size() > 4 ? &get_tensor_data(op.m_input[4]) : nullptr;
             auto& output = op.m_output[0];
 
-            if (starts.m_type != TensorDataType::int64) throw std::invalid_argument(op.m_type + ": wrong data type of starts.");
-            if (ends.m_type != TensorDataType::int64) throw std::invalid_argument(op.m_type + ": wrong data type of ends.");
+            auto slice = [&m_xnnpack = m_xnnpack, &op, &starts, &ends, &axes, &steps](Tensor& data, Tensor& output, size_t current_axis) -> std::vector<size_t> {
 
-            if (!are_all_equal(starts.m_shape, { 1 }))
-                throw std::invalid_argument(op.m_type + ": unsupported shape of starts (not implemented).");
-            if (!are_all_equal(ends.m_shape, { 1 }))
-                throw std::invalid_argument(op.m_type + ": unsupported shape of ends (not implemented).");
+                if (starts.m_type != TensorDataType::int64) throw std::invalid_argument(op.m_type + ": wrong data type of starts.");
+                if (ends.m_type != TensorDataType::int64) throw std::invalid_argument(op.m_type + ": wrong data type of ends.");
 
-            auto& starts_data = starts.get_vector<int64_t>();
-            auto& ends_data = ends.get_vector<int64_t>();
+                if (!are_all_equal(starts.m_shape, { 1 }) && !are_all_equal(starts.m_shape, { 2 }))
+                    throw std::invalid_argument(op.m_type + ": unsupported shape of starts (not implemented).");
+                if (!are_all_equal(ends.m_shape, { 1 }) && !are_all_equal(ends.m_shape, { 2 }))
+                    throw std::invalid_argument(op.m_type + ": unsupported shape of ends (not implemented).");
 
-            bool last_but_one = false;
+                auto& starts_data = starts.get_vector<int64_t>();
+                auto& ends_data = ends.get_vector<int64_t>();
 
-            if (op.m_input.size() > 3)
+                bool last_but_one = false;
+
+                if (axes)
+                {
+                    if (axes->m_type != TensorDataType::int64) throw std::invalid_argument(op.m_type + ": wrong data type of axes.");
+
+                    if (!are_all_equal(axes->m_shape, { 1 }) && !are_all_equal(axes->m_shape, { 2 }))
+                        throw std::invalid_argument(op.m_type + ": unsupported shape of axes (not implemented).");
+
+                    auto& axes_data = axes->get_vector<int64_t>();
+
+                    if (current_axis >= axes_data.size()) throw std::invalid_argument(op.m_type + ": invalid value of current_axis for axes_data.");
+
+                    int axis = (int)axes_data[current_axis];
+                    int rank = data.m_shape.size();
+
+                    if (axis < 0)
+                        axis = rank + axis;
+                    if (axis < 0 || axis >= rank)
+                        throw std::invalid_argument(op.m_type + ": invalid axis in axes.");
+
+                    last_but_one = axis == rank - 2;
+
+                    if (axis != rank - 1 && !last_but_one)
+                        throw std::invalid_argument(op.m_type + ": unsupported axes value(s): slice supported on last or last but one axis only (not implemented).");
+                }
+
+                if (steps)
+                {
+                    if (steps->m_type != TensorDataType::int64) throw std::invalid_argument(op.m_type + ": wrong data type of steps.");
+
+                    if (!are_all_equal(steps->m_shape, { 1 }) && !are_all_equal(steps->m_shape, { 2 }))
+                        throw std::invalid_argument(op.m_type + ": unsupported shape of steps (not implemented).");
+
+                    auto& steps_data = steps->get_vector<int64_t>();
+
+                    if (current_axis >= steps_data.size()) throw std::invalid_argument(op.m_type + ": invalid value of current_axis for steps_data.");
+
+                    if (steps_data[current_axis] != 1)
+                        throw std::invalid_argument(op.m_type + ": unsupported steps value(s) (not implemented).");
+                }
+
+                if (current_axis >= starts_data.size()) throw std::invalid_argument(op.m_type + ": invalid value of current_axis for starts_data.");
+                if (current_axis >= ends_data.size()) throw std::invalid_argument(op.m_type + ": invalid value of current_axis for ends_data.");
+
+                int64_t start = starts_data[current_axis];
+                int64_t end = ends_data[current_axis];
+
+                int64_t dim = (int64_t)data.m_shape[data.m_shape.size() - (last_but_one ? 2 : 1)];
+
+                if (start < 0)
+                    start += dim;
+                if (start > dim - 1)
+                    start = dim - 1;
+
+                if (end < 0)
+                    end += dim;
+                if (end > dim)
+                    end = dim;
+
+                if (start < 0 || start > dim || end < 0 || end > dim || start >= end)
+                    throw std::invalid_argument(op.m_type + ": invalid value(s) in starts and/or ends.");
+
+                std::vector<size_t> output_shape(data.m_shape);
+
+                output_shape[output_shape.size() - (last_but_one ? 2 : 1)] = end - start;
+
+                size_t output_num_els = 1;
+                for (auto& s : output_shape)
+                    output_num_els *= s;
+
+                size_t sizeof_element = 0;
+                void* ptr_data = nullptr;
+                void* ptr_output = nullptr;
+
+                if (data.m_type == TensorDataType::float32)
+                {
+                    if (data.m_type != TensorDataType::float32) throw std::invalid_argument(op.m_type + ": wrong data type of data.");
+
+                    auto& data_data = data.get_vector<float>();
+
+                    tensor_vector<float> temp = create_tensor_vector<float>(output_num_els);
+                    output.set_vector(std::move(temp));
+
+                    sizeof_element = sizeof(float);
+                    ptr_data = data_data.data();
+                    ptr_output = output.get_vector<float>().data();
+                }
+                else if (data.m_type == TensorDataType::float16)
+                {
+                    if (data.m_type != TensorDataType::float16) throw std::invalid_argument(op.m_type + ": wrong data type of data.");
+
+                    auto& data_data = data.get_vector<uint16_t>();
+
+                    tensor_vector<uint16_t> temp = create_tensor_vector<uint16_t>(output_num_els);
+                    output.set_vector(std::move(temp));
+
+                    sizeof_element = sizeof(uint16_t);
+                    ptr_data = data_data.data();
+                    ptr_output = output.get_vector<uint16_t>().data();
+                }
+                else
+                {
+                    if (data.m_type != TensorDataType::int64) throw std::invalid_argument(op.m_type + ": wrong data type of data.");
+
+                    auto& data_data = data.get_vector<int64_t>();
+
+                    tensor_vector<int64_t> temp = create_tensor_vector<int64_t>(output_num_els);
+                    output.set_vector(std::move(temp));
+
+                    sizeof_element = sizeof(int64_t);
+                    ptr_data = data_data.data();
+                    ptr_output = output.get_vector<int64_t>().data();
+                }
+
+                struct context
+                {
+                    void* ptr_data, * ptr_output;
+                    size_t output_stride, data_stride, start, sizeof_element;
+                };
+
+                context prl_ctx;
+
+                prl_ctx.start = start * (last_but_one ? data.m_shape.back() : 1);
+
+                prl_ctx.output_stride = output_shape.back() * (last_but_one ? output_shape[output_shape.size() - 2] : 1);
+                prl_ctx.data_stride = data.m_shape.back() * (last_but_one ? data.m_shape[data.m_shape.size() - 2] : 1);
+
+                size_t num = output_num_els / prl_ctx.output_stride;
+
+                prl_ctx.sizeof_element = sizeof_element;
+                prl_ctx.ptr_data = ptr_data;
+                prl_ctx.ptr_output = ptr_output;
+
+                void (*pfn)(context*, size_t) = [](context* _, size_t i)
+                    {
+                        memcpy((uint8_t*)_->ptr_output + _->output_stride * i * _->sizeof_element,
+                            (uint8_t*)_->ptr_data + (_->data_stride * i + _->start) * _->sizeof_element,
+                            _->output_stride * _->sizeof_element);
+                    };
+
+                m_xnnpack->parallelize((void*)pfn, &prl_ctx, num);
+
+                return output_shape;
+            };
+
+            if (!are_all_equal(starts.m_shape, { 2 }))
             {
-                auto& axes = get_tensor_data(op.m_input[3]);
+                std::vector<size_t> output_shape = slice(data, output, 0);
 
-                if (axes.m_type != TensorDataType::int64) throw std::invalid_argument(op.m_type + ": wrong data type of axes.");
-
-                if (!are_all_equal(axes.m_shape, { 1 }))
-                    throw std::invalid_argument(op.m_type + ": unsupported shape of axes (not implemented).");
-
-                auto& axes_data = axes.get_vector<int64_t>();
-
-                int axis = (int)axes_data[0];
-                int rank = data.m_shape.size();
-
-                if (axis < 0)
-                    axis = rank + axis;
-                if (axis < 0 || axis >= rank)
-                    throw std::invalid_argument(op.m_type + ": invalid axis in axes.");
-
-                last_but_one = axis == rank - 2;
-
-                if (axis != rank - 1 && !last_but_one)
-                    throw std::invalid_argument(op.m_type + ": unsupported axes value(s): slice supported on last or last but one axis only (not implemented).");
-            }
-
-            if (op.m_input.size() > 4)
-            {
-                auto& steps = get_tensor_data(op.m_input[4]);
-
-                if (steps.m_type != TensorDataType::int64) throw std::invalid_argument(op.m_type + ": wrong data type of steps.");
-
-                if (!are_all_equal(steps.m_shape, { 1 }))
-                    throw std::invalid_argument(op.m_type + ": unsupported shape of steps (not implemented).");
-
-                auto& steps_data = steps.get_vector<int64_t>();
-
-                if (steps_data[0] != 1)
-                    throw std::invalid_argument(op.m_type + ": unsupported steps value(s) (not implemented).");
-            }
-
-            int64_t start = starts_data[0];
-            int64_t end = ends_data[0];
-
-            int64_t dim = (int64_t)data.m_shape[data.m_shape.size() - (last_but_one ? 2 : 1)];
-
-            if (start < 0)
-                start += dim;
-            if (start > dim - 1)
-                start = dim - 1;
-
-            if (end < 0)
-                end += dim;
-            if (end > dim)
-                end = dim;
-
-            if (start < 0 || start > dim || end < 0 || end > dim || start >= end)
-                throw std::invalid_argument(op.m_type + ": invalid value(s) in starts and/or ends.");
-
-            std::vector<size_t> output_shape(data.m_shape);
-
-            output_shape[output_shape.size() - (last_but_one ? 2 : 1)] = end - start;
-
-            size_t output_num_els = 1;
-            for (auto& s : output_shape)
-                output_num_els *= s;
-
-            size_t sizeof_element = 0;
-            void* ptr_data = nullptr;
-            void* ptr_output = nullptr;
-
-            if (data.m_type == TensorDataType::float32)
-            {
-                if (data.m_type != TensorDataType::float32) throw std::invalid_argument(op.m_type + ": wrong data type of data.");
-
-                auto& data_data = data.get_vector<float>();
-
-                tensor_vector<float> temp = create_tensor_vector<float>(output_num_els);
-                output.set_vector(std::move(temp));
-
-                sizeof_element = sizeof(float);
-                ptr_data = data_data.data();
-                ptr_output = output.get_vector<float>().data();
-            }
-            else if (data.m_type == TensorDataType::float16)
-            {
-                if (data.m_type != TensorDataType::float16) throw std::invalid_argument(op.m_type + ": wrong data type of data.");
-
-                auto& data_data = data.get_vector<uint16_t>();
-
-                tensor_vector<uint16_t> temp = create_tensor_vector<uint16_t>(output_num_els);
-                output.set_vector(std::move(temp));
-
-                sizeof_element = sizeof(uint16_t);
-                ptr_data = data_data.data();
-                ptr_output = output.get_vector<uint16_t>().data();
+                if (!check_output_shape(output_shape, output.m_shape))
+                    throw std::invalid_argument(op.m_type + ": unexpected shape of output.");
             }
             else
             {
-                if (data.m_type != TensorDataType::int64) throw std::invalid_argument(op.m_type + ": wrong data type of data.");
+                Tensor interm;
+                std::vector<size_t> interm_shape = slice(data, interm, 0);
+                interm.m_shape = std::move(interm_shape);
 
-                auto& data_data = data.get_vector<int64_t>();
+                std::vector<size_t> output_shape = slice(interm, output, 1);
 
-                tensor_vector<int64_t> temp = create_tensor_vector<int64_t>(output_num_els);
-                output.set_vector(std::move(temp));
-
-                sizeof_element = sizeof(int64_t);
-                ptr_data = data_data.data();
-                ptr_output = output.get_vector<int64_t>().data();
+                if (!check_output_shape(output_shape, output.m_shape))
+                    throw std::invalid_argument(op.m_type + ": unexpected shape of output.");
             }
-
-            struct context
-            {
-                void* ptr_data, * ptr_output;
-                size_t output_stride, data_stride, start, sizeof_element;
-            };
-
-            context prl_ctx;
-
-            prl_ctx.start = start * (last_but_one ? data.m_shape.back() : 1);
-
-            prl_ctx.output_stride = output_shape.back() * (last_but_one ? output_shape[output_shape.size() - 2] : 1);
-            prl_ctx.data_stride = data.m_shape.back() * (last_but_one ? data.m_shape[data.m_shape.size() - 2] : 1);
-
-            size_t num = output_num_els / prl_ctx.output_stride;
-
-            prl_ctx.sizeof_element = sizeof_element;
-            prl_ctx.ptr_data = ptr_data;
-            prl_ctx.ptr_output = ptr_output;
-
-            void (*pfn)(context*, size_t) = [](context* _, size_t i)
-            {
-                memcpy((uint8_t*)_->ptr_output + _->output_stride * i * _->sizeof_element,
-                    (uint8_t*)_->ptr_data + (_->data_stride * i + _->start) * _->sizeof_element,
-                    _->output_stride * _->sizeof_element);
-            };
-
-            m_xnnpack->parallelize((void*)pfn, &prl_ctx, num);
-
-            if (!check_output_shape(output_shape, output.m_shape))
-                throw std::invalid_argument(op.m_type + ": unexpected shape of output.");
 
             push_tensor(std::move(output));
         }
