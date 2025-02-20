@@ -2894,15 +2894,20 @@ Tensor& Model::get_tensor_data(Tensor& t, bool make_copy /*= false*/, bool requi
         if (required_layout == TensorDataLayout::nhwc && t.m_layout == TensorDataLayout::unspecified)
         {
             transpose_perm = { 0, 2, 3, 1 };
+            if (t.m_shape.size() == 3) // Conv1D
+                t.m_shape.push_back(1);
         }
         else if (required_layout == TensorDataLayout::unspecified && t.m_layout == TensorDataLayout::nhwc)
         {
-            transpose_perm = { 0, 3, 1, 2 };
+            if (t.m_shape.size() == 3) // Conv1D
+                transpose_perm = { 0, 2, 1 };
+            else
+                transpose_perm = { 0, 3, 1, 2 };
         }
 
         if (transpose_perm.size())
         {
-            if (t.m_shape.size() != 4)
+            if (t.m_shape.size() != transpose_perm.size())
                 throw std::invalid_argument("Model::get_tensor_data: transpose required but invalid shape.");
 
             if (t.m_type == TensorDataType::float32)
@@ -4468,19 +4473,44 @@ void Model::run()
                 else
                     throw std::invalid_argument(op.m_type + ": unrecognized attribute: " + a.first + ".");
 
-            if (!are_all_equal(dilations, { 1, 1 }))
-                throw std::invalid_argument(op.m_type + ": invalid dilations attribute value (not implemented).");
-            /*if (!are_all_equal(pads, {1, 1, 1, 1}))
-                throw std::invalid_argument(op.m_type + ": invalid pads attribute value (not implemented).");*/
-                /*if (!are_all_equal(strides, {1, 1}))
-                    throw std::invalid_argument(op.m_type + ": invalid strides attribute value (not implemented).");*/
-            if (group != 1)
-                throw std::invalid_argument(op.m_type + ": invalid group attribute value (not implemented).");
-
             auto& x = get_tensor_data(op.m_input[0], false /* make_copy */, false /* requires_float */, m_use_nchw_convs ? TensorDataLayout::unspecified : TensorDataLayout::nhwc /* required_layout */);
             auto& w = get_tensor_data(op.m_input[1], false /* make_copy */, false /* requires_float */, m_use_nchw_convs ? TensorDataLayout::unspecified : TensorDataLayout::nhwc /* required_layout */);
             auto* b = op.m_input.size() > 2 ? &get_tensor_data(op.m_input[2], true /* make_copy */) : nullptr;
             auto& output = op.m_output[0];
+
+            bool is1D = dilations.size() == 1;
+
+            if (is1D)
+            {
+                dilations.push_back(1);
+                kernel_shape.push_back(1);
+                if (pads.size() != 2)
+                {
+                    throw std::invalid_argument(op.m_type + ": invalid pads attribute value.");
+                }
+                else
+                {
+                    pads.insert(pads.begin() + 1, 0);
+                    pads.push_back(0);
+                }
+                if (strides.size() != 1)
+                {
+                    throw std::invalid_argument(op.m_type + ": invalid strides attribute value.");
+                }
+                else
+                {
+                    strides.push_back(strides[0]);
+                }
+            }
+
+            if (!are_all_equal(dilations, { 1, 1 }))
+                throw std::invalid_argument(op.m_type + ": invalid dilations attribute value (not implemented).");
+            /*if (!are_all_equal(pads, {1, 1, 1, 1}))
+                throw std::invalid_argument(op.m_type + ": invalid pads attribute value (not implemented).");*/
+            /*if (!are_all_equal(strides, {1, 1}))
+                throw std::invalid_argument(op.m_type + ": invalid strides attribute value (not implemented).");*/
+            if (group != 1)
+                throw std::invalid_argument(op.m_type + ": invalid group attribute value (not implemented).");
 
             std::string cache_key;
             if (m_use_ops_cache && w.m_is_static_weights && (!b || b->m_is_static_weights))
@@ -4613,11 +4643,17 @@ void Model::run()
                 output.m_zero_point = s.second;
             }
 
+            if (is1D)
+                output.m_shape.push_back(1);
+
             if (result_first.size() != 4 ||
                 !check_output_shape({ result_first[0], result_first[3], result_first[1], result_first[2] }, output.m_shape))
             {
                 throw std::invalid_argument(op.m_type + ": unexpected shape of output.");
             }
+
+            if (is1D)
+                result_first.erase(result_first.begin() + (m_use_nchw_convs ? 3 : 2));
 
             output.m_layout = m_use_nchw_convs ? TensorDataLayout::unspecified : TensorDataLayout::nhwc;
             output.m_shape = std::move(result_first);
