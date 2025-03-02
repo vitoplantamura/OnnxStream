@@ -545,6 +545,22 @@ public:
         return pthreadpool_get_threads_count(threadpool);
     }
 
+    void allocate_workspace(size_t size, size_t alignment)
+    {
+        if (size > m_workspace_size || alignment > m_workspace_alignment)
+        {
+            if (m_workspace)
+            {
+                custom_aligned_free(m_workspace);
+                m_workspace = nullptr;
+            }
+
+            m_workspace_size = std::max(m_workspace_size, size);
+            m_workspace_alignment = std::max(m_workspace_alignment, alignment);
+            m_workspace = custom_aligned_alloc(m_workspace_alignment, m_workspace_size);
+        }
+    }
+
     template <typename U, typename T>
     tensor_vector<T> convert(tensor_vector<U>& input)
     {
@@ -888,22 +904,7 @@ public:
         if (status != xnn_status_success)
             throw std::runtime_error("failed to reshape fully connected operation");
 
-        if (workspace_size > m_workspace_size)
-        {
-            if (m_workspace)
-            {
-                custom_aligned_free(m_workspace);
-                m_workspace = nullptr;
-            }
-
-            m_workspace = custom_aligned_alloc(workspace_alignment, workspace_size);
-            m_workspace_size = workspace_size;
-            m_workspace_alignment = workspace_alignment;
-        }
-        else if (workspace_alignment != m_workspace_alignment)
-        {
-            throw std::runtime_error("different workspace alignments");
-        }
+        allocate_workspace(workspace_size, workspace_alignment);
 
         status = xnn_setup_dynamic_fully_connected_nc_xxx(
             fc_op /* fully_connected_op */,
@@ -2141,22 +2142,7 @@ public:
         if (status != xnn_status_success)
             throw std::runtime_error("failed to reshape scaled dot product attention operator");
 
-        if (workspace_size > m_workspace_size)
-        {
-            if (m_workspace)
-            {
-                custom_aligned_free(m_workspace);
-                m_workspace = nullptr;
-            }
-
-            m_workspace = custom_aligned_alloc(workspace_alignment, workspace_size);
-            m_workspace_size = workspace_size;
-            m_workspace_alignment = workspace_alignment;
-        }
-        else if (workspace_alignment != m_workspace_alignment)
-        {
-            throw std::runtime_error("different workspace alignments");
-        }
+        allocate_workspace(workspace_size, workspace_alignment);
 
         status = xnn_setup_scaled_dot_product_attention_nhtc_xxx(
             attention_op,
