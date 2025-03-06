@@ -35,6 +35,10 @@
 #include <filesystem>
 #include <regex>
 
+#ifdef USE_LIBPNG
+#include <png.h>
+#endif
+
 #if USE_NCNN
 #include "benchmark.h"
 #include "net.h"
@@ -299,6 +303,35 @@ namespace ncnn
 }
 #endif
 
+#ifdef USE_LIBPNG
+// adapted from QEMU project, https://www.qemu.org
+void save_png(std::uint8_t* img, unsigned w, unsigned h, int alpha, char const* const file_name) noexcept
+{
+    FILE* fp = fopen(file_name, "wb");
+    if(fp) {
+    png_struct* png_ptr = png_create_write_struct(PNG_LIBPNG_VER_STRING, NULL, NULL, NULL);
+    if(png_ptr) {
+    png_info* info_ptr = png_create_info_struct(png_ptr);
+    if(info_ptr) {
+        png_init_io(png_ptr, fp);
+        png_set_IHDR(png_ptr, info_ptr, w, h, 8,
+            alpha ? PNG_COLOR_TYPE_RGB_ALPHA : PNG_COLOR_TYPE_RGB,
+            PNG_INTERLACE_NONE, PNG_COMPRESSION_TYPE_BASE, PNG_FILTER_TYPE_BASE);
+        png_write_info(png_ptr, info_ptr);
+        alpha = alpha ? 4 : 3;
+        for (unsigned y = 0; y < h; y++)
+        {
+            png_write_row(png_ptr, (png_const_bytep)(img + y * w * (unsigned)alpha));
+        }
+    }
+    png_destroy_write_struct(&png_ptr, &info_ptr);
+    }
+    fclose(fp);
+    } else { // fp == 0
+        printf("PNG saving failed: could not create file.");
+    }
+}
+#else // USE_LIBPNG
 // adapted from https://github.com/miloyip/svpng/blob/master/svpng.inc
 inline static void save_png(std::uint8_t* img, unsigned w, unsigned h, int alpha, char const* const file_name) noexcept
 {
@@ -553,6 +586,7 @@ inline static void save_png(std::uint8_t* img, unsigned w, unsigned h, int alpha
 
     fclose(fp);
 }
+#endif // USE_LIBPNG
 
 void print_max_dist(ncnn::Mat& first, ncnn::Mat& second)
 {
