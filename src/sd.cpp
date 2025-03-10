@@ -35,6 +35,10 @@
 #include <filesystem>
 #include <regex>
 
+#ifdef __ANDROID__
+#include <sys/resource.h>
+#endif
+
 #ifdef USE_LIBPNG
 #include <png.h>
 #endif
@@ -2284,6 +2288,15 @@ int main(int argc, char** argv)
     auto pwss = (size_t)info.PeakWorkingSetSize;
 
     printf("\npeak working set size: %f GB\n", static_cast<float>(pwss) / 1024.0f / 1024.0f / 1024.0f);
+
+#elif defined(__ANDROID__)
+
+    struct rusage ru;
+    if (!getrusage(RUSAGE_SELF, &ru)) {
+        auto mrss = ru.ru_maxrss;
+
+        printf("\nmaximum resident set size: %f GB\n", static_cast<float>(mrss) / 1024.0f / 1024.0f);
+    }
 
 #endif
 
