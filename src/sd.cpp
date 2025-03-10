@@ -335,7 +335,7 @@ inline static void save_image(std::uint8_t* img, unsigned w, unsigned h, int alp
 
         struct jpeg_compress_struct cinfo;
         struct jpeg_error_mgr jerr;
-        JSAMPROW row_pointer[1];                            // **uint8_t
+        JSAMPROW row_pointer;                               // *uint8_t
         int row_stride = w * 3;                             // row width in bytes
 
         FILE* fp = fopen(file_name, "wb");
@@ -362,8 +362,8 @@ inline static void save_image(std::uint8_t* img, unsigned w, unsigned h, int alp
         jpeg_start_compress(&cinfo, true);                  // do write all tables
 
         while (cinfo.next_scanline < cinfo.image_height) {
-            row_pointer[0] = &img[cinfo.next_scanline * row_stride];
-            jpeg_write_scanlines(&cinfo, row_pointer, 1);   // number of lines
+            row_pointer = &img[cinfo.next_scanline * row_stride];
+            jpeg_write_scanlines(&cinfo, &row_pointer, 1);  // number of lines
         }
 
         jpeg_finish_compress(&cinfo);
