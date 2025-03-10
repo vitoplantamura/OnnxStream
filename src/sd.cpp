@@ -46,7 +46,7 @@
 #ifdef USE_LIBJPEGTURBO
 #include "jpeglib.h"
 #include "jerror.h"
-#endif
+#end
 
 #if USE_NCNN
 #include "benchmark.h"
