@@ -330,7 +330,7 @@ inline static void save_image(std::uint8_t* img, unsigned w, unsigned h, int alp
             return;
         }
 
-// following id adapted from https://github.com/libjpeg-turbo/libjpeg-turbo/blob/main/src/example.c
+// following is adapted from https://github.com/libjpeg-turbo/libjpeg-turbo/blob/main/src/example.c
         int quality = 90;                                   // JPEG compression quality
 
         struct jpeg_compress_struct cinfo;
