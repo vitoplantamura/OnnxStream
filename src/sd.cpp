@@ -43,6 +43,11 @@
 #include <png.h>
 #endif
 
+#ifdef USE_LIBJPEGTURBO
+#include "jpeglib.h"
+#include "jerror.h"
+#endif
+
 #if USE_NCNN
 #include "benchmark.h"
 #include "net.h"
@@ -307,13 +312,75 @@ namespace ncnn
 }
 #endif
 
-#ifdef USE_LIBPNG
-// adapted from QEMU project, https://www.qemu.org
-void save_png(std::uint8_t* img, unsigned w, unsigned h, int alpha, char const* const file_name) noexcept
+inline static void save_image(std::uint8_t* img, unsigned w, unsigned h, int alpha, char const* const file_name) noexcept
 {
+
+#ifdef USE_LIBJPEGTURBO
+    const char* last_dot = strrchr(file_name, '.');
+    const char* last_slash = std::max(strrchr(file_name, '/'),
+                                      strrchr(file_name, '\\'));
+    // extention is in filename and is jpeg
+    if (last_dot > last_slash &&
+        (!strncasecmp(last_dot, ".jpg", 5) ||               // comparing including
+         !strncasecmp(last_dot, ".jpeg", 6) ||              // terminating zero
+         !strncasecmp(last_dot, ".jpe", 5)))
+    {
+        if (alpha) {
+            printf("Alpha channel removal is not implemented, refusing to save JPEG.\n");
+            return;
+        }
+
+// following id adapted from https://github.com/libjpeg-turbo/libjpeg-turbo/blob/main/src/example.c
+        int quality = 90;                                   // JPEG compression quality
+
+        struct jpeg_compress_struct cinfo;
+        struct jpeg_error_mgr jerr;
+        JSAMPROW row_pointer[1];                            // **uint8_t
+        int row_stride = w * 3;                             // row width in bytes
+
+        FILE* fp = fopen(file_name, "wb");
+        if (!fp) {
+            printf("JPEG saving failed: could not create file '%s'.\n", file_name);
+            return;
+        }
+
+        cinfo.err = jpeg_std_error(&jerr);
+        jpeg_create_compress(&cinfo);
+        jpeg_stdio_dest(&cinfo, fp);
+
+        cinfo.image_width  = w;
+        cinfo.image_height = h;
+        cinfo.input_components = 3;                         // R, G, B color channels
+        cinfo.data_precision = 8;                           // bits per channel
+        cinfo.in_color_space = JCS_RGB;                     // colorspace of generated image
+
+        jpeg_set_defaults(&cinfo);
+        jpeg_set_quality(&cinfo, quality, true);            // force baseline JPEG
+        // For quality above 90, use 4:4:4 chroma subsampling (default is 4:2:0)
+        if (quality >= 90) cinfo.comp_info[0].h_samp_factor = cinfo.comp_info[0].v_samp_factor = 1;
+
+        jpeg_start_compress(&cinfo, true);                  // do write all tables
+
+        while (cinfo.next_scanline < cinfo.image_height) {
+            row_pointer[0] = &img[cinfo.next_scanline * row_stride];
+            jpeg_write_scanlines(&cinfo, row_pointer, 1);   // number of lines
+        }
+
+        jpeg_finish_compress(&cinfo);
+        fclose(fp);
+        jpeg_destroy_compress(&cinfo);
+        return;
+    }
+#endif   // USE_LIBJPEGTURBO
+
+#ifdef USE_LIBPNG
+// adapted from QEMU project, https://github.com/qemu/qemu/commit/9a0a119a382867dc9a5c2ae9348003bf79d84af2
     FILE* fp = fopen(file_name, "wb");
     if(fp) {
-    png_struct* png_ptr = png_create_write_struct(PNG_LIBPNG_VER_STRING, NULL, NULL, NULL);
+    png_struct* png_ptr = png_create_write_struct(PNG_LIBPNG_VER_STRING, 
+                                                  NULL,    // *error
+                                                  NULL,    // errors   handler callback
+                                                  NULL);   // warnings handler callback
     if(png_ptr) {
     png_info* info_ptr = png_create_info_struct(png_ptr);
     if(info_ptr) {
@@ -331,17 +398,19 @@ void save_png(std::uint8_t* img, unsigned w, unsigned h, int alpha, char const* 
     png_destroy_write_struct(&png_ptr, &info_ptr);
     }
     fclose(fp);
-    } else { // fp == 0
-        printf("PNG saving failed: could not create file.");
+    } else {   // fp == 0
+        printf("PNG saving failed: could not create file '%s'.\n", file_name);
     }
-}
-#else // USE_LIBPNG
+#else   // USE_LIBPNG
+
 // adapted from https://github.com/miloyip/svpng/blob/master/svpng.inc
-inline static void save_png(std::uint8_t* img, unsigned w, unsigned h, int alpha, char const* const file_name) noexcept
-{
     constexpr unsigned t[] = { 0, 0x1db71064, 0x3b6e20c8, 0x26d930ac, 0x76dc4190, 0x6b6b51f4, 0x4db26158, 0x5005713c, 0xedb88320, 0xf00f9344, 0xd6d6a3e8, 0xcb61b38c, 0x9b64c2b0, 0x86d3d2d4, 0xa00ae278, 0xbdbdf21c };
     unsigned a = 1, b = 0, c, p = w * (alpha ? 4 : 3) + 1, x, y, i;
     FILE* fp = fopen(file_name, "wb");
+    if (!fp) {
+        printf("PNG saving failed: could not create file '%s'.\n", file_name);
+        return;
+    }
 
     for (i = 0; i < 8; i++)
         fputc(("\x89PNG\r\n\32\n")[i], fp);;
@@ -589,8 +658,8 @@ inline static void save_png(std::uint8_t* img, unsigned w, unsigned h, int alpha
     }
 
     fclose(fp);
+#endif   // USE_LIBPNG
 }
-#endif // USE_LIBPNG
 
 void print_max_dist(ncnn::Mat& first, ncnn::Mat& second)
 {
@@ -1565,7 +1634,7 @@ inline void stable_diffusion(std::string positive_prompt = std::string{}, std::s
         buffer.resize( 512 * 512 * 3 );
         //buffer.resize(4 * 512 * 4 * 512 * 3);
         x_samples_ddim.to_pixels(buffer.data(), ncnn::Mat::PIXEL_RGB);
-        save_png(buffer.data(), 512, 512, 0, output_png_path.c_str());
+        save_image(buffer.data(), 512, 512, 0, output_png_path.c_str());
     }
     std::cout << "----------------[close]-------------------" << std::endl;
 }
@@ -1717,7 +1786,7 @@ void sdxl_decoder(ncnn::Mat& sample, const std::string& output_png_path, bool ti
         std::vector<std::uint8_t> buffer;
         buffer.resize(g_main_args.m_latw * 8 * g_main_args.m_lath * 8 * 3);
         res.to_pixels(buffer.data(), ncnn::Mat::PIXEL_RGB);
-        save_png(buffer.data(), g_main_args.m_latw * 8, g_main_args.m_lath * 8, 0, output_png_path.c_str());
+        save_image(buffer.data(), g_main_args.m_latw * 8, g_main_args.m_lath * 8, 0, output_png_path.c_str());
     }
 }
 
@@ -2245,7 +2314,7 @@ int main(int argc, char** argv)
                 buffer.resize(512 * 512 * 3);
                 x_samples_ddim.to_pixels(buffer.data(), ncnn::Mat::PIXEL_RGB);
 
-                save_png(buffer.data(), 512, 512, 0, g_main_args.m_output.c_str());
+                save_image(buffer.data(), 512, 512, 0, g_main_args.m_output.c_str());
             }
             else
             {
