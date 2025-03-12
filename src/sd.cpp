@@ -1651,9 +1651,6 @@ void sdxl_decoder(ncnn::Mat& sample, const std::string& output_png_path, bool ti
             }
         };
 
-        if (g_main_args.m_latw < 32 || g_main_args.m_lath < 32)
-            throw std::invalid_argument("sdxl_decoder: resolution too small for the tiled decoder; use the --not-tiled option.");
-
         for (int y = 0; y < g_main_args.m_lath; y += 24)
         {
             if (y + 32 > g_main_args.m_lath)
@@ -2009,13 +2006,28 @@ int main(int argc, char** argv)
         }
         auto w = std::stoi(g_main_args.m_res.substr(0, d));
         auto h = std::stoi(g_main_args.m_res.substr(d + 1));
+        if (w < 40)
+        {
+            printf("Width in the --res option must be 40 or greater.\n");
+            return -1;
+        }
         if (w <= 0 || w % 8 || h <= 0 || h % 8)
         {
-            printf("Width and height in the --res option must be positive and a multiple of 8.");
+            printf("Width and height in the --res option must be positive and a multiple of 8.\n");
             return -1;
         }
         g_main_args.m_latw = w / 8;
         g_main_args.m_lath = h / 8;
+
+        // automatically turn off tiled decoding for small images
+        // because it will not use less memory, but will limit minimal size
+        if (g_main_args.m_latw * g_main_args.m_lath <= 32 * 32) g_main_args.m_tiled = false;
+
+        if (g_main_args.m_tiled && (g_main_args.m_latw < 32 || g_main_args.m_lath < 32))
+        {
+            printf("Resolution too small for the tiled decoder; either use resolution higher than 256x256 or the --not-tiled option.\n");
+            return -1;
+        }
     }
 
     try
