@@ -389,10 +389,10 @@ inline static void save_image(std::uint8_t* img, unsigned w, unsigned h, int alp
             alpha ? PNG_COLOR_TYPE_RGB_ALPHA : PNG_COLOR_TYPE_RGB,
             PNG_INTERLACE_NONE, PNG_COMPRESSION_TYPE_BASE, PNG_FILTER_TYPE_BASE);
         png_write_info(png_ptr, info_ptr);
-        alpha = alpha ? 4 : 3;
+        w *= alpha ? 4 : 3;
         for (unsigned y = 0; y < h; y++)
         {
-            png_write_row(png_ptr, (png_const_bytep)(img + y * w * (unsigned)alpha));
+            png_write_row(png_ptr, (png_const_bytep)(img + y * w));
         }
     }
     png_destroy_write_struct(&png_ptr, &info_ptr);
