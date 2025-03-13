@@ -1651,6 +1651,10 @@ void sdxl_decoder(ncnn::Mat& sample, const std::string& output_png_path, bool ti
             }
         };
 
+// Already checked in main()
+//        if (g_main_args.m_latw < 32 || g_main_args.m_lath < 32)
+//            throw std::invalid_argument("sdxl_decoder: resolution too small for the tiled decoder; use the --not-tiled option.");
+
         for (int y = 0; y < g_main_args.m_lath; y += 24)
         {
             if (y + 32 > g_main_args.m_lath)
