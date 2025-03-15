@@ -12,6 +12,8 @@
 #define NOMINMAX
 #include <windows.h>
 #include <psapi.h>
+#else
+#include <unistd.h>   // for sysconf()
 #endif
 
 #include <algorithm>
@@ -34,6 +36,7 @@
 #include <cstring>
 #include <filesystem>
 #include <regex>
+#include <thread>
 
 #ifdef __ANDROID__
 #include <sys/resource.h>
@@ -79,12 +82,15 @@ struct MainArgs
     bool m_download = false;
     std::string m_curl_parallel = "16";
     std::string m_res = "";
+    std::string m_threads = "";
 
     // calculated:
     unsigned int m_latw = 512 / 8, m_lath = 512 / 8;
 };
 
 static MainArgs g_main_args;
+
+static unsigned n_threads = 0;
 
 #if !USE_NCNN
 
@@ -684,6 +690,7 @@ inline static ncnn::Mat decoder_solver(ncnn::Mat& sample)
 #if USE_NCNN
     ncnn::Net net;
     {
+        net.opt.num_threads = n_threads;
         net.opt.use_vulkan_compute = false;
         net.opt.use_winograd_convolution = false;
         net.opt.use_sgemm_convolution = false;
@@ -710,7 +717,7 @@ inline static ncnn::Mat decoder_solver(ncnn::Mat& sample)
 
 #if USE_ONNXSTREAM
             {
-                Model model;
+                Model model(n_threads);
 
                 model.m_ops_printf = g_main_args.m_ops_printf;
                 
@@ -962,6 +969,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
     ncnn::Net net;
 #if USE_NCNN
     {
+        net.opt.num_threads = n_threads;
         net.opt.use_vulkan_compute = false;
         net.opt.use_winograd_convolution = true; // false;
         net.opt.use_sgemm_convolution = true; // false;
@@ -997,7 +1005,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
     // sample_euler_ancestral
     {
 #if USE_ONNXSTREAM
-        Model model;
+        Model model(n_threads);
 
         if (g_main_args.m_rpi_lowmem)
             model.set_weights_provider(DiskNoCacheWeightsProvider());
@@ -1493,7 +1501,7 @@ inline static ncnn::Mat prompt_solve(std::unordered_map<std::string, int>& token
                     {
                         data[76] = 49407; // todo
 
-                        Model model;
+                        Model model(n_threads);
 
                         model.m_ops_printf = g_main_args.m_ops_printf;
 
@@ -1556,6 +1564,7 @@ inline static std::pair<ncnn::Mat, ncnn::Mat> prompt_solver(std::string const& p
     {
         // 加载CLIP模型
 #if USE_NCNN
+        net.opt.num_threads = n_threads;
         net.opt.use_vulkan_compute = false;
         net.opt.use_winograd_convolution = false;
         net.opt.use_sgemm_convolution = false;
@@ -1651,7 +1660,7 @@ void sdxl_decoder(ncnn::Mat& sample, const std::string& output_png_path, bool ti
 
     if (!tiled)
     {
-        Model model;
+        Model model(n_threads);
 
         model.m_ops_printf = g_main_args.m_ops_printf;
 
@@ -1698,7 +1707,7 @@ void sdxl_decoder(ncnn::Mat& sample, const std::string& output_png_path, bool ti
                 src += g_main_args.m_latw * g_main_args.m_lath;
             }
 
-            Model model;
+            Model model(n_threads);
 
             model.m_ops_printf = g_main_args.m_ops_printf;
 
@@ -1843,7 +1852,7 @@ void stable_diffusion_xl(std::string positive_prompt, std::string output_png_pat
 
     auto run_te_model = [](int index, tensor_vector<int64_t>& input) -> std::vector<Tensor> {
 
-        Model model;
+        Model model(n_threads);
 
         model.m_ops_printf = g_main_args.m_ops_printf;
 
@@ -1965,6 +1974,10 @@ int main(int argc, char** argv)
         {
             str = &g_main_args.m_path_with_slash;
         }
+        else if (arg == "--threads")
+        {
+            str = &g_main_args.m_threads;
+        }
         else if (arg == "--ops-printf")
         {
             g_main_args.m_ops_printf = true;
@@ -2062,6 +2075,7 @@ int main(int argc, char** argv)
             printf("--curl-parallel     Sets the number of parallel downloads with CURL. Default is 16.\n");
             printf("--rpi               Configures the models to run on a Raspberry Pi.\n");
             printf("--rpi-lowmem        Configures the models to run on a Raspberry Pi Zero 2.\n");
+            printf("--threads           Sets the number of threads, values =< 0 mean max-N.\n");
 
             return -1;
         }
@@ -2089,6 +2103,30 @@ int main(int argc, char** argv)
     {
         printf("--steps must be >= 3.");
         return -1;
+    }
+
+    if (g_main_args.m_threads.size())
+    {
+        n_threads = std::thread::hardware_concurrency();   // according to cppreference.com,
+        if (!n_threads) {   // it can be uncomputable and return 0, falling back to system calls then
+#ifdef _WIN32
+            SYSTEM_INFO si;
+            si.dwNumberOfProcessors = 0;
+            GetSystemInfo(&si);
+            n_threads = static_cast<unsigned>(si.dwNumberOfProcessors);
+#elif defined(__linux__)
+            n_threads = static_cast<unsigned>(sysconf(_SC_NPROCESSORS_ONLN));
+#else
+#warning Number of threads can be default
+#endif
+        }
+        if (n_threads)
+        {
+            auto t = std::max(std::stoi(g_main_args.m_threads), 1 - (int)n_threads); // use at least 1 thread
+            n_threads = (t <= 0) ? n_threads + t : t;
+            printf("threads: %d\n", n_threads);
+        } else
+            printf("Number of CPUs not detected, using default number of threads.\n");
     }
 
     if (!g_main_args.m_res.size())
@@ -2271,7 +2309,7 @@ int main(int argc, char** argv)
                     {
                         auto path = file.substr(0, pos);
 
-                        Model model;
+                        Model model(n_threads);
                         model.set_weights_provider(CollectNamesWeightsProvider());
                         model.m_support_dynamic_shapes = true;
                         model.read_file((g_main_args.m_path_with_slash + file).c_str());
