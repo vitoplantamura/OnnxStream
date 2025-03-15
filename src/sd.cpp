@@ -36,7 +36,6 @@
 #include <cstring>
 #include <filesystem>
 #include <regex>
-#include <thread>
 
 #ifdef __ANDROID__
 #include <sys/resource.h>
