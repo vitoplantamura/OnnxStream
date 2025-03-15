@@ -689,7 +689,7 @@ inline static ncnn::Mat decoder_solver(ncnn::Mat& sample)
 #if USE_NCNN
     ncnn::Net net;
     {
-        net.opt.num_threads = n_threads;
+        if (n_threads) net.opt.num_threads = n_threads;
         net.opt.use_vulkan_compute = false;
         net.opt.use_winograd_convolution = false;
         net.opt.use_sgemm_convolution = false;
@@ -968,7 +968,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
     ncnn::Net net;
 #if USE_NCNN
     {
-        net.opt.num_threads = n_threads;
+        if (n_threads) net.opt.num_threads = n_threads;
         net.opt.use_vulkan_compute = false;
         net.opt.use_winograd_convolution = true; // false;
         net.opt.use_sgemm_convolution = true; // false;
@@ -1563,7 +1563,7 @@ inline static std::pair<ncnn::Mat, ncnn::Mat> prompt_solver(std::string const& p
     {
         // 加载CLIP模型
 #if USE_NCNN
-        net.opt.num_threads = n_threads;
+        if (n_threads) net.opt.num_threads = n_threads;
         net.opt.use_vulkan_compute = false;
         net.opt.use_winograd_convolution = false;
         net.opt.use_sgemm_convolution = false;
