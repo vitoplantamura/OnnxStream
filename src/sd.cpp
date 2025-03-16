@@ -12,7 +12,7 @@
 #define NOMINMAX
 #include <windows.h>
 #include <psapi.h>
-#else
+#elif defined(__linux__)
 #include <unistd.h>   // for sysconf()
 #endif
 
