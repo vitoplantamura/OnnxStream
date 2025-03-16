@@ -358,6 +358,7 @@ These are the command line options of the Stable Diffusion example:
 --curl-parallel     Sets the number of parallel downloads with CURL. Default is 16.
 --rpi               Configures the models to run on a Raspberry Pi.
 --rpi-lowmem        Configures the models to run on a Raspberry Pi Zero 2.
+--threads           Sets the number of threads, negative values use (cores - N) threads.
 ```
 
 Options you're probably interested in: `--xl`, `--turbo`, `--prompt`, `--steps`, `--rpi`.
