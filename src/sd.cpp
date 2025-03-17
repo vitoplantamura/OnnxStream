@@ -2053,7 +2053,7 @@ int main(int argc, char** argv)
         }
         else
         {
-            printf(("Invalid command line argument: \"" + arg + "\".\n\n").c_str());
+            printf("Invalid command line argument: \"%s\".\n\n", arg.c_str());
 
             printf("--xl                Runs Stable Diffusion XL 1.0 instead of Stable Diffusion 1.5.\n");
             printf("--turbo             Runs Stable Diffusion Turbo 1.0 instead of Stable Diffusion 1.5.\n");
@@ -2083,7 +2083,7 @@ int main(int argc, char** argv)
         {
             if (++i >= argc)
             {
-                printf(("Argument \"" + arg + "\" should be followed by a string.").c_str());
+                printf("Argument \"%s\" should be followed by a string.", arg.c_str());
                 return -1;
             }
 
