@@ -2287,8 +2287,14 @@ int main(int argc, char** argv)
                     command += " -o \"" + url.second + "\" \"" + url.first + "\" ";
                 command += " >" + null_device + " 2>&1";
 
-                if (system(command.c_str()))
-                    throw std::invalid_argument("Download error.");
+                if (system(command.c_str())) {
+                    command = "curl --location --fail --silent --show-error --parallel ";
+                    for (const auto& url : urls)
+                        command += " -o \"" + url.second + "\" \"" + url.first + "\" ";
+                    printf("Download error, retrying command:\n%s\n", command.c_str());
+                    if (system(command.c_str()))
+                        throw std::invalid_argument("Download failed.");
+                }
             };
 
             {
