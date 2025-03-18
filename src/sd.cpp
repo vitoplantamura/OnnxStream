@@ -2114,7 +2114,7 @@ int main(int argc, char** argv)
             GetSystemInfo(&si);
             n_threads = static_cast<unsigned>(si.dwNumberOfProcessors);
 #elif defined(__linux__)
-            n_threads = static_cast<unsigned>(sysconf(_SC_NPROCESSORS_ONLN));
+            n_threads = static_cast<unsigned>(std::max(0L, sysconf(_SC_NPROCESSORS_ONLN)));
 #else
 #warning Number of threads can be default
 #endif
