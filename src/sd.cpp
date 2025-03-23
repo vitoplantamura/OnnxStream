@@ -81,6 +81,7 @@ struct MainArgs
     bool m_download = false;
     bool m_decode_im = false;
     bool m_preview_im = false;
+    bool m_preview_8x = false;
     std::string m_curl_parallel = "16";
     std::string m_res = "";
     std::string m_threads = "";
@@ -695,6 +696,38 @@ void print_max_dist(ncnn::Mat& first, ncnn::Mat& second)
     }
 }
 
+inline static void up8x(uint8_t* dst, const uint8_t* src, unsigned w, unsigned h)
+{
+    const unsigned src_width = w * 3;
+    for (unsigned y = 0; y < h; y++) {
+        for (unsigned y8 = 0; y8 < 7; y8++) {
+            for (unsigned x = 0; x < w; x++) { // row of x8 pixels
+                const uint8_t r = *src++, g = *src++, b = *src++;
+                *(dst++) = r; *(dst++) = g; *(dst++) = b;
+                *(dst++) = r; *(dst++) = g; *(dst++) = b;
+                *(dst++) = r; *(dst++) = g; *(dst++) = b;
+                *(dst++) = r; *(dst++) = g; *(dst++) = b;
+                *(dst++) = r; *(dst++) = g; *(dst++) = b;
+                *(dst++) = r; *(dst++) = g; *(dst++) = b;
+                *(dst++) = r; *(dst++) = g; *(dst++) = b;
+                *(dst++) = r; *(dst++) = g; *(dst++) = b;
+            }
+            src -= src_width; // repeat row 7 times
+        }
+        for (unsigned x = 0; x < w; x++) { // 8th time
+            const uint8_t r = *src++, g = *src++, b = *src++;
+            *(dst++) = r; *(dst++) = g; *(dst++) = b;
+            *(dst++) = r; *(dst++) = g; *(dst++) = b;
+            *(dst++) = r; *(dst++) = g; *(dst++) = b;
+            *(dst++) = r; *(dst++) = g; *(dst++) = b;
+            *(dst++) = r; *(dst++) = g; *(dst++) = b;
+            *(dst++) = r; *(dst++) = g; *(dst++) = b;
+            *(dst++) = r; *(dst++) = g; *(dst++) = b;
+            *(dst++) = r; *(dst++) = g; *(dst++) = b;
+        }
+    }
+}
+
 inline static void sd_preview(ncnn::Mat& sample, const std::string& filename, const std::string& appendix)
 {
 // adapted from https://github.com/leejet/stable-diffusion.cpp/pull/454
@@ -732,6 +765,13 @@ inline static void sd_preview(ncnn::Mat& sample, const std::string& filename, co
     std::vector<std::uint8_t> buffer,  buffer8;
     buffer.resize( width * height * 3 );
     res.to_pixels(buffer.data(), ncnn::Mat::PIXEL_RGB);
+    if (g_main_args.m_preview_8x) {
+        buffer8.resize( width * height * 3 << 6 );
+        up8x(buffer8.data(), buffer.data(), width, height);
+        width <<= 3;
+        height <<= 3;
+        buffer = buffer8;
+    }
     save_image(buffer.data(), width, height, 0, filename, appendix);
 }
 
@@ -771,6 +811,13 @@ inline static void sdxl_preview(ncnn::Mat& sample, const std::string& filename, 
     std::vector<std::uint8_t> buffer, buffer8;
     buffer.resize( width * height * 3 );
     res.to_pixels(buffer.data(), ncnn::Mat::PIXEL_RGB);
+    if (g_main_args.m_preview_8x) {
+        buffer8.resize( width * height * 3 << 6 );
+        up8x(buffer8.data(), buffer.data(), width, height);
+        width <<= 3;
+        height <<= 3;
+        buffer = buffer8;
+    }
     save_image(buffer.data(), width, height, 0, filename, appendix);
 }
 
@@ -2167,6 +2214,11 @@ int main(int argc, char** argv)
         {
             g_main_args.m_preview_im = true;
         }
+        else if (arg == "--preview-steps-x8" || arg == "--preview-steps-8x")
+        {
+            g_main_args.m_preview_im = true;
+            g_main_args.m_preview_8x = true;
+        }
         else if (arg == "--decode-steps")
         {
             g_main_args.m_decode_im = true;
@@ -2189,6 +2241,7 @@ int main(int argc, char** argv)
             printf("--ops-printf        During inference, writes the current operation to stdout.\n");
             printf("--output            Sets the output image file.\n");
             printf("--preview-steps     Save every diffusion step in low resolution.\n");
+            printf("--preview-steps-x8  Magnify previews to full resolution.\n");
             printf("--decode-steps      Decode and save every diffusion step in full resolution.\n");
             printf("--decode-latents    Skips the diffusion, and decodes the specified latents file.\n");
             printf("--prompt            Sets the positive prompt.\n");
