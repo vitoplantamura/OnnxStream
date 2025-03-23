@@ -317,18 +317,27 @@ namespace ncnn
 }
 #endif
 
-inline static void save_image(std::uint8_t* img, unsigned w, unsigned h, int alpha, const std::string& file_name) noexcept
+inline static void save_image(std::uint8_t* img, unsigned w, unsigned h, int alpha, const std::string& file_name, const std::string& appendix = "") noexcept
 {
-
-#ifdef USE_LIBJPEGTURBO
     const char* last_dot = strrchr(file_name.c_str(), '.');
     const char* last_slash = std::max(strrchr(file_name.c_str(), '/'),
                                       strrchr(file_name.c_str(), '\\'));
+    std::string ext, app;
+    if (appendix.length()) {
+        app = appendix;
+        ext = last_dot > last_slash ? std::string(last_dot) : "";
+              // filename has extension
+    } else {
+        app = ext = "";
+    }
+    const std::string extended_name = file_name + app + ext;
+
+#ifdef USE_LIBJPEGTURBO
     // extention is in filename and is jpeg
     if (last_dot > last_slash &&
-        (!strncasecmp(last_dot, ".jpg", 5) ||               // comparing including
-         !strncasecmp(last_dot, ".jpeg", 6) ||              // terminating zero
-         !strncasecmp(last_dot, ".jpe", 5)))
+        (!strncasecmp(last_dot, ".jpg", 5)  ||              // comparing filename 
+         !strncasecmp(last_dot, ".jpeg", 6) ||              // without appendix,
+         !strncasecmp(last_dot, ".jpe", 5)))                // including terminating zero
     {
         if (alpha) {
             printf("Alpha channel removal is not implemented, refusing to save JPEG.\n");
@@ -343,9 +352,9 @@ inline static void save_image(std::uint8_t* img, unsigned w, unsigned h, int alp
         JSAMPROW row_pointer;                               // *uint8_t
         int row_stride = w * 3;                             // row width in bytes
 
-        FILE* fp = fopen(file_name.c_str(), "wb");
+        FILE* fp = fopen(extended_name.c_str(), "wb");
         if (!fp) {
-            printf("JPEG saving failed: could not create file '%s'.\n", file_name.c_str());
+            printf("JPEG saving failed: could not create file '%s'.\n", extended_name.c_str());
             return;
         }
 
@@ -380,7 +389,7 @@ inline static void save_image(std::uint8_t* img, unsigned w, unsigned h, int alp
 
 #ifdef USE_LIBPNG
 // adapted from QEMU project, https://github.com/qemu/qemu/commit/9a0a119a382867dc9a5c2ae9348003bf79d84af2
-    FILE* fp = fopen(file_name.c_str(), "wb");
+    FILE* fp = fopen(extended_name.c_str(), "wb");
     if(fp) {
     png_struct* png_ptr = png_create_write_struct(PNG_LIBPNG_VER_STRING, 
                                                   nullptr,  // *error
@@ -404,16 +413,16 @@ inline static void save_image(std::uint8_t* img, unsigned w, unsigned h, int alp
     }
     fclose(fp);
     } else {   // fp == 0
-        printf("PNG saving failed: could not create file '%s'.\n", file_name.c_str());
+        printf("PNG saving failed: could not create file '%s'.\n", extended_name.c_str());
     }
 #else   // USE_LIBPNG
 
 // adapted from https://github.com/miloyip/svpng/blob/master/svpng.inc
     constexpr unsigned t[] = { 0, 0x1db71064, 0x3b6e20c8, 0x26d930ac, 0x76dc4190, 0x6b6b51f4, 0x4db26158, 0x5005713c, 0xedb88320, 0xf00f9344, 0xd6d6a3e8, 0xcb61b38c, 0x9b64c2b0, 0x86d3d2d4, 0xa00ae278, 0xbdbdf21c };
     unsigned a = 1, b = 0, c, p = w * (alpha ? 4 : 3) + 1, x, y, i;
-    FILE* fp = fopen(file_name.c_str(), "wb");
+    FILE* fp = fopen(extended_name.c_str(), "wb");
     if (!fp) {
-        printf("PNG saving failed: could not create file '%s'.\n", file_name.c_str());
+        printf("PNG saving failed: could not create file '%s'.\n", extended_name.c_str());
         return;
     }
 
