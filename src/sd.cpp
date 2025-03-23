@@ -80,6 +80,7 @@ struct MainArgs
     bool m_ram = false;
     bool m_download = false;
     bool m_decode_im = false;
+    bool m_preview_im = false;
     std::string m_curl_parallel = "16";
     std::string m_res = "";
     std::string m_threads = "";
@@ -694,6 +695,85 @@ void print_max_dist(ncnn::Mat& first, ncnn::Mat& second)
     }
 }
 
+inline static void sd_preview(ncnn::Mat& sample, const std::string& filename, const std::string& appendix)
+{
+// adapted from https://github.com/leejet/stable-diffusion.cpp/pull/454
+    // https://github.com/comfyanonymous/ComfyUI/blob/master/comfy/latent_formats.py#L20-L26
+    constexpr float sd_latent_rgb_proj[4][3] = {
+        {0.3512f, 0.2297f, 0.3227f},
+        {0.3250f, 0.4974f, 0.2350f},
+        {-0.2829f, 0.1762f, 0.2721f},
+        {-0.2120f, -0.2616f, -0.7177f}};
+
+    unsigned width = sample.w, height = sample.h;
+    unsigned long pixel = 0;
+    ncnn::Mat res = ncnn::Mat(width, height, 3);
+    for (unsigned y = 0; y < height; y++) {
+        for (unsigned x = 0; x < width; x++) {
+            float r = 0, g = 0, b = 0;
+            for (unsigned d = 0; d < 4; d++) {
+                float value = *(sample.channel(d) + y * width + x);
+                r += value * sd_latent_rgb_proj[d][0];
+                g += value * sd_latent_rgb_proj[d][1];
+                b += value * sd_latent_rgb_proj[d][2];
+            }
+            *(res.channel(0) + pixel) = r;
+            *(res.channel(1) + pixel) = g;
+            *(res.channel(2) + pixel) = b;
+            pixel++;
+        }
+    }
+
+    // range -1 .. 1 => 0 .. 255
+    constexpr float bias[3] =   { -1.f, -1.f, -1.f };
+    constexpr float factor[3] = { 127.5f, 127.5f, 127.5f };
+    res.substract_mean_normalize(bias, factor);
+
+    std::vector<std::uint8_t> buffer,  buffer8;
+    buffer.resize( width * height * 3 );
+    res.to_pixels(buffer.data(), ncnn::Mat::PIXEL_RGB);
+    save_image(buffer.data(), width, height, 0, filename, appendix);
+}
+
+inline static void sdxl_preview(ncnn::Mat& sample, const std::string& filename, const std::string& appendix)
+{
+// adapted from https://github.com/leejet/stable-diffusion.cpp/pull/454
+    // https://github.com/comfyanonymous/ComfyUI/blob/master/comfy/latent_formats.py#L33-L39
+    constexpr float sdxl_latent_rgb_proj[4][3] = {
+        {0.3651f, 0.4232f, 0.4341f},
+        {-0.2533f, -0.0042f, 0.1068f},
+        {0.1076f, 0.1111f, -0.0362f},
+        {-0.3165f, -0.2492f, -0.2188f}};
+
+    unsigned width = sample.w, height = sample.h;
+    unsigned long pixel = 0;
+    ncnn::Mat res = ncnn::Mat(width, height, 3);
+    for (unsigned y = 0; y < height; y++) {
+        for (unsigned x = 0; x < width; x++) {
+            float r = 0, g = 0, b = 0;
+            for (unsigned d = 0; d < 4; d++) {
+                float value = *(sample.channel(d) + y * width + x);
+                r += value * sdxl_latent_rgb_proj[d][0];
+                g += value * sdxl_latent_rgb_proj[d][1];
+                b += value * sdxl_latent_rgb_proj[d][2];
+            }
+            *(res.channel(0) + pixel) = r;
+            *(res.channel(1) + pixel) = g;
+            *(res.channel(2) + pixel) = b;
+            pixel++;
+        }
+    }
+
+    constexpr float bias[3] =   { -1.f, -1.f, -1.f };
+    constexpr float factor[3] = { 127.5f, 127.5f, 127.5f };
+    res.substract_mean_normalize(bias, factor);
+
+    std::vector<std::uint8_t> buffer, buffer8;
+    buffer.resize( width * height * 3 );
+    res.to_pixels(buffer.data(), ncnn::Mat::PIXEL_RGB);
+    save_image(buffer.data(), width, height, 0, filename, appendix);
+}
+
 inline static ncnn::Mat decoder_solver(ncnn::Mat& sample)
 {
 #if USE_NCNN
@@ -1106,6 +1186,15 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                 }
             }
 
+            if(g_main_args.m_preview_im) {       // directly decode latent in low resolution
+                std::cout << "---> [preview]" << std::endl;
+                const std::string im_appendix = "_preview_" + std::to_string(i);
+                if(!sdxl_params) {
+                    sd_preview(x_mat, output_path, im_appendix);
+                } else {
+                    sdxl_preview(x_mat, output_path, im_appendix);
+                }
+            }
             if(g_main_args.m_decode_im                            // pass through decoder
                && i < static_cast<int>(sigma.size()) - 2) {       // if step is not last
                 std::cout << "---> [decode]" << std::endl;
@@ -2074,6 +2163,10 @@ int main(int argc, char** argv)
         {
             g_main_args.m_download = true;
         }
+        else if (arg == "--preview-steps")
+        {
+            g_main_args.m_preview_im = true;
+        }
         else if (arg == "--decode-steps")
         {
             g_main_args.m_decode_im = true;
@@ -2095,6 +2188,7 @@ int main(int argc, char** argv)
             printf("--models-path       Sets the folder containing the Stable Diffusion models.\n");
             printf("--ops-printf        During inference, writes the current operation to stdout.\n");
             printf("--output            Sets the output image file.\n");
+            printf("--preview-steps     Save every diffusion step in low resolution.\n");
             printf("--decode-steps      Decode and save every diffusion step in full resolution.\n");
             printf("--decode-latents    Skips the diffusion, and decodes the specified latents file.\n");
             printf("--prompt            Sets the positive prompt.\n");
@@ -2394,6 +2488,7 @@ int main(int argc, char** argv)
 
     if (g_main_args.m_decode_latents.size())
     {
+        printf("Decoding latents.\n");
         try
         {
             if (!g_main_args.m_xl)
@@ -2403,6 +2498,8 @@ int main(int argc, char** argv)
                 ncnn::Mat sample(64, 64, 4);
                 memcpy((float*)sample, vec.data(), sample.total() * sizeof(float));
 
+                if(g_main_args.m_preview_im)
+                    sd_preview(sample, g_main_args.m_output, "_preview");
                 ncnn::Mat x_samples_ddim = decoder_solver(sample);
 
                 std::vector<std::uint8_t> buffer;
@@ -2417,6 +2514,9 @@ int main(int argc, char** argv)
 
                 ncnn::Mat sample(g_main_args.m_latw, g_main_args.m_lath, 4);
                 memcpy((float*)sample, vec.data(), sample.total() * sizeof(float));
+
+                if(g_main_args.m_preview_im)
+                    sdxl_preview(sample, g_main_args.m_output, "_preview");
 
                 sdxl_decoder(sample, g_main_args.m_output, /* tiled */ g_main_args.m_tiled);
             }
