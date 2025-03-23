@@ -79,6 +79,7 @@ struct MainArgs
     bool m_rpi_lowmem = false;
     bool m_ram = false;
     bool m_download = false;
+    bool m_decode_im = false;
     std::string m_curl_parallel = "16";
     std::string m_res = "";
     std::string m_threads = "";
@@ -972,7 +973,10 @@ static inline ncnn::Mat CFGDenoiser_CompVisDenoiser(ncnn::Net& net, float const*
     return denoised_uncond;
 }
 
-inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c, const ncnn::Mat& uc, SDXLParams* sdxl_params = nullptr)
+void sdxl_decoder(ncnn::Mat& sample, const std::string& output_path, bool tiled, const std::string& output_appendix);
+
+inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c, const ncnn::Mat& uc,
+                                         const std::string& output_path, SDXLParams* sdxl_params = nullptr)
 {
     ncnn::Net net;
 #if USE_NCNN
@@ -1099,6 +1103,24 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                     x_ptr++;
                     d_ptr++;
                     r_ptr++;
+                }
+            }
+
+            if(g_main_args.m_decode_im                            // pass through decoder
+               && i < static_cast<int>(sigma.size()) - 2) {       // if step is not last
+                std::cout << "---> [decode]" << std::endl;
+                ncnn::Mat sample = ncnn::Mat(x_mat.w, x_mat.h, x_mat.c, x_mat.v.data());
+                const std::string im_appendix = "_" + std::to_string(i);
+                if(!sdxl_params) {
+                    ncnn::Mat x_samples_ddim = decoder_solver(sample);
+                    {
+                        std::vector<std::uint8_t> buffer;
+                        buffer.resize( 512 * 512 * 3 );
+                        x_samples_ddim.to_pixels(buffer.data(), ncnn::Mat::PIXEL_RGB);
+                        save_image(buffer.data(), 512, 512, 0, output_path, im_appendix);
+                    }
+                } else {
+                    sdxl_decoder(sample, output_path, /* tiled */ g_main_args.m_tiled, im_appendix);
                 }
             }
         }
@@ -1634,7 +1656,7 @@ inline void stable_diffusion(std::string positive_prompt = std::string{}, const 
     std::cout << "----------------[prompt]------------------" << std::endl;
     auto [cond, uncond] = prompt_solver(positive_prompt, negative_prompt);
     std::cout << "----------------[diffusion]---------------" << std::endl;
-    ncnn::Mat sample = diffusion_solver(seed, step, cond, uncond);
+    ncnn::Mat sample = diffusion_solver(seed, step, cond, uncond, output_path);
     std::cout << "----------------[decode]------------------" << std::endl;
 
     if (g_main_args.m_save_latents.size())
@@ -1656,7 +1678,7 @@ inline void stable_diffusion(std::string positive_prompt = std::string{}, const 
     std::cout << "----------------[close]-------------------" << std::endl;
 }
 
-void sdxl_decoder(ncnn::Mat& sample, const std::string& output_path, bool tiled)
+void sdxl_decoder(ncnn::Mat& sample, const std::string& output_path, bool tiled, const std::string& output_appendix = "")
 {
     constexpr float factor_sd[4] = { 5.48998f, 5.48998f, 5.48998f, 5.48998f };
     constexpr float factor_sdxl[4] = { 7.67754f, 7.67754f, 7.67754f, 7.67754f };
@@ -1804,7 +1826,7 @@ void sdxl_decoder(ncnn::Mat& sample, const std::string& output_path, bool tiled)
         std::vector<std::uint8_t> buffer;
         buffer.resize(g_main_args.m_latw * 8 * g_main_args.m_lath * 8 * 3);
         res.to_pixels(buffer.data(), ncnn::Mat::PIXEL_RGB);
-        save_image(buffer.data(), g_main_args.m_latw * 8, g_main_args.m_lath * 8, 0, output_path);
+        save_image(buffer.data(), g_main_args.m_latw * 8, g_main_args.m_lath * 8, 0, output_path, output_appendix);
     }
 }
 
@@ -1944,7 +1966,7 @@ void stable_diffusion_xl(std::string positive_prompt, const std::string& output_
         params.m_pooled_prompt_embeds_neg = std::move(pooled_prompt_embeds_neg);
     }
 
-    ncnn::Mat sample = diffusion_solver(seed, steps, ncnn::Mat(), ncnn::Mat(), &params);
+    ncnn::Mat sample = diffusion_solver(seed, steps, ncnn::Mat(), ncnn::Mat(), output_path, &params);
 
     if (g_main_args.m_save_latents.size())
     {
@@ -2052,6 +2074,10 @@ int main(int argc, char** argv)
         {
             g_main_args.m_download = true;
         }
+        else if (arg == "--decode-steps")
+        {
+            g_main_args.m_decode_im = true;
+        }
         else if (arg == "--curl-parallel")
         {
             str = &g_main_args.m_curl_parallel;
@@ -2069,6 +2095,7 @@ int main(int argc, char** argv)
             printf("--models-path       Sets the folder containing the Stable Diffusion models.\n");
             printf("--ops-printf        During inference, writes the current operation to stdout.\n");
             printf("--output            Sets the output image file.\n");
+            printf("--decode-steps      Decode and save every diffusion step in full resolution.\n");
             printf("--decode-latents    Skips the diffusion, and decodes the specified latents file.\n");
             printf("--prompt            Sets the positive prompt.\n");
             printf("--neg-prompt        Sets the negative prompt.\n");
