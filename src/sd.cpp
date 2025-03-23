@@ -317,13 +317,13 @@ namespace ncnn
 }
 #endif
 
-inline static void save_image(std::uint8_t* img, unsigned w, unsigned h, int alpha, char const* const file_name) noexcept
+inline static void save_image(std::uint8_t* img, unsigned w, unsigned h, int alpha, const std::string& file_name) noexcept
 {
 
 #ifdef USE_LIBJPEGTURBO
-    const char* last_dot = strrchr(file_name, '.');
-    const char* last_slash = std::max(strrchr(file_name, '/'),
-                                      strrchr(file_name, '\\'));
+    const char* last_dot = strrchr(file_name.c_str(), '.');
+    const char* last_slash = std::max(strrchr(file_name.c_str(), '/'),
+                                      strrchr(file_name.c_str(), '\\'));
     // extention is in filename and is jpeg
     if (last_dot > last_slash &&
         (!strncasecmp(last_dot, ".jpg", 5) ||               // comparing including
@@ -343,9 +343,9 @@ inline static void save_image(std::uint8_t* img, unsigned w, unsigned h, int alp
         JSAMPROW row_pointer;                               // *uint8_t
         int row_stride = w * 3;                             // row width in bytes
 
-        FILE* fp = fopen(file_name, "wb");
+        FILE* fp = fopen(file_name.c_str(), "wb");
         if (!fp) {
-            printf("JPEG saving failed: could not create file '%s'.\n", file_name);
+            printf("JPEG saving failed: could not create file '%s'.\n", file_name.c_str());
             return;
         }
 
@@ -380,12 +380,12 @@ inline static void save_image(std::uint8_t* img, unsigned w, unsigned h, int alp
 
 #ifdef USE_LIBPNG
 // adapted from QEMU project, https://github.com/qemu/qemu/commit/9a0a119a382867dc9a5c2ae9348003bf79d84af2
-    FILE* fp = fopen(file_name, "wb");
+    FILE* fp = fopen(file_name.c_str(), "wb");
     if(fp) {
     png_struct* png_ptr = png_create_write_struct(PNG_LIBPNG_VER_STRING, 
-                                                  NULL,    // *error
-                                                  NULL,    // errors   handler callback
-                                                  NULL);   // warnings handler callback
+                                                  nullptr,  // *error
+                                                  nullptr,  // errors   handler callback
+                                                  nullptr); // warnings handler callback
     if(png_ptr) {
     png_info* info_ptr = png_create_info_struct(png_ptr);
     if(info_ptr) {
@@ -404,16 +404,16 @@ inline static void save_image(std::uint8_t* img, unsigned w, unsigned h, int alp
     }
     fclose(fp);
     } else {   // fp == 0
-        printf("PNG saving failed: could not create file '%s'.\n", file_name);
+        printf("PNG saving failed: could not create file '%s'.\n", file_name.c_str());
     }
 #else   // USE_LIBPNG
 
 // adapted from https://github.com/miloyip/svpng/blob/master/svpng.inc
     constexpr unsigned t[] = { 0, 0x1db71064, 0x3b6e20c8, 0x26d930ac, 0x76dc4190, 0x6b6b51f4, 0x4db26158, 0x5005713c, 0xedb88320, 0xf00f9344, 0xd6d6a3e8, 0xcb61b38c, 0x9b64c2b0, 0x86d3d2d4, 0xa00ae278, 0xbdbdf21c };
     unsigned a = 1, b = 0, c, p = w * (alpha ? 4 : 3) + 1, x, y, i;
-    FILE* fp = fopen(file_name, "wb");
+    FILE* fp = fopen(file_name.c_str(), "wb");
     if (!fp) {
-        printf("PNG saving failed: could not create file '%s'.\n", file_name);
+        printf("PNG saving failed: could not create file '%s'.\n", file_name.c_str());
         return;
     }
 
@@ -1614,12 +1614,12 @@ inline static std::pair<ncnn::Mat, ncnn::Mat> prompt_solver(std::string const& p
     );
 }
 
-inline void stable_diffusion(std::string positive_prompt = std::string{}, std::string output_png_path = std::string{}, int step = 30, int seed = 42, std::string negative_prompt = std::string{})
+inline void stable_diffusion(std::string positive_prompt = std::string{}, const std::string& output_path = std::string{}, int step = 30, int seed = 42, std::string negative_prompt = std::string{})
 {
     std::cout << "----------------[start]------------------" << std::endl;
     std::cout << "positive_prompt: " << positive_prompt << std::endl;
     std::cout << "negative_prompt: " << negative_prompt << std::endl;
-    std::cout << "output_png_path: " << output_png_path << std::endl;
+    std::cout << "output_path: " << output_path << std::endl;
     std::cout << "steps: " << step << std::endl;
     std::cout << "seed: " << seed << std::endl;
     std::cout << "----------------[prompt]------------------" << std::endl;
@@ -1642,12 +1642,12 @@ inline void stable_diffusion(std::string positive_prompt = std::string{}, std::s
         buffer.resize( 512 * 512 * 3 );
         //buffer.resize(4 * 512 * 4 * 512 * 3);
         x_samples_ddim.to_pixels(buffer.data(), ncnn::Mat::PIXEL_RGB);
-        save_image(buffer.data(), 512, 512, 0, output_png_path.c_str());
+        save_image(buffer.data(), 512, 512, 0, output_path);
     }
     std::cout << "----------------[close]-------------------" << std::endl;
 }
 
-void sdxl_decoder(ncnn::Mat& sample, const std::string& output_png_path, bool tiled)
+void sdxl_decoder(ncnn::Mat& sample, const std::string& output_path, bool tiled)
 {
     constexpr float factor_sd[4] = { 5.48998f, 5.48998f, 5.48998f, 5.48998f };
     constexpr float factor_sdxl[4] = { 7.67754f, 7.67754f, 7.67754f, 7.67754f };
@@ -1795,11 +1795,11 @@ void sdxl_decoder(ncnn::Mat& sample, const std::string& output_png_path, bool ti
         std::vector<std::uint8_t> buffer;
         buffer.resize(g_main_args.m_latw * 8 * g_main_args.m_lath * 8 * 3);
         res.to_pixels(buffer.data(), ncnn::Mat::PIXEL_RGB);
-        save_image(buffer.data(), g_main_args.m_latw * 8, g_main_args.m_lath * 8, 0, output_png_path.c_str());
+        save_image(buffer.data(), g_main_args.m_latw * 8, g_main_args.m_lath * 8, 0, output_path);
     }
 }
 
-void stable_diffusion_xl(std::string positive_prompt, std::string output_png_path, int steps, std::string negative_prompt, int seed)
+void stable_diffusion_xl(std::string positive_prompt, const std::string& output_path, int steps, std::string negative_prompt, int seed)
 {
     std::cout << "----------------[start]------------------" << std::endl;
     std::cout << "positive_prompt: " << positive_prompt << std::endl;
@@ -1807,7 +1807,7 @@ void stable_diffusion_xl(std::string positive_prompt, std::string output_png_pat
         std::cout << "SDXL turbo doesn't support negative_prompts" << std::endl;
     else
         std::cout << "negative_prompt: " << negative_prompt << std::endl;
-    std::cout << "output_png_path: " << output_png_path << std::endl;
+    std::cout << "output_path: " << output_path << std::endl;
     std::cout << "steps: " << steps << std::endl;
     std::cout << "seed: " << seed << std::endl;
     std::cout << "----------------[prompt]------------------" << std::endl;
@@ -1944,7 +1944,7 @@ void stable_diffusion_xl(std::string positive_prompt, std::string output_png_pat
 
     std::cout << "----------------[decode]------------------" << std::endl;
 
-    sdxl_decoder(sample, output_png_path, /* tiled */ g_main_args.m_tiled);
+    sdxl_decoder(sample, output_path, /* tiled */ g_main_args.m_tiled);
 
     std::cout << "----------------[close]-------------------" << std::endl;
 }
@@ -2059,7 +2059,7 @@ int main(int argc, char** argv)
             printf("--turbo             Runs Stable Diffusion Turbo 1.0 instead of Stable Diffusion 1.5.\n");
             printf("--models-path       Sets the folder containing the Stable Diffusion models.\n");
             printf("--ops-printf        During inference, writes the current operation to stdout.\n");
-            printf("--output            Sets the output PNG file.\n");
+            printf("--output            Sets the output image file.\n");
             printf("--decode-latents    Skips the diffusion, and decodes the specified latents file.\n");
             printf("--prompt            Sets the positive prompt.\n");
             printf("--neg-prompt        Sets the negative prompt.\n");
@@ -2083,7 +2083,7 @@ int main(int argc, char** argv)
         {
             if (++i >= argc)
             {
-                printf("Argument \"%s\" should be followed by a string.", arg.c_str());
+                printf("Argument \"%s\" should be followed by a string.\n", arg.c_str());
                 return -1;
             }
 
@@ -2373,7 +2373,7 @@ int main(int argc, char** argv)
                 buffer.resize(512 * 512 * 3);
                 x_samples_ddim.to_pixels(buffer.data(), ncnn::Mat::PIXEL_RGB);
 
-                save_image(buffer.data(), 512, 512, 0, g_main_args.m_output.c_str());
+                save_image(buffer.data(), 512, 512, 0, g_main_args.m_output);
             }
             else
             {
