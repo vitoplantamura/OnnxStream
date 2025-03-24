@@ -1262,17 +1262,21 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
             }
 
             if(g_main_args.m_preview_im) {       // directly decode latent in low resolution
-                std::cout << "---> [preview]" << std::endl;
+                std::cout << "---> preview:\t\t";
+                double t1 = ncnn::get_current_time();
                 const std::string im_appendix = "_preview_" + std::to_string(i);
                 if(!sdxl_params) {
                     sd_preview(x_mat, output_path, im_appendix);
                 } else {
                     sdxl_preview(x_mat, output_path, im_appendix);
                 }
+                double t2 = ncnn::get_current_time();
+                std::cout << t2 - t1 << "ms" << std::endl;
             }
             if(g_main_args.m_decode_im                            // pass through decoder
                && i < static_cast<int>(sigma.size()) - 2) {       // if step is not last
-                std::cout << "---> [decode]" << std::endl;
+                std::cout << "---> decode:\t\t";
+                double t1 = ncnn::get_current_time();
                 ncnn::Mat sample = ncnn::Mat(x_mat.w, x_mat.h, x_mat.c, x_mat.v.data());
                 const std::string im_appendix = "_" + std::to_string(i);
                 if(!sdxl_params) {
@@ -1286,6 +1290,8 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                 } else {
                     sdxl_decoder(sample, output_path, /* tiled */ g_main_args.m_tiled, im_appendix);
                 }
+                double t2 = ncnn::get_current_time();
+                std::cout << t2 - t1 << "ms" << std::endl;
             }
         }
     }
