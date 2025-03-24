@@ -743,20 +743,31 @@ inline static void sd_preview(ncnn::Mat& sample, const std::string& filename, co
     float *rp = res.channel(0),
           *gp = res.channel(1),
           *bp = res.channel(2);
-    unsigned long cp = 0;
+    float *c0 = sample.channel(0),
+          *c1 = sample.channel(1),
+          *c2 = sample.channel(2),
+          *c3 = sample.channel(3);
     for (unsigned y = 0; y < height; y++) {
         for (unsigned x = 0; x < width; x++) {
-            float r = 0, g = 0, b = 0;
-            for (unsigned d = 0; d < 4; d++) {
-                float value = *(sample.channel(d) + cp);
-                r += value * sd_latent_rgb_proj[d][0];
-                g += value * sd_latent_rgb_proj[d][1];
-                b += value * sd_latent_rgb_proj[d][2];
-            }
-            *(rp++) = r;
-            *(gp++) = g;
-            *(bp++) = b;
-            cp++;
+            float value = *(c0++);
+            float r = value * sd_latent_rgb_proj[0][0];
+            float g = value * sd_latent_rgb_proj[0][1];
+            float b = value * sd_latent_rgb_proj[0][2];
+
+            value = *(c1++);
+            r += value * sd_latent_rgb_proj[1][0];
+            g += value * sd_latent_rgb_proj[1][1];
+            b += value * sd_latent_rgb_proj[1][2];
+
+            value = *(c2++);
+            r += value * sd_latent_rgb_proj[2][0];
+            g += value * sd_latent_rgb_proj[2][1];
+            b += value * sd_latent_rgb_proj[2][2];
+
+            value = *(c3++);
+            *(rp++) = r + value * sd_latent_rgb_proj[3][0];
+            *(gp++) = g + value * sd_latent_rgb_proj[3][1];
+            *(bp++) = b + value * sd_latent_rgb_proj[3][2];
         }
     }
 
@@ -793,20 +804,31 @@ inline static void sdxl_preview(ncnn::Mat& sample, const std::string& filename, 
     float *rp = res.channel(0),
           *gp = res.channel(1),
           *bp = res.channel(2);
-    unsigned long cp = 0;
+    float *c0 = sample.channel(0),
+          *c1 = sample.channel(1),
+          *c2 = sample.channel(2),
+          *c3 = sample.channel(3);
     for (unsigned y = 0; y < height; y++) {
         for (unsigned x = 0; x < width; x++) {
-            float r = 0, g = 0, b = 0;
-            for (unsigned d = 0; d < 4; d++) {
-                float value = *(sample.channel(d) + cp);
-                r += value * sdxl_latent_rgb_proj[d][0];
-                g += value * sdxl_latent_rgb_proj[d][1];
-                b += value * sdxl_latent_rgb_proj[d][2];
-            }
-            *(rp++) = r;
-            *(gp++) = g;
-            *(bp++) = b;
-            cp++;
+            float value = *(c0++);
+            float r = value * sdxl_latent_rgb_proj[0][0];
+            float g = value * sdxl_latent_rgb_proj[0][1];
+            float b = value * sdxl_latent_rgb_proj[0][2];
+
+            value = *(c1++);
+            r += value * sdxl_latent_rgb_proj[1][0];
+            g += value * sdxl_latent_rgb_proj[1][1];
+            b += value * sdxl_latent_rgb_proj[1][2];
+
+            value = *(c2++);
+            r += value * sdxl_latent_rgb_proj[2][0];
+            g += value * sdxl_latent_rgb_proj[2][1];
+            b += value * sdxl_latent_rgb_proj[2][2];
+
+            value = *(c3++);
+            *(rp++) = r + value * sdxl_latent_rgb_proj[3][0];
+            *(gp++) = g + value * sdxl_latent_rgb_proj[3][1];
+            *(bp++) = b + value * sdxl_latent_rgb_proj[3][2];
         }
     }
 
