@@ -743,11 +743,12 @@ inline static void sd_preview(ncnn::Mat& sample, const std::string& filename, co
     float *rp = res.channel(0),
           *gp = res.channel(1),
           *bp = res.channel(2);
+    unsigned long cp = 0;
     for (unsigned y = 0; y < height; y++) {
         for (unsigned x = 0; x < width; x++) {
             float r = 0, g = 0, b = 0;
             for (unsigned d = 0; d < 4; d++) {
-                float value = *(sample.channel(d) + y * width + x);
+                float value = *(sample.channel(d) + cp);
                 r += value * sd_latent_rgb_proj[d][0];
                 g += value * sd_latent_rgb_proj[d][1];
                 b += value * sd_latent_rgb_proj[d][2];
@@ -755,6 +756,7 @@ inline static void sd_preview(ncnn::Mat& sample, const std::string& filename, co
             *(rp++) = r;
             *(gp++) = g;
             *(bp++) = b;
+            cp++;
         }
     }
 
@@ -791,11 +793,12 @@ inline static void sdxl_preview(ncnn::Mat& sample, const std::string& filename, 
     float *rp = res.channel(0),
           *gp = res.channel(1),
           *bp = res.channel(2);
+    unsigned long cp = 0;
     for (unsigned y = 0; y < height; y++) {
         for (unsigned x = 0; x < width; x++) {
             float r = 0, g = 0, b = 0;
             for (unsigned d = 0; d < 4; d++) {
-                float value = *(sample.channel(d) + y * width + x);
+                float value = *(sample.channel(d) + cp);
                 r += value * sdxl_latent_rgb_proj[d][0];
                 g += value * sdxl_latent_rgb_proj[d][1];
                 b += value * sdxl_latent_rgb_proj[d][2];
@@ -803,6 +806,7 @@ inline static void sdxl_preview(ncnn::Mat& sample, const std::string& filename, 
             *(rp++) = r;
             *(gp++) = g;
             *(bp++) = b;
+            cp++;
         }
     }
 
