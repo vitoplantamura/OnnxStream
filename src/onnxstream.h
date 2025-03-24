@@ -466,11 +466,12 @@ private:
                             if (!std::holds_alternative<std::monostate>(e.m_data))
                             {
                                 memory += e.m_size;
-                                if (memory >= m_max_memory)
+                                if (memory >= m_max_memory) {
                                     if (!m_limit_plus_one_file || for_exit_next_iter)
                                         return false;
                                     else
                                         for_exit_next_iter = true;
+                                }
                             }
                             else
                             {
