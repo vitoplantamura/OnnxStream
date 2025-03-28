@@ -55,6 +55,8 @@
 #include "net.h"
 #endif
 
+#define SHOW_LONG_TIME_MS(a) std::cout << static_cast<long>(a) << "ms" << std::endl;
+
 #if USE_ONNXSTREAM
 #include "onnxstream.h"
 using namespace onnxstream;
@@ -1240,7 +1242,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
             double t1 = ncnn::get_current_time();
             ncnn::Mat denoised = CFGDenoiser_CompVisDenoiser(net, log_sigmas, x_mat, sigma[i], c, uc, sdxl_params, model);
             double t2 = ncnn::get_current_time();
-            std::cout << t2 - t1 << "ms" << std::endl;
+            SHOW_LONG_TIME_MS( t2 - t1 )
             float sigma_up = std::min(sigma[i + 1], std::sqrt(sigma[i + 1] * sigma[i + 1] * (sigma[i] * sigma[i] - sigma[i + 1] * sigma[i + 1]) / (sigma[i] * sigma[i])));
             float sigma_down = std::sqrt(sigma[i + 1] * sigma[i + 1] - sigma_up * sigma_up);
             std::srand(seed++);
@@ -1271,7 +1273,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                     sdxl_preview(x_mat, output_path, im_appendix);
                 }
                 double t2 = ncnn::get_current_time();
-                std::cout << t2 - t1 << "ms" << std::endl;
+                SHOW_LONG_TIME_MS( t2 - t1 )
             }
             if(g_main_args.m_decode_im                            // pass through decoder
                && i < static_cast<int>(sigma.size()) - 2) {       // if step is not last
@@ -1291,7 +1293,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                     sdxl_decoder(sample, output_path, /* tiled */ g_main_args.m_tiled, im_appendix);
                 }
                 double t2 = ncnn::get_current_time();
-                std::cout << t2 - t1 << "ms" << std::endl;
+                SHOW_LONG_TIME_MS( t2 - t1 )
             }
         }
     }
