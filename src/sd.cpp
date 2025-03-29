@@ -337,6 +337,20 @@ inline static void save_image(std::uint8_t* img, unsigned w, unsigned h, int alp
     }
     const std::string extended_name = file_name + app + ext;
 
+    // leave empty to skip comments
+    const std::string options = g_main_args.m_prompt \
+                              + (!g_main_args.m_neg_prompt.length() ? "" : \
+                              + "\nNegative prompt: " + g_main_args.m_neg_prompt) \
+                              + "\nSteps: " + g_main_args.m_steps \
+                                            + (!appendix.length() ? "" : " (" + appendix + ")") \
+                              + ", Seed: " + g_main_args.m_seed \
+                              + ", Size: " + g_main_args.m_res \
+                              + ", Model: \"" + g_main_args.m_path_with_slash + "\" " \
+                                              + (g_main_args.m_turbo ? "(SDXL-Turbo)" : \
+                                                 g_main_args.m_xl ? "(SDXL)" : "(SD 1.5)") \
+                              + ", Sampler: DDIM" \
+                              + ", Version: OnnxStream";
+
 #ifdef USE_LIBJPEGTURBO
     // extention is in filename and is jpeg
     if (last_dot > last_slash &&
@@ -380,6 +394,15 @@ inline static void save_image(std::uint8_t* img, unsigned w, unsigned h, int alp
 
         jpeg_start_compress(&cinfo, true);                  // do write all tables
 
+        if (options.length()) { // skip empty comment insertion
+            // making a pair { key, value }, same as in png_set_text()
+            // limiting length of value to 65535 - sizeof(WORD) - "parameters".length() - 2 trailing zeros
+            // so that (WORD)length + comment fit to 65535 bytes
+            const std::string comment = std::string("parameters\0", strlen("parameters") + 1) \
+                + options.substr(0, 65535 - 2 - strlen("parameters") - 1 - 1) + std::string("\0", 1);
+            jpeg_write_marker(&cinfo, JPEG_COM, (const unsigned char*)comment.c_str(), comment.length());
+        }
+
         while (cinfo.next_scanline < cinfo.image_height) {
             row_pointer = &img[cinfo.next_scanline * row_stride];
             jpeg_write_scanlines(&cinfo, &row_pointer, 1);  // number of lines
@@ -407,6 +430,14 @@ inline static void save_image(std::uint8_t* img, unsigned w, unsigned h, int alp
         png_set_IHDR(png_ptr, info_ptr, w, h, 8,
             alpha ? PNG_COLOR_TYPE_RGB_ALPHA : PNG_COLOR_TYPE_RGB,
             PNG_INTERLACE_NONE, PNG_COMPRESSION_TYPE_BASE, PNG_FILTER_TYPE_BASE);
+        if (options.length()) { // skip empty comment insertion
+            png_set_text(png_ptr,
+                         info_ptr,
+                         std::vector<png_text>{{.compression = PNG_TEXT_COMPRESSION_NONE,
+                                                .key         = (char*)std::string("parameters").c_str(),
+                                                .text        = (char*)options.c_str()}}.data(),
+                         1);
+        }
         png_write_info(png_ptr, info_ptr);
         w *= alpha ? 4 : 3;
         for (unsigned y = 0; y < h; y++)
@@ -530,6 +561,47 @@ inline static void save_image(std::uint8_t* img, unsigned w, unsigned h, int alp
         fputc(((~c) >> 8) & 255, fp);
         fputc((~c) & 255, fp);
     }
+
+    if (options.length()) { // skip empty comment insertion
+        // making a pair { key, value }, same as in png_set_text()
+        const std::string comment = std::string("parameters\0", strlen("parameters") + 1) \
+                                  + options + std::string("\0", 1);
+
+        // writing comment chunk: length + "tEXt" + comment + checksum
+        {
+            {
+                fputc( (comment.length()) >> 24       , fp);
+                fputc(((comment.length()) >> 16) & 255, fp);
+                fputc(((comment.length()) >> 8 ) & 255, fp);
+                fputc( (comment.length()) & 255       , fp);
+            }
+
+        c = ~0U;
+
+            for (i = 0; i < 4; i++)              // tEXt
+            {
+                fputc(("tEXt")[i], fp);
+                c ^= (("tEXt")[i]);
+                c = (c >> 4) ^ t[c & 15];
+                c = (c >> 4) ^ t[c & 15];
+            }
+        }
+
+        for (i = 0; i < comment.length(); i++)   // comment
+        {
+            fputc(comment[i], fp);
+            c ^= (comment[i]);
+            c = (c >> 4) ^ t[c & 15];
+            c = (c >> 4) ^ t[c & 15];
+        }
+
+        {                                        // comment chunk checksum
+            fputc((~c) >> 24, fp);
+            fputc(((~c) >> 16) & 255, fp);
+            fputc(((~c) >> 8) & 255, fp);
+            fputc((~c) & 255, fp);
+        }
+    } // end of comment chunk
 
     {
         {
