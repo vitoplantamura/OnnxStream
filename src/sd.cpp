@@ -2386,7 +2386,8 @@ int main(int argc, char** argv)
         }
         if (w <= 0 || w % 8 || h <= 0 || h % 8)
         {
-            printf("Width and height in the --res option must be positive and a multiple of 8.\n");
+            printf("Width and height in the --res option must be positive and a multiple of 8. "
+                   "Try %ix%i.\n", std::max(40, w - w % 8), std::max(8, h - h % 8));
             return -1;
         }
         g_main_args.m_latw = w / 8;
