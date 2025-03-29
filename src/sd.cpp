@@ -2325,23 +2325,33 @@ int main(int argc, char** argv)
 
     if (g_main_args.m_threads.size())
     {
-        n_threads = std::thread::hardware_concurrency();   // according to cppreference.com,
-        if (!n_threads) {   // it can be uncomputable and return 0, falling back to system calls then
+        int desired_threads = std::stoi(g_main_args.m_threads);
+        if (desired_threads > 0) {
+            n_threads = desired_threads;
+        } else {
+            n_threads = std::thread::hardware_concurrency();
+            // according to cppreference.com, hardware_concurrency() can be uncomputable and return 0,
+            // falling back to system calls then
 #ifdef _WIN32
-            SYSTEM_INFO si;
-            si.dwNumberOfProcessors = 0;
-            GetSystemInfo(&si);
-            n_threads = static_cast<unsigned>(si.dwNumberOfProcessors);
+            if (!n_threads) {
+                SYSTEM_INFO si;
+                si.dwNumberOfProcessors = 0;
+                GetSystemInfo(&si);
+                n_threads = static_cast<unsigned>(si.dwNumberOfProcessors);
+            }
 #elif defined(__linux__)
-            n_threads = static_cast<unsigned>(std::max(0L, sysconf(_SC_NPROCESSORS_ONLN)));
+            if (!n_threads)
+                n_threads = static_cast<unsigned>(std::max(0L, sysconf(_SC_NPROCESSORS_ONLN)));
 #else
 #warning Number of threads can be default
 #endif
+            if (n_threads)
+            {
+                desired_threads = std::max(desired_threads, 1 - (int)n_threads); // use at least 1 thread
+                n_threads = (desired_threads <= 0) ? n_threads + desired_threads : desired_threads;
+            }
         }
-        if (n_threads)
-        {
-            auto t = std::max(std::stoi(g_main_args.m_threads), 1 - (int)n_threads); // use at least 1 thread
-            n_threads = (t <= 0) ? n_threads + t : t;
+        if (n_threads) {
             printf("threads: %d\n", n_threads);
         } else
             printf("Number of CPUs not detected, using default number of threads.\n");
