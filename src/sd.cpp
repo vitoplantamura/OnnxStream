@@ -55,6 +55,8 @@
 #include "net.h"
 #endif
 
+#define SHOW_LONG_TIME_MS(a) std::cout << static_cast<long>(a) << "ms" << std::endl;
+
 #if USE_ONNXSTREAM
 #include "onnxstream.h"
 using namespace onnxstream;
@@ -79,6 +81,9 @@ struct MainArgs
     bool m_rpi_lowmem = false;
     bool m_ram = false;
     bool m_download = false;
+    bool m_decode_im = false;
+    bool m_preview_im = false;
+    bool m_preview_8x = false;
     std::string m_curl_parallel = "16";
     std::string m_res = "";
     std::string m_threads = "";
@@ -317,18 +322,27 @@ namespace ncnn
 }
 #endif
 
-inline static void save_image(std::uint8_t* img, unsigned w, unsigned h, int alpha, char const* const file_name) noexcept
+inline static void save_image(std::uint8_t* img, unsigned w, unsigned h, int alpha, const std::string& file_name, const std::string& appendix = "") noexcept
 {
+    const char* last_dot = strrchr(file_name.c_str(), '.');
+    const char* last_slash = std::max(strrchr(file_name.c_str(), '/'),
+                                      strrchr(file_name.c_str(), '\\'));
+    std::string ext, app;
+    if (appendix.length()) {
+        app = appendix;
+        ext = last_dot > last_slash ? std::string(last_dot) : "";
+              // filename has extension
+    } else {
+        app = ext = "";
+    }
+    const std::string extended_name = file_name + app + ext;
 
 #ifdef USE_LIBJPEGTURBO
-    const char* last_dot = strrchr(file_name, '.');
-    const char* last_slash = std::max(strrchr(file_name, '/'),
-                                      strrchr(file_name, '\\'));
     // extention is in filename and is jpeg
     if (last_dot > last_slash &&
-        (!strncasecmp(last_dot, ".jpg", 5) ||               // comparing including
-         !strncasecmp(last_dot, ".jpeg", 6) ||              // terminating zero
-         !strncasecmp(last_dot, ".jpe", 5)))
+        (!strncasecmp(last_dot, ".jpg", 5)  ||              // comparing filename 
+         !strncasecmp(last_dot, ".jpeg", 6) ||              // without appendix,
+         !strncasecmp(last_dot, ".jpe", 5)))                // including terminating zero
     {
         if (alpha) {
             printf("Alpha channel removal is not implemented, refusing to save JPEG.\n");
@@ -343,9 +357,9 @@ inline static void save_image(std::uint8_t* img, unsigned w, unsigned h, int alp
         JSAMPROW row_pointer;                               // *uint8_t
         int row_stride = w * 3;                             // row width in bytes
 
-        FILE* fp = fopen(file_name, "wb");
+        FILE* fp = fopen(extended_name.c_str(), "wb");
         if (!fp) {
-            printf("JPEG saving failed: could not create file '%s'.\n", file_name);
+            printf("JPEG saving failed: could not create file '%s'.\n", extended_name.c_str());
             return;
         }
 
@@ -380,12 +394,12 @@ inline static void save_image(std::uint8_t* img, unsigned w, unsigned h, int alp
 
 #ifdef USE_LIBPNG
 // adapted from QEMU project, https://github.com/qemu/qemu/commit/9a0a119a382867dc9a5c2ae9348003bf79d84af2
-    FILE* fp = fopen(file_name, "wb");
+    FILE* fp = fopen(extended_name.c_str(), "wb");
     if(fp) {
     png_struct* png_ptr = png_create_write_struct(PNG_LIBPNG_VER_STRING, 
-                                                  NULL,    // *error
-                                                  NULL,    // errors   handler callback
-                                                  NULL);   // warnings handler callback
+                                                  nullptr,  // *error
+                                                  nullptr,  // errors   handler callback
+                                                  nullptr); // warnings handler callback
     if(png_ptr) {
     png_info* info_ptr = png_create_info_struct(png_ptr);
     if(info_ptr) {
@@ -404,16 +418,16 @@ inline static void save_image(std::uint8_t* img, unsigned w, unsigned h, int alp
     }
     fclose(fp);
     } else {   // fp == 0
-        printf("PNG saving failed: could not create file '%s'.\n", file_name);
+        printf("PNG saving failed: could not create file '%s'.\n", extended_name.c_str());
     }
 #else   // USE_LIBPNG
 
 // adapted from https://github.com/miloyip/svpng/blob/master/svpng.inc
     constexpr unsigned t[] = { 0, 0x1db71064, 0x3b6e20c8, 0x26d930ac, 0x76dc4190, 0x6b6b51f4, 0x4db26158, 0x5005713c, 0xedb88320, 0xf00f9344, 0xd6d6a3e8, 0xcb61b38c, 0x9b64c2b0, 0x86d3d2d4, 0xa00ae278, 0xbdbdf21c };
     unsigned a = 1, b = 0, c, p = w * (alpha ? 4 : 3) + 1, x, y, i;
-    FILE* fp = fopen(file_name, "wb");
+    FILE* fp = fopen(extended_name.c_str(), "wb");
     if (!fp) {
-        printf("PNG saving failed: could not create file '%s'.\n", file_name);
+        printf("PNG saving failed: could not create file '%s'.\n", extended_name.c_str());
         return;
     }
 
@@ -682,6 +696,159 @@ void print_max_dist(ncnn::Mat& first, ncnn::Mat& second)
         }
         printf(" ========> %f <======== ", d);
     }
+}
+
+inline static void up8x(uint8_t* dst, const uint8_t* src, unsigned w, unsigned h)
+{
+    const unsigned src_width = w * 3;
+    for (unsigned y = 0; y < h; y++) {
+        for (unsigned y8 = 0; y8 < 7; y8++) {
+            for (unsigned x = 0; x < w; x++) { // row of x8 pixels
+                const uint8_t r = *src++, g = *src++, b = *src++;
+                *(dst++) = r; *(dst++) = g; *(dst++) = b;
+                *(dst++) = r; *(dst++) = g; *(dst++) = b;
+                *(dst++) = r; *(dst++) = g; *(dst++) = b;
+                *(dst++) = r; *(dst++) = g; *(dst++) = b;
+                *(dst++) = r; *(dst++) = g; *(dst++) = b;
+                *(dst++) = r; *(dst++) = g; *(dst++) = b;
+                *(dst++) = r; *(dst++) = g; *(dst++) = b;
+                *(dst++) = r; *(dst++) = g; *(dst++) = b;
+            }
+            src -= src_width; // repeat row 7 times
+        }
+        for (unsigned x = 0; x < w; x++) { // 8th time
+            const uint8_t r = *src++, g = *src++, b = *src++;
+            *(dst++) = r; *(dst++) = g; *(dst++) = b;
+            *(dst++) = r; *(dst++) = g; *(dst++) = b;
+            *(dst++) = r; *(dst++) = g; *(dst++) = b;
+            *(dst++) = r; *(dst++) = g; *(dst++) = b;
+            *(dst++) = r; *(dst++) = g; *(dst++) = b;
+            *(dst++) = r; *(dst++) = g; *(dst++) = b;
+            *(dst++) = r; *(dst++) = g; *(dst++) = b;
+            *(dst++) = r; *(dst++) = g; *(dst++) = b;
+        }
+    }
+}
+
+inline static void sd_preview(ncnn::Mat& sample, const std::string& filename, const std::string& appendix)
+{
+// adapted from https://github.com/leejet/stable-diffusion.cpp/pull/454
+    // https://github.com/comfyanonymous/ComfyUI/blob/master/comfy/latent_formats.py#L20-L26
+    constexpr float sd_latent_rgb_proj[4][3] = {
+        {0.3512f, 0.2297f, 0.3227f},
+        {0.3250f, 0.4974f, 0.2350f},
+        {-0.2829f, 0.1762f, 0.2721f},
+        {-0.2120f, -0.2616f, -0.7177f}};
+
+    unsigned width = sample.w, height = sample.h;
+    ncnn::Mat res = ncnn::Mat(width, height, 3);
+    float *rp = res.channel(0),
+          *gp = res.channel(1),
+          *bp = res.channel(2);
+    float *c0 = sample.channel(0),
+          *c1 = sample.channel(1),
+          *c2 = sample.channel(2),
+          *c3 = sample.channel(3);
+    for (unsigned y = 0; y < height; y++) {
+        for (unsigned x = 0; x < width; x++) {
+            float value = *(c0++);
+            float r = value * sd_latent_rgb_proj[0][0];
+            float g = value * sd_latent_rgb_proj[0][1];
+            float b = value * sd_latent_rgb_proj[0][2];
+
+            value = *(c1++);
+            r += value * sd_latent_rgb_proj[1][0];
+            g += value * sd_latent_rgb_proj[1][1];
+            b += value * sd_latent_rgb_proj[1][2];
+
+            value = *(c2++);
+            r += value * sd_latent_rgb_proj[2][0];
+            g += value * sd_latent_rgb_proj[2][1];
+            b += value * sd_latent_rgb_proj[2][2];
+
+            value = *(c3++);
+            *(rp++) = r + value * sd_latent_rgb_proj[3][0];
+            *(gp++) = g + value * sd_latent_rgb_proj[3][1];
+            *(bp++) = b + value * sd_latent_rgb_proj[3][2];
+        }
+    }
+
+    // range -1 .. 1 => 0 .. 255
+    constexpr float bias[3] =   { -1.f, -1.f, -1.f };
+    constexpr float factor[3] = { 127.5f, 127.5f, 127.5f };
+    res.substract_mean_normalize(bias, factor);
+
+    std::vector<std::uint8_t> buffer,  buffer8;
+    buffer.resize( width * height * 3 );
+    res.to_pixels(buffer.data(), ncnn::Mat::PIXEL_RGB);
+    if (g_main_args.m_preview_8x) {
+        buffer8.resize( width * height * 3 << 6 );
+        up8x(buffer8.data(), buffer.data(), width, height);
+        width <<= 3;
+        height <<= 3;
+        buffer = buffer8;
+    }
+    save_image(buffer.data(), width, height, 0, filename, appendix);
+}
+
+inline static void sdxl_preview(ncnn::Mat& sample, const std::string& filename, const std::string& appendix)
+{
+// adapted from https://github.com/leejet/stable-diffusion.cpp/pull/454
+    // https://github.com/comfyanonymous/ComfyUI/blob/master/comfy/latent_formats.py#L33-L39
+    constexpr float sdxl_latent_rgb_proj[4][3] = {
+        {0.3651f, 0.4232f, 0.4341f},
+        {-0.2533f, -0.0042f, 0.1068f},
+        {0.1076f, 0.1111f, -0.0362f},
+        {-0.3165f, -0.2492f, -0.2188f}};
+
+    unsigned width = sample.w, height = sample.h;
+    ncnn::Mat res = ncnn::Mat(width, height, 3);
+    float *rp = res.channel(0),
+          *gp = res.channel(1),
+          *bp = res.channel(2);
+    float *c0 = sample.channel(0),
+          *c1 = sample.channel(1),
+          *c2 = sample.channel(2),
+          *c3 = sample.channel(3);
+    for (unsigned y = 0; y < height; y++) {
+        for (unsigned x = 0; x < width; x++) {
+            float value = *(c0++);
+            float r = value * sdxl_latent_rgb_proj[0][0];
+            float g = value * sdxl_latent_rgb_proj[0][1];
+            float b = value * sdxl_latent_rgb_proj[0][2];
+
+            value = *(c1++);
+            r += value * sdxl_latent_rgb_proj[1][0];
+            g += value * sdxl_latent_rgb_proj[1][1];
+            b += value * sdxl_latent_rgb_proj[1][2];
+
+            value = *(c2++);
+            r += value * sdxl_latent_rgb_proj[2][0];
+            g += value * sdxl_latent_rgb_proj[2][1];
+            b += value * sdxl_latent_rgb_proj[2][2];
+
+            value = *(c3++);
+            *(rp++) = r + value * sdxl_latent_rgb_proj[3][0];
+            *(gp++) = g + value * sdxl_latent_rgb_proj[3][1];
+            *(bp++) = b + value * sdxl_latent_rgb_proj[3][2];
+        }
+    }
+
+    constexpr float bias[3] =   { -1.f, -1.f, -1.f };
+    constexpr float factor[3] = { 127.5f, 127.5f, 127.5f };
+    res.substract_mean_normalize(bias, factor);
+
+    std::vector<std::uint8_t> buffer, buffer8;
+    buffer.resize( width * height * 3 );
+    res.to_pixels(buffer.data(), ncnn::Mat::PIXEL_RGB);
+    if (g_main_args.m_preview_8x) {
+        buffer8.resize( width * height * 3 << 6 );
+        up8x(buffer8.data(), buffer.data(), width, height);
+        width <<= 3;
+        height <<= 3;
+        buffer = buffer8;
+    }
+    save_image(buffer.data(), width, height, 0, filename, appendix);
 }
 
 inline static ncnn::Mat decoder_solver(ncnn::Mat& sample)
@@ -963,7 +1130,10 @@ static inline ncnn::Mat CFGDenoiser_CompVisDenoiser(ncnn::Net& net, float const*
     return denoised_uncond;
 }
 
-inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c, const ncnn::Mat& uc, SDXLParams* sdxl_params = nullptr)
+void sdxl_decoder(ncnn::Mat& sample, const std::string& output_path, bool tiled, const std::string& output_appendix);
+
+inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c, const ncnn::Mat& uc,
+                                         const std::string& output_path, SDXLParams* sdxl_params = nullptr)
 {
     ncnn::Net net;
 #if USE_NCNN
@@ -1072,7 +1242,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
             double t1 = ncnn::get_current_time();
             ncnn::Mat denoised = CFGDenoiser_CompVisDenoiser(net, log_sigmas, x_mat, sigma[i], c, uc, sdxl_params, model);
             double t2 = ncnn::get_current_time();
-            std::cout << t2 - t1 << "ms" << std::endl;
+            SHOW_LONG_TIME_MS( t2 - t1 )
             float sigma_up = std::min(sigma[i + 1], std::sqrt(sigma[i + 1] * sigma[i + 1] * (sigma[i] * sigma[i] - sigma[i + 1] * sigma[i + 1]) / (sigma[i] * sigma[i])));
             float sigma_down = std::sqrt(sigma[i + 1] * sigma[i + 1] - sigma_up * sigma_up);
             std::srand(seed++);
@@ -1091,6 +1261,39 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                     d_ptr++;
                     r_ptr++;
                 }
+            }
+
+            if(g_main_args.m_preview_im) {       // directly decode latent in low resolution
+                std::cout << "---> preview:\t\t";
+                double t1 = ncnn::get_current_time();
+                const std::string im_appendix = "_preview_" + std::to_string(i);
+                if(!sdxl_params) {
+                    sd_preview(x_mat, output_path, im_appendix);
+                } else {
+                    sdxl_preview(x_mat, output_path, im_appendix);
+                }
+                double t2 = ncnn::get_current_time();
+                SHOW_LONG_TIME_MS( t2 - t1 )
+            }
+            if(g_main_args.m_decode_im                            // pass through decoder
+               && i < static_cast<int>(sigma.size()) - 2) {       // if step is not last
+                std::cout << "---> decode:\t\t";
+                double t1 = ncnn::get_current_time();
+                ncnn::Mat sample = ncnn::Mat(x_mat.w, x_mat.h, x_mat.c, x_mat.v.data());
+                const std::string im_appendix = "_" + std::to_string(i);
+                if(!sdxl_params) {
+                    ncnn::Mat x_samples_ddim = decoder_solver(sample);
+                    {
+                        std::vector<std::uint8_t> buffer;
+                        buffer.resize( 512 * 512 * 3 );
+                        x_samples_ddim.to_pixels(buffer.data(), ncnn::Mat::PIXEL_RGB);
+                        save_image(buffer.data(), 512, 512, 0, output_path, im_appendix);
+                    }
+                } else {
+                    sdxl_decoder(sample, output_path, /* tiled */ g_main_args.m_tiled, im_appendix);
+                }
+                double t2 = ncnn::get_current_time();
+                SHOW_LONG_TIME_MS( t2 - t1 )
             }
         }
     }
@@ -1614,18 +1817,18 @@ inline static std::pair<ncnn::Mat, ncnn::Mat> prompt_solver(std::string const& p
     );
 }
 
-inline void stable_diffusion(std::string positive_prompt = std::string{}, std::string output_png_path = std::string{}, int step = 30, int seed = 42, std::string negative_prompt = std::string{})
+inline void stable_diffusion(std::string positive_prompt = std::string{}, const std::string& output_path = std::string{}, int step = 30, int seed = 42, std::string negative_prompt = std::string{})
 {
     std::cout << "----------------[start]------------------" << std::endl;
     std::cout << "positive_prompt: " << positive_prompt << std::endl;
     std::cout << "negative_prompt: " << negative_prompt << std::endl;
-    std::cout << "output_png_path: " << output_png_path << std::endl;
+    std::cout << "output_path: " << output_path << std::endl;
     std::cout << "steps: " << step << std::endl;
     std::cout << "seed: " << seed << std::endl;
     std::cout << "----------------[prompt]------------------" << std::endl;
     auto [cond, uncond] = prompt_solver(positive_prompt, negative_prompt);
     std::cout << "----------------[diffusion]---------------" << std::endl;
-    ncnn::Mat sample = diffusion_solver(seed, step, cond, uncond);
+    ncnn::Mat sample = diffusion_solver(seed, step, cond, uncond, output_path);
     std::cout << "----------------[decode]------------------" << std::endl;
 
     if (g_main_args.m_save_latents.size())
@@ -1642,12 +1845,12 @@ inline void stable_diffusion(std::string positive_prompt = std::string{}, std::s
         buffer.resize( 512 * 512 * 3 );
         //buffer.resize(4 * 512 * 4 * 512 * 3);
         x_samples_ddim.to_pixels(buffer.data(), ncnn::Mat::PIXEL_RGB);
-        save_image(buffer.data(), 512, 512, 0, output_png_path.c_str());
+        save_image(buffer.data(), 512, 512, 0, output_path);
     }
     std::cout << "----------------[close]-------------------" << std::endl;
 }
 
-void sdxl_decoder(ncnn::Mat& sample, const std::string& output_png_path, bool tiled)
+void sdxl_decoder(ncnn::Mat& sample, const std::string& output_path, bool tiled, const std::string& output_appendix = "")
 {
     constexpr float factor_sd[4] = { 5.48998f, 5.48998f, 5.48998f, 5.48998f };
     constexpr float factor_sdxl[4] = { 7.67754f, 7.67754f, 7.67754f, 7.67754f };
@@ -1795,11 +1998,11 @@ void sdxl_decoder(ncnn::Mat& sample, const std::string& output_png_path, bool ti
         std::vector<std::uint8_t> buffer;
         buffer.resize(g_main_args.m_latw * 8 * g_main_args.m_lath * 8 * 3);
         res.to_pixels(buffer.data(), ncnn::Mat::PIXEL_RGB);
-        save_image(buffer.data(), g_main_args.m_latw * 8, g_main_args.m_lath * 8, 0, output_png_path.c_str());
+        save_image(buffer.data(), g_main_args.m_latw * 8, g_main_args.m_lath * 8, 0, output_path, output_appendix);
     }
 }
 
-void stable_diffusion_xl(std::string positive_prompt, std::string output_png_path, int steps, std::string negative_prompt, int seed)
+void stable_diffusion_xl(std::string positive_prompt, const std::string& output_path, int steps, std::string negative_prompt, int seed)
 {
     std::cout << "----------------[start]------------------" << std::endl;
     std::cout << "positive_prompt: " << positive_prompt << std::endl;
@@ -1807,7 +2010,7 @@ void stable_diffusion_xl(std::string positive_prompt, std::string output_png_pat
         std::cout << "SDXL turbo doesn't support negative_prompts" << std::endl;
     else
         std::cout << "negative_prompt: " << negative_prompt << std::endl;
-    std::cout << "output_png_path: " << output_png_path << std::endl;
+    std::cout << "output_path: " << output_path << std::endl;
     std::cout << "steps: " << steps << std::endl;
     std::cout << "seed: " << seed << std::endl;
     std::cout << "----------------[prompt]------------------" << std::endl;
@@ -1935,7 +2138,7 @@ void stable_diffusion_xl(std::string positive_prompt, std::string output_png_pat
         params.m_pooled_prompt_embeds_neg = std::move(pooled_prompt_embeds_neg);
     }
 
-    ncnn::Mat sample = diffusion_solver(seed, steps, ncnn::Mat(), ncnn::Mat(), &params);
+    ncnn::Mat sample = diffusion_solver(seed, steps, ncnn::Mat(), ncnn::Mat(), output_path, &params);
 
     if (g_main_args.m_save_latents.size())
     {
@@ -1944,7 +2147,7 @@ void stable_diffusion_xl(std::string positive_prompt, std::string output_png_pat
 
     std::cout << "----------------[decode]------------------" << std::endl;
 
-    sdxl_decoder(sample, output_png_path, /* tiled */ g_main_args.m_tiled);
+    sdxl_decoder(sample, output_path, /* tiled */ g_main_args.m_tiled);
 
     std::cout << "----------------[close]-------------------" << std::endl;
 }
@@ -2043,6 +2246,19 @@ int main(int argc, char** argv)
         {
             g_main_args.m_download = true;
         }
+        else if (arg == "--preview-steps")
+        {
+            g_main_args.m_preview_im = true;
+        }
+        else if (arg == "--preview-steps-x8" || arg == "--preview-steps-8x")
+        {
+            g_main_args.m_preview_im = true;
+            g_main_args.m_preview_8x = true;
+        }
+        else if (arg == "--decode-steps")
+        {
+            g_main_args.m_decode_im = true;
+        }
         else if (arg == "--curl-parallel")
         {
             str = &g_main_args.m_curl_parallel;
@@ -2059,7 +2275,10 @@ int main(int argc, char** argv)
             printf("--turbo             Runs Stable Diffusion Turbo 1.0 instead of Stable Diffusion 1.5.\n");
             printf("--models-path       Sets the folder containing the Stable Diffusion models.\n");
             printf("--ops-printf        During inference, writes the current operation to stdout.\n");
-            printf("--output            Sets the output PNG file.\n");
+            printf("--output            Sets the output image file.\n");
+            printf("--preview-steps     Save every diffusion step in low resolution.\n");
+            printf("--preview-steps-x8  Magnify previews to full resolution.\n");
+            printf("--decode-steps      Decode and save every diffusion step in full resolution.\n");
             printf("--decode-latents    Skips the diffusion, and decodes the specified latents file.\n");
             printf("--prompt            Sets the positive prompt.\n");
             printf("--neg-prompt        Sets the negative prompt.\n");
@@ -2083,7 +2302,7 @@ int main(int argc, char** argv)
         {
             if (++i >= argc)
             {
-                printf("Argument \"%s\" should be followed by a string.", arg.c_str());
+                printf("Argument \"%s\" should be followed by a string.\n", arg.c_str());
                 return -1;
             }
 
@@ -2358,6 +2577,7 @@ int main(int argc, char** argv)
 
     if (g_main_args.m_decode_latents.size())
     {
+        printf("Decoding latents.\n");
         try
         {
             if (!g_main_args.m_xl)
@@ -2367,13 +2587,15 @@ int main(int argc, char** argv)
                 ncnn::Mat sample(64, 64, 4);
                 memcpy((float*)sample, vec.data(), sample.total() * sizeof(float));
 
+                if(g_main_args.m_preview_im)
+                    sd_preview(sample, g_main_args.m_output, "_preview");
                 ncnn::Mat x_samples_ddim = decoder_solver(sample);
 
                 std::vector<std::uint8_t> buffer;
                 buffer.resize(512 * 512 * 3);
                 x_samples_ddim.to_pixels(buffer.data(), ncnn::Mat::PIXEL_RGB);
 
-                save_image(buffer.data(), 512, 512, 0, g_main_args.m_output.c_str());
+                save_image(buffer.data(), 512, 512, 0, g_main_args.m_output);
             }
             else
             {
@@ -2381,6 +2603,9 @@ int main(int argc, char** argv)
 
                 ncnn::Mat sample(g_main_args.m_latw, g_main_args.m_lath, 4);
                 memcpy((float*)sample, vec.data(), sample.total() * sizeof(float));
+
+                if(g_main_args.m_preview_im)
+                    sdxl_preview(sample, g_main_args.m_output, "_preview");
 
                 sdxl_decoder(sample, g_main_args.m_output, /* tiled */ g_main_args.m_tiled);
             }

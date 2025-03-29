@@ -359,6 +359,9 @@ These are the command line options of the Stable Diffusion example:
 --rpi               Configures the models to run on a Raspberry Pi.
 --rpi-lowmem        Configures the models to run on a Raspberry Pi Zero 2.
 --threads           Sets the number of threads, negative values use (cores - N) threads.
+--preview-steps     Save every diffusion step in low resolution.
+--preview-steps-x8  Magnify previews to full resolution.
+--decode-steps      Decode and save every diffusion step in full resolution.
 ```
 
 Options you're probably interested in: `--xl`, `--turbo`, `--prompt`, `--steps`, `--rpi`.
