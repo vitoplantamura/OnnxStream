@@ -3022,11 +3022,12 @@ bool Model::check_output_shape(const std::vector<size_t>& src, std::vector<size_
     }
     else
         for (int i = 0; i < src.size(); i++)
-            if (src[i] != dst[i])
+            if (src[i] != dst[i]) {
                 if (m_support_dynamic_shapes && dst[i] == 0)
                     dst[i] = src[i];
                 else
                     return false;
+            }
 
     return true;
 }
@@ -3496,7 +3497,7 @@ void Model::init()
         {
             for (auto& input_tensor : op->m_input)
             {
-                if (input_tensor.m_name.size() != 0)
+                if (input_tensor.m_name.size() != 0) {
                     if (input_tensor.m_type == TensorDataType::none)
                         m_intermediate_refs[input_tensor.m_name]++;
                     else
@@ -3516,6 +3517,7 @@ void Model::init()
 
                         get_wp()->on_init(input_tensor.m_type, input_tensor.m_name, size);
                     }
+                }
             }
         }
 
