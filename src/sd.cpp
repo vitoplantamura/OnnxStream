@@ -445,6 +445,7 @@ inline static void save_image(std::uint8_t* img, unsigned w, unsigned h, int alp
             png_write_row(png_ptr, (png_const_bytep)(img + y * w));
         }
     }
+    png_write_end(png_ptr, info_ptr);
     png_destroy_write_struct(&png_ptr, &info_ptr);
     }
     fclose(fp);
@@ -565,7 +566,7 @@ inline static void save_image(std::uint8_t* img, unsigned w, unsigned h, int alp
     if (options.length()) { // skip empty comment insertion
         // making a pair { key, value }, same as in png_set_text()
         const std::string comment = std::string("parameters\0", strlen("parameters") + 1) \
-                                  + options + std::string("\0", 1);
+                                  + options;
 
         // writing comment chunk: length + "tEXt" + comment + checksum
         {
