@@ -2629,10 +2629,13 @@ int main(int argc, char** argv)
 
     try
     {
+        double t1 = ncnn::get_current_time();
         if (!g_main_args.m_xl)
             stable_diffusion(g_main_args.m_prompt, g_main_args.m_output, std::stoi(g_main_args.m_steps), std::stoi(g_main_args.m_seed), g_main_args.m_neg_prompt);
         else
             stable_diffusion_xl(g_main_args.m_prompt, g_main_args.m_output, std::stoi(g_main_args.m_steps), g_main_args.m_neg_prompt, std::stoi(g_main_args.m_seed));
+        t1 = (ncnn::get_current_time() - t1) / 1000.0;
+        printf("\ntaken %.0fh %.0fm %.3fs\n", floor(t1 / 3600.), fmod(floor(t1 / 60.), 60.), std::min(fmod(t1, 60.), 59.999));
     }
     catch (const std::exception& e)
     {
@@ -2646,7 +2649,7 @@ int main(int argc, char** argv)
     GetProcessMemoryInfo(GetCurrentProcess(), &info, sizeof(info));
     auto pwss = (size_t)info.PeakWorkingSetSize;
 
-    printf("\npeak working set size: %f GB\n", static_cast<float>(pwss) / 1024.0f / 1024.0f / 1024.0f);
+    printf("peak working set size: %f GB\n", static_cast<float>(pwss) / 1024.0f / 1024.0f / 1024.0f);
 
 #elif defined(__ANDROID__)
 
@@ -2654,7 +2657,7 @@ int main(int argc, char** argv)
     if (!getrusage(RUSAGE_SELF, &ru)) {
         auto mrss = ru.ru_maxrss;
 
-        printf("\nmaximum resident set size: %f GB\n", static_cast<float>(mrss) / 1024.0f / 1024.0f);
+        printf("maximum resident set size: %f GB\n", static_cast<float>(mrss) / 1024.0f / 1024.0f);
     }
 
 #endif
