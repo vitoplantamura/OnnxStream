@@ -362,6 +362,7 @@ These are the command line options of the Stable Diffusion example:
 --preview-steps     Save every diffusion step in low resolution.
 --preview-steps-x8  Magnify previews to full resolution.
 --decode-steps      Decode and save every diffusion step in full resolution.
+--not-autodownload  Do not download models automatically.
 ```
 
 Options you're probably interested in: `--xl`, `--turbo`, `--prompt`, `--steps`, `--rpi`.
