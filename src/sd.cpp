@@ -84,6 +84,7 @@ struct MainArgs
     bool m_decode_im = false;
     bool m_preview_im = false;
     bool m_preview_8x = false;
+    bool m_not_autodownload = false;
     std::string m_curl_parallel = "16";
     std::string m_res = "";
     std::string m_threads = "";
@@ -2229,6 +2230,10 @@ int main(int argc, char** argv)
         {
             g_main_args.m_tiled = false;
         }
+        else if (arg == "--not-autodownload")
+        {
+            g_main_args.m_not_autodownload = true;
+        }
         else if (arg == "--rpi-lowmem")
         {
             g_main_args.m_rpi = true;
@@ -2294,6 +2299,7 @@ int main(int argc, char** argv)
             printf("--rpi               Configures the models to run on a Raspberry Pi.\n");
             printf("--rpi-lowmem        Configures the models to run on a Raspberry Pi Zero 2.\n");
             printf("--threads           Sets the number of threads, values =< 0 mean max-N.\n");
+            printf("--not-autodownload  Do not download models automatically.\n");
 
             return -1;
         }
@@ -2495,7 +2501,7 @@ int main(int argc, char** argv)
             }
         }
 
-        if (g_main_args.m_download)
+        if (!g_main_args.m_not_autodownload && g_main_args.m_download)
         {
             std::string url_with_slash = "https://huggingface.co/" + full_repo_name + "/resolve/main/";
 
@@ -2626,6 +2632,14 @@ int main(int argc, char** argv)
         }
 
         return 0;
+    }
+
+    if (g_main_args.m_not_autodownload && g_main_args.m_download) {
+        printf("The nodel \"%s\" is not found and needs to be downloaded, "
+               "but auto-downloading is disabled from command line.\n"
+               "Exiting.\n",
+               g_main_args.m_path_with_slash.c_str());
+        return -1;
     }
 
     try
