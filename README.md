@@ -354,7 +354,7 @@ These are the command line options of the Stable Diffusion example:
 --not-tiled         (ONLY SDXL 1.0 and TURBO) Don't use the tiled VAE decoder.
 --res               (ONLY TURBO) Sets the output PNG file resolution. Default is "512x512".
 --ram               Uses the RAM WeightsProvider (Experimental).
---download          Forces the (re)download of the current model.
+--download          A[uto] / F[orce] / N[ever] (re)download current model.
 --curl-parallel     Sets the number of parallel downloads with CURL. Default is 16.
 --rpi               Configures the models to run on a Raspberry Pi.
 --rpi-lowmem        Configures the models to run on a Raspberry Pi Zero 2.
@@ -362,7 +362,6 @@ These are the command line options of the Stable Diffusion example:
 --preview-steps     Save every diffusion step in low resolution.
 --preview-steps-x8  Magnify previews to full resolution.
 --decode-steps      Decode and save every diffusion step in full resolution.
---not-autodownload  Do not download models automatically.
 ```
 
 Options you're probably interested in: `--xl`, `--turbo`, `--prompt`, `--steps`, `--rpi`.
