@@ -2648,7 +2648,7 @@ int main(int argc, char** argv)
     }
 
     if (!g_main_args.m_download) {
-        printf("The model \"%s\" is not found and needs to be downloaded, "
+        printf("The model \"%s\" needs to be downloaded, "
                "but auto-downloading is disabled from command line.\n"
                "Exiting.\n",
                g_main_args.m_path_with_slash.c_str());
