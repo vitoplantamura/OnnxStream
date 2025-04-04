@@ -2245,7 +2245,7 @@ int main(int argc, char** argv)
         else if (arg == "--download")
         {
             if (i + 1 >= argc || !strncmp(argv[i + 1], "--", 2)) { // not moving argv[] index yet
-                g_main_args.m_download = 'f';                      // no value == force
+                g_main_args.m_download = 'f'; // no value == force
                 continue;
             }
             char d = tolower(argv[++i][0]); // char or 0
