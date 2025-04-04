@@ -41,6 +41,12 @@
 #include <sys/resource.h>
 #endif
 
+#ifdef _WIN32
+#include <Shlobj.h>  // for SHGetFolderPath / SHGetKnownFolderPath
+#elif defined(__linux__)
+#include <pwd.h>     // for getpwuid
+#endif
+
 #ifdef USE_LIBPNG
 #include <png.h>
 #endif
@@ -65,6 +71,7 @@ using namespace onnxstream;
 struct MainArgs
 {
     std::string m_path_with_slash = "./";
+    std::string m_path_safe = "./";
     bool m_ops_printf = false;
     std::string m_output = "./result.png";
     std::string m_decode_latents = "";
@@ -339,17 +346,16 @@ inline static void save_image(std::uint8_t* img, unsigned w, unsigned h, int alp
 
     // leave empty to skip comments
     const std::string options = g_main_args.m_prompt \
-                              + (!g_main_args.m_neg_prompt.length() ? "" : \
-                              + "\nNegative prompt: " + g_main_args.m_neg_prompt) \
-                              + "\nSteps: " + g_main_args.m_steps \
-                                            + (!appendix.length() ? "" : " (" + appendix + ")") \
-                              + ", Seed: " + g_main_args.m_seed \
-                              + ", Size: " + g_main_args.m_res \
-                              + ", Model: \"" + g_main_args.m_path_with_slash + "\" " \
-                                              + (g_main_args.m_turbo ? "(SDXL-Turbo)" : \
-                                                 g_main_args.m_xl ? "(SDXL)" : "(SD 1.5)") \
-                              + ", Sampler: DDIM" \
-                              + ", Version: OnnxStream";
+                                + (!g_main_args.m_neg_prompt.length() ? "" :
+                                + "\nNegative prompt: " + g_main_args.m_neg_prompt)
+                                + "\nSteps: " + g_main_args.m_steps
+                                              + (!appendix.length() ? "" : " (" + appendix + ")")
+                                + ", Seed: " + g_main_args.m_seed
+                                + ", Size: " + g_main_args.m_res
+                                + ", Model: \"" + g_main_args.m_path_safe + "\" "
+                                                + (g_main_args.m_turbo ? "(SDXL-Turbo)" :
+                                                   g_main_args.m_xl ? "(SDXL)" : "(SD 1.5)")
+                                + ", Sampler: Euler Ancestral, Version: OnnxStream";
 
 #ifdef USE_LIBJPEGTURBO
     // extention is in filename and is jpeg
@@ -398,7 +404,7 @@ inline static void save_image(std::uint8_t* img, unsigned w, unsigned h, int alp
             // making a pair { key, value }, same as in png_set_text()
             // limiting length of value to 65535 - sizeof(WORD) - "parameters".length() - 2 trailing zeros
             // so that (WORD)length + comment fit to 65535 bytes
-            const std::string comment = std::string("parameters\0", strlen("parameters") + 1) \
+            const std::string comment = std::string("parameters\0", strlen("parameters") + 1)
                 + options.substr(0, 65535 - 2 - strlen("parameters") - 1 - 1) + std::string("\0", 1);
             jpeg_write_marker(&cinfo, JPEG_COM, (const unsigned char*)comment.c_str(), comment.length());
         }
@@ -565,8 +571,7 @@ inline static void save_image(std::uint8_t* img, unsigned w, unsigned h, int alp
 
     if (options.length()) { // skip empty comment insertion
         // making a pair { key, value }, same as in png_set_text()
-        const std::string comment = std::string("parameters\0", strlen("parameters") + 1) \
-                                  + options;
+        const std::string comment = std::string("parameters\0", strlen("parameters") + 1) + options;
 
         // writing comment chunk: length + "tEXt" + comment + checksum
         {
@@ -2225,8 +2230,137 @@ void stable_diffusion_xl(std::string positive_prompt, const std::string& output_
     std::cout << "----------------[close]-------------------" << std::endl;
 }
 
+#define FORCE_XP 0
+void make_safe_path(const std::string repo_name) {
+    // removing possible user names from model path
+    // result is stored in g_main_args.m_path_safe
+
+// detecting if we are an admin (and if so, removing paths information later)
+#ifdef _WIN32
+#if FORCE_XP || (_WIN32_WINNT < 0x0600) // xp
+    bool safe_paths = IsUserAnAdmin();
+#else // vista
+    bool safe_paths = true;
+    {
+        // checking that process access token belongs to Windpws NT administrators
+        // taken from https://learn.microsoft.com/en-us/windows/win32/api/securitybaseapi/nf-securitybaseapi-checktokenmembership
+        //            https://msdn.microsoft.com/en-us/library/aa376389(VS.85).aspx
+        SID_IDENTIFIER_AUTHORITY NtAuthority = SECURITY_NT_AUTHORITY; // base type == Windows NT Server SID
+        PSID AdministratorsGroup = NULL;
+        // allocates memory and fills up to 8 security subidentifiers
+        if (AllocateAndInitializeSid(
+                &NtAuthority,                // base sid type
+                2,                           // get 2 sub-sids
+                SECURITY_BUILTIN_DOMAIN_RID,
+                DOMAIN_ALIAS_RID_ADMINS,
+                0, 0, 0, 0, 0, 0,
+                &AdministratorsGroup         // *result
+            )
+        ) {
+            if (!CheckTokenMembership(
+                    NULL,                    // impersonalisation token, use own
+                    AdministratorsGroup,
+                    &safe_paths)             // is admin
+            ) safe_paths = true;             // failed to get membership, reset safe_paths
+                                             // in case it was filled
+            FreeSid(AdministratorsGroup);
+        }
+    }
+#endif // xp / vista
+#elif defined(__linux__)
+    bool safe_paths = !geteuid(); // if root
+#else
+   #warning Unknown OS type, using fake model path in metadata, for safety.
+    printf("Unknown OS type, using fake model path in metadata, for safety.\n");
+    bool safe_paths = true;
+#endif // windows / linux / others
+
+// getting user's home directory (and later stripping it from model path, stored in images)
+    std::string home_path;
+    if (!safe_paths) {
+#ifdef _WIN32
+#if FORCE_XP || (_WIN32_WINNT < 0x0600) // xp
+        WCHAR user_path[MAX_PATH];
+        if (SHGetFolderPathW(NULL,           // hWindow
+                             CSIDL_PROFILE,
+                             NULL,           // access token, use owm
+                             0,              // flags
+                             &user_path)
+        ) {
+            safe_paths = true;               // failed to get home folder
+        } else {
+            home_path = std::string(&user_path);
+        }
+#else // vista+
+        PWSTR lp_user_path;
+        if (SHGetKnownFolderPath(FOLDERID_Profile,
+                                 0,         // flags
+                                 NULL,      // access token, use owm
+                                 &lp_user_path)
+        ) {
+            safe_paths = true;               // failed to get home folder
+        } else {
+            home_path = std::string(lp_user_path);
+            CoTaskMemFree(lp_user_path);
+        }
+#endif // xp / vista
+#else // unix
+        struct passwd *pw = getpwuid(getuid());
+        if (pw) {
+            home_path = std::string(pw->pw_dir);
+        } else {
+            safe_paths = true;               // failed to get home folder
+        }
+#endif // windows / unix
+    } // separating scopes to free variables
+
+// removing extra dots in model path, to detect home folder more reliably
+    if (!safe_paths) {
+        size_t p;
+        std::regex regex;
+        std::string path = g_main_args.m_path_with_slash;
+
+        // getting absolute paths
+        home_path = std::filesystem::absolute(std::filesystem::path(home_path)).string();
+        path = std::filesystem::absolute(std::filesystem::path(path)).string();
+
+#if _WIN32
+        // replace all \ with /
+        regex = std::regex("\\\\");
+        path = std::regex_replace(path, regex, "/");
+        home_path = std::regex_replace(home_path, regex, "/");
+#endif
+
+        // remove /./ => /
+        while ((p = path.find("/./", 0)) != std::string::npos)
+            path = path.replace(p, 3, "/");
+
+        // remove /x/../ => /
+        regex = std::regex("/[^/\\.]+/\\.\\./"); //   / [ not / and . ] / .. /
+        while (std::regex_search(path, regex))
+            path = std::regex_replace(path, regex, "/");
+
+        if (!path.length()) {
+            path = "./";
+        } else {
+            // without root, there is a single accessible home folder, strip it from comment in images
+            p = path.find(home_path, 0);
+            if (p != std::string::npos) {
+                path = "." + path.substr(p + home_path.length());
+            }
+        }
+        g_main_args.m_path_safe = path;
+    } else { // root
+        // parental folders can contain username, therefore using fake path
+        g_main_args.m_path_safe += repo_name + "/"; // ./stable-diffusion-1.5-onnxstream/
+    }
+}
+
 int main(int argc, char** argv)
 {
+
+    std::string repo_name = g_main_args.m_path_safe;
+
 #ifdef _WIN32
 
     {
@@ -2483,7 +2617,6 @@ int main(int argc, char** argv)
         if (curl_parallel < 1 || curl_parallel > 128)
             throw std::invalid_argument("--curl-parallel must be between 1 and 128.");
 
-        std::string repo_name;
         std::string full_repo_name;
         std::vector<std::string> dirs;
         std::vector<std::string> files;
@@ -2655,6 +2788,8 @@ int main(int argc, char** argv)
         return -1;
     }
 
+    // "safe" model path in decoded images will be "./",
+    // because given latents can be from other model
     if (g_main_args.m_decode_latents.size())
     {
         printf("Decoding latents.\n");
@@ -2700,6 +2835,13 @@ int main(int argc, char** argv)
 
         return 0;
     }
+
+    printf("\nm_path_with_slash: %s\n", g_main_args.m_path_with_slash.c_str());
+    make_safe_path(repo_name);
+    if (g_main_args.m_path_with_slash.length() < g_main_args.m_path_safe.length())
+        g_main_args.m_path_safe = g_main_args.m_path_with_slash;
+    printf("m_path_safe:       %s\n", g_main_args.m_path_safe.c_str());
+    return -1;
 
     try
     {
