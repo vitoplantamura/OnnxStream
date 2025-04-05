@@ -12,8 +12,10 @@
 #define NOMINMAX
 #include <windows.h>
 #include <psapi.h>
+#include <lmcons.h>   // for UNLEN
 #elif defined(__linux__)
 #include <unistd.h>   // for sysconf()
+#include <pwd.h>      // for getpwuid
 #endif
 
 #include <algorithm>
@@ -41,12 +43,6 @@
 #include <sys/resource.h>
 #endif
 
-#ifdef _WIN32
-#include <Shlobj.h>  // for SHGetFolderPath / SHGetKnownFolderPath
-#elif defined(__linux__)
-#include <pwd.h>     // for getpwuid
-#endif
-
 #ifdef USE_LIBPNG
 #include <png.h>
 #endif
@@ -71,7 +67,7 @@ using namespace onnxstream;
 struct MainArgs
 {
     std::string m_path_with_slash = "./";
-    std::string m_path_safe = "./";
+    std::string m_path_safe = "";
     bool m_ops_printf = false;
     std::string m_output = "./result.png";
     std::string m_decode_latents = "";
@@ -344,8 +340,10 @@ inline static void save_image(std::uint8_t* img, unsigned w, unsigned h, int alp
     }
     const std::string extended_name = file_name + app + ext;
 
-    // leave empty to skip comments
-    const std::string options = g_main_args.m_prompt \
+    // for latents decoding, parameters of generation are unknown,
+    // safe model path is empty and comment will not be written
+    const std::string options = !g_main_args.m_path_safe.length() ? "" :
+                                g_main_args.m_prompt \
                                 + (!g_main_args.m_neg_prompt.length() ? "" :
                                 + "\nNegative prompt: " + g_main_args.m_neg_prompt)
                                 + "\nSteps: " + g_main_args.m_steps
@@ -2231,7 +2229,7 @@ void stable_diffusion_xl(std::string positive_prompt, const std::string& output_
 }
 
 #define FORCE_XP 0
-void make_safe_path(const std::string repo_name) {
+void make_safe_model_path(const std::string repo_name) {
     // removing possible user names from model path
     // result is stored in g_main_args.m_path_safe
 
@@ -2275,83 +2273,53 @@ void make_safe_path(const std::string repo_name) {
     bool safe_paths = true;
 #endif // windows / linux / others
 
-// getting user's home directory (and later stripping it from model path, stored in images)
-    std::string home_path;
+// getting username
+    std::string username;
     if (!safe_paths) {
 #ifdef _WIN32
-#if FORCE_XP || (_WIN32_WINNT < 0x0600) // xp
-        WCHAR user_path[MAX_PATH];
-        if (SHGetFolderPathW(NULL,           // hWindow
-                             CSIDL_PROFILE,
-                             NULL,           // access token, use owm
-                             0,              // flags
-                             &user_path)
-        ) {
-            safe_paths = true;               // failed to get home folder
+        TCHAR user_name[UNLEN + 1];
+        DWORD user_name_length = UNLEN + 1;
+        if (GetUserName(&user_name, &user_name_length) && user_name_length)
+        {
+            username = std::string(&user_name);
         } else {
-            home_path = std::string(&user_path);
+            safe_paths = true;               // failed to get username
         }
-#else // vista+
-        PWSTR lp_user_path;
-        if (SHGetKnownFolderPath(FOLDERID_Profile,
-                                 0,         // flags
-                                 NULL,      // access token, use owm
-                                 &lp_user_path)
-        ) {
-            safe_paths = true;               // failed to get home folder
-        } else {
-            home_path = std::string(lp_user_path);
-            CoTaskMemFree(lp_user_path);
-        }
-#endif // xp / vista
 #else // unix
         struct passwd *pw = getpwuid(getuid());
         if (pw) {
-            home_path = std::string(pw->pw_dir);
+            username = std::string(pw->pw_name);
         } else {
-            safe_paths = true;               // failed to get home folder
+            safe_paths = true;               // failed to get username
         }
 #endif // windows / unix
     } // separating scopes to free variables
 
-// removing extra dots in model path, to detect home folder more reliably
-    if (!safe_paths) {
+    if (!safe_paths) { // no root, only own home folder is accessible
+        // removing possible user name in model path
         size_t p;
-        std::regex regex;
         std::string path = g_main_args.m_path_with_slash;
 
-        // getting absolute paths
-        home_path = std::filesystem::absolute(std::filesystem::path(home_path)).string();
-        path = std::filesystem::absolute(std::filesystem::path(path)).string();
-
-#if _WIN32
-        // replace all \ with /
-        regex = std::regex("\\\\");
-        path = std::regex_replace(path, regex, "/");
-        home_path = std::regex_replace(home_path, regex, "/");
-#endif
-
-        // remove /./ => /
-        while ((p = path.find("/./", 0)) != std::string::npos)
-            path = path.replace(p, 3, "/");
-
-        // remove /x/../ => /
-        regex = std::regex("/[^/\\.]+/\\.\\./"); //   / [ not / and . ] / .. /
-        while (std::regex_search(path, regex))
-            path = std::regex_replace(path, regex, "/");
+        while ((p = path.find(username, 0)) != std::string::npos)
+            path = path.replace(p, username.length(), ".");
 
         if (!path.length()) {
-            path = "./";
+            path = "./"; // if m_path_safe is empty, comment will be skipped
         } else {
-            // without root, there is a single accessible home folder, strip it from comment in images
-            p = path.find(home_path, 0);
-            if (p != std::string::npos) {
-                path = "." + path.substr(p + home_path.length());
-            }
+            // [.../]models_path/stable-diffusion-1.5-onnxstream/
+            // keeping only last 2 directories
+#if _WIN32
+            // replacing all \ with /
+            path = std::regex_replace(path, std::regex("\\\\"), "/");
+#endif
+            p = path.find_last_of("/");
+            p = path.find_last_of("/", p - 1);
+            p = path.find_last_of("/", p - 1);
+            if (p != std::string::npos) path = path.substr(p + 1);
         }
         g_main_args.m_path_safe = path;
-    } else { // root
-        // parental folders can contain username, therefore using fake path
+    } else { // root, all users accessible
+        // parental folders can contain usernames, therefore using fake path
         g_main_args.m_path_safe += repo_name + "/"; // ./stable-diffusion-1.5-onnxstream/
     }
 }
@@ -2359,7 +2327,7 @@ void make_safe_path(const std::string repo_name) {
 int main(int argc, char** argv)
 {
 
-    std::string repo_name = g_main_args.m_path_safe;
+    std::string repo_name = g_main_args.m_path_with_slash;
 
 #ifdef _WIN32
 
@@ -2837,7 +2805,7 @@ int main(int argc, char** argv)
     }
 
     printf("\nm_path_with_slash: %s\n", g_main_args.m_path_with_slash.c_str());
-    make_safe_path(repo_name);
+    make_safe_model_path(repo_name);
     if (g_main_args.m_path_with_slash.length() < g_main_args.m_path_safe.length())
         g_main_args.m_path_safe = g_main_args.m_path_with_slash;
     printf("m_path_safe:       %s\n", g_main_args.m_path_safe.c_str());
