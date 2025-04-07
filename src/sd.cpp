@@ -83,7 +83,7 @@ struct MainArgs
     bool m_tiled = true;
     bool m_rpi_lowmem = false;
     bool m_ram = false;
-    bool m_download = false;
+    char m_download = 'a';
     bool m_decode_im = false;
     bool m_preview_im = false;
     bool m_preview_8x = false;
@@ -2419,7 +2419,21 @@ int main(int argc, char** argv)
         }
         else if (arg == "--download")
         {
-            g_main_args.m_download = true;
+            if (i + 1 >= argc || !strncmp(argv[i + 1], "--", 2)) { // not moving argv[] index yet
+                g_main_args.m_download = 'f'; // no value == force
+                continue;
+            }
+            char d = tolower(argv[++i][0]); // char or 0
+            switch (d) {
+                case 'a':
+                case 'f':
+                case 'n': break;
+                default: {
+                    printf("Unknown argument of --download option, valid are auto, force and never.\n");
+                    return -1;
+                }
+            }
+            g_main_args.m_download = d;
         }
         else if (arg == "--preview-steps")
         {
@@ -2464,7 +2478,7 @@ int main(int argc, char** argv)
             printf("--not-tiled         (ONLY SDXL 1.0 and TURBO) Don't use the tiled VAE decoder.\n");
             printf("--res               (ONLY TURBO) Sets the output PNG file resolution. Default is \"512x512\".\n");
             printf("--ram               Uses the RAM WeightsProvider (Experimental).\n");
-            printf("--download          Forces the (re)download of the current model.\n");
+            printf("--download          A[uto] / F[orce] / N[ever] (re)download current model.\n");
             printf("--curl-parallel     Sets the number of parallel downloads with CURL. Default is 16.\n");
             printf("--rpi               Configures the models to run on a Raspberry Pi.\n");
             printf("--rpi-lowmem        Configures the models to run on a Raspberry Pi Zero 2.\n");
@@ -2647,7 +2661,7 @@ int main(int argc, char** argv)
                 "vae_decoder_qu8/range_data.txt" };
         }
 
-        if (g_main_args.m_download)
+        if (g_main_args.m_download == 'f')
         {
             g_main_args.m_path_with_slash += repo_name + "/";
         }
@@ -2664,12 +2678,17 @@ int main(int argc, char** argv)
             if (!does_exist(g_main_args.m_path_with_slash + files.back()))
             {
                 g_main_args.m_path_with_slash += repo_name + "/";
-                if (!does_exist(g_main_args.m_path_with_slash + files.back()))
-                    g_main_args.m_download = true;
+                if (!does_exist(g_main_args.m_path_with_slash + files.back())) {
+                    if (g_main_args.m_download != 'n') {
+                        g_main_args.m_download = 'f';
+                    } else {
+                        g_main_args.m_download = 0; // use invalid option
+                    }   // to indicate that model is missing and downloading was disabled
+                }
             }
         }
 
-        if (g_main_args.m_download)
+        if (g_main_args.m_download == 'f')
         {
             std::string url_with_slash = "https://huggingface.co/" + full_repo_name + "/resolve/main/";
 
@@ -2809,8 +2828,18 @@ int main(int argc, char** argv)
     if (g_main_args.m_path_with_slash.length() < g_main_args.m_path_safe.length())
         g_main_args.m_path_safe = g_main_args.m_path_with_slash;
     printf("m_path_safe:       %s\n", g_main_args.m_path_safe.c_str());
-    return -1;
 
+    if (!g_main_args.m_download) {
+        printf("The model \"%s\" needs to be downloaded, "
+               "but auto-downloading is disabled from command line.\n"
+               "Exiting.\n",
+               g_main_args.m_path_with_slash.c_str());
+        return -1;
+    }
+
+    return -1; // for now
+
+  
     try
     {
         double t1 = ncnn::get_current_time();
