@@ -12,10 +12,8 @@
 #define NOMINMAX
 #include <windows.h>
 #include <psapi.h>
-#include <lmcons.h>   // for UNLEN
 #elif defined(__linux__)
 #include <unistd.h>   // for sysconf()
-#include <pwd.h>      // for getpwuid
 #endif
 
 #include <algorithm>
@@ -67,7 +65,6 @@ using namespace onnxstream;
 struct MainArgs
 {
     std::string m_path_with_slash = "./";
-    std::string m_path_safe = "";
     bool m_ops_printf = false;
     std::string m_output = "./result.png";
     std::string m_decode_latents = "";
@@ -76,6 +73,7 @@ struct MainArgs
     std::string m_steps = "10";
     std::string m_seed = std::to_string(std::time(0) % 1024 * 1024);
     std::string m_save_latents = "";
+    std::string m_path_safe = ""; // if empty, comment is not stored
     bool m_decoder_calibrate = false;
     bool m_rpi = false;
     bool m_xl = false;
@@ -87,6 +85,7 @@ struct MainArgs
     bool m_decode_im = false;
     bool m_preview_im = false;
     bool m_preview_8x = false;
+    bool m_embed_params = false;
     std::string m_curl_parallel = "16";
     std::string m_res = "";
     std::string m_threads = "";
@@ -340,14 +339,11 @@ inline static void save_image(std::uint8_t* img, unsigned w, unsigned h, int alp
     }
     const std::string extended_name = file_name + app + ext;
 
-    // for latents decoding, parameters of generation are unknown,
-    // safe model path is empty and comment will not be written
-    const std::string options = !g_main_args.m_path_safe.length() ? "" :
+    // if m_path_safe is empty or embedding is disabled, do not write comment
+    const std::string options = (!g_main_args.m_embed_params || !g_main_args.m_path_safe.length()) ? "" :
                                 g_main_args.m_prompt \
-                                + (!g_main_args.m_neg_prompt.length() ? "" :
-                                + "\nNegative prompt: " + g_main_args.m_neg_prompt)
-                                + "\nSteps: " + g_main_args.m_steps
-                                              + (!appendix.length() ? "" : " (" + appendix + ")")
+                                + (!g_main_args.m_neg_prompt.length() ? "" : "\nNegative prompt: " + g_main_args.m_neg_prompt)
+                                + "\nSteps: " + g_main_args.m_steps + (!appendix.length() ? "" : " (" + appendix + ")")
                                 + ", Seed: " + g_main_args.m_seed
                                 + ", Size: " + g_main_args.m_res
                                 + ", Model: \"" + g_main_args.m_path_safe + "\" "
@@ -1901,6 +1897,10 @@ inline void stable_diffusion(std::string positive_prompt = std::string{}, const 
     std::cout << "output_path: " << output_path << std::endl;
     std::cout << "steps: " << step << std::endl;
     std::cout << "seed: " << seed << std::endl;
+    if (g_main_args.m_embed_params)
+        std::cout << "generation parameters of model \"" << g_main_args.m_path_safe << "\" will be saved in images" << std::endl;
+    if (n_threads)
+        std::cout << "threads: " << n_threads << std::endl;
     std::cout << "----------------[prompt]------------------" << std::endl;
     auto [cond, uncond] = prompt_solver(positive_prompt, negative_prompt);
     std::cout << "----------------[diffusion]---------------" << std::endl;
@@ -2089,6 +2089,10 @@ void stable_diffusion_xl(std::string positive_prompt, const std::string& output_
     std::cout << "output_path: " << output_path << std::endl;
     std::cout << "steps: " << steps << std::endl;
     std::cout << "seed: " << seed << std::endl;
+    if (g_main_args.m_embed_params)
+        std::cout << "generation parameters of model \"" << g_main_args.m_path_safe << "\" will be saved in images" << std::endl;
+    if (n_threads)
+        std::cout << "threads: " << n_threads << std::endl;
     std::cout << "----------------[prompt]------------------" << std::endl;
 
     tensor_vector<int64_t> tokens, tokens_neg;
@@ -2228,107 +2232,8 @@ void stable_diffusion_xl(std::string positive_prompt, const std::string& output_
     std::cout << "----------------[close]-------------------" << std::endl;
 }
 
-#define FORCE_XP 0
-void make_safe_model_path(const std::string repo_name) {
-    // removing possible user names from model path
-    // result is stored in g_main_args.m_path_safe
-
-// detecting if we are an admin (and if so, removing paths information later)
-#ifdef _WIN32
-#if FORCE_XP || (_WIN32_WINNT < 0x0600) // xp
-    bool safe_paths = IsUserAnAdmin();
-#else // vista
-    bool safe_paths = true;
-    {
-        // checking that process access token belongs to Windpws NT administrators
-        // taken from https://learn.microsoft.com/en-us/windows/win32/api/securitybaseapi/nf-securitybaseapi-checktokenmembership
-        //            https://msdn.microsoft.com/en-us/library/aa376389(VS.85).aspx
-        SID_IDENTIFIER_AUTHORITY NtAuthority = SECURITY_NT_AUTHORITY; // base type == Windows NT Server SID
-        PSID AdministratorsGroup = NULL;
-        // allocates memory and fills up to 8 security subidentifiers
-        if (AllocateAndInitializeSid(
-                &NtAuthority,                // base sid type
-                2,                           // get 2 sub-sids
-                SECURITY_BUILTIN_DOMAIN_RID,
-                DOMAIN_ALIAS_RID_ADMINS,
-                0, 0, 0, 0, 0, 0,
-                &AdministratorsGroup         // *result
-            )
-        ) {
-            if (!CheckTokenMembership(
-                    NULL,                    // impersonalisation token, use own
-                    AdministratorsGroup,
-                    &safe_paths)             // is admin
-            ) safe_paths = true;             // failed to get membership, reset safe_paths
-                                             // in case it was filled
-            FreeSid(AdministratorsGroup);
-        }
-    }
-#endif // xp / vista
-#elif defined(__linux__)
-    bool safe_paths = !geteuid(); // if root
-#else
-   #warning Unknown OS type, using fake model path in metadata, for safety.
-    printf("Unknown OS type, using fake model path in metadata, for safety.\n");
-    bool safe_paths = true;
-#endif // windows / linux / others
-
-// getting username
-    std::string username;
-    if (!safe_paths) {
-#ifdef _WIN32
-        TCHAR user_name[UNLEN + 1];
-        DWORD user_name_length = UNLEN + 1;
-        if (GetUserName(&user_name, &user_name_length) && user_name_length)
-        {
-            username = std::string(&user_name);
-        } else {
-            safe_paths = true;               // failed to get username
-        }
-#else // unix
-        struct passwd *pw = getpwuid(getuid());
-        if (pw) {
-            username = std::string(pw->pw_name);
-        } else {
-            safe_paths = true;               // failed to get username
-        }
-#endif // windows / unix
-    } // separating scopes to free variables
-
-    if (!safe_paths) { // no root, only own home folder is accessible
-        // removing possible user name in model path
-        size_t p;
-        std::string path = g_main_args.m_path_with_slash;
-
-        while ((p = path.find(username, 0)) != std::string::npos)
-            path = path.replace(p, username.length(), ".");
-
-        if (!path.length()) {
-            path = "./"; // if m_path_safe is empty, comment will be skipped
-        } else {
-            // [.../]models_path/stable-diffusion-1.5-onnxstream/
-            // keeping only last 2 directories
-#if _WIN32
-            // replacing all \ with /
-            path = std::regex_replace(path, std::regex("\\\\"), "/");
-#endif
-            p = path.find_last_of("/");
-            p = path.find_last_of("/", p - 1);
-            p = path.find_last_of("/", p - 1);
-            if (p != std::string::npos) path = path.substr(p + 1);
-        }
-        g_main_args.m_path_safe = path;
-    } else { // root, all users accessible
-        // parental folders can contain usernames, therefore using fake path
-        g_main_args.m_path_safe += repo_name + "/"; // ./stable-diffusion-1.5-onnxstream/
-    }
-}
-
 int main(int argc, char** argv)
 {
-
-    std::string repo_name = g_main_args.m_path_with_slash;
-
 #ifdef _WIN32
 
     {
@@ -2439,6 +2344,10 @@ int main(int argc, char** argv)
         {
             g_main_args.m_preview_im = true;
         }
+        else if (arg == "--embed-parameters")
+        {
+            g_main_args.m_embed_params = true;
+        }
         else if (arg == "--preview-steps-x8" || arg == "--preview-steps-8x")
         {
             g_main_args.m_preview_im = true;
@@ -2483,6 +2392,7 @@ int main(int argc, char** argv)
             printf("--rpi               Configures the models to run on a Raspberry Pi.\n");
             printf("--rpi-lowmem        Configures the models to run on a Raspberry Pi Zero 2.\n");
             printf("--threads           Sets the number of threads, values =< 0 mean max-N.\n");
+            printf("--embed-parameters  Store parameters of generation (e. g. model path) in image comments. Be sure to not place models in private directories, their names will be stored in images.\n");
 
             return -1;
         }
@@ -2540,9 +2450,7 @@ int main(int argc, char** argv)
                 n_threads = (desired_threads <= 0) ? n_threads + desired_threads : desired_threads;
             }
         }
-        if (n_threads) {
-            printf("threads: %d\n", n_threads);
-        } else
+        if (!n_threads)
             printf("Number of CPUs not detected, using default number of threads.\n");
     }
 
@@ -2599,6 +2507,7 @@ int main(int argc, char** argv)
         if (curl_parallel < 1 || curl_parallel > 128)
             throw std::invalid_argument("--curl-parallel must be between 1 and 128.");
 
+        std::string repo_name;
         std::string full_repo_name;
         std::vector<std::string> dirs;
         std::vector<std::string> files;
@@ -2775,8 +2684,8 @@ int main(int argc, char** argv)
         return -1;
     }
 
-    // "safe" model path in decoded images will be "./",
-    // because given latents can be from other model
+    // m_path_safe is currently empty and, because latents can be from other model,
+    // comment with generation parameters will not be added to decoded images
     if (g_main_args.m_decode_latents.size())
     {
         printf("Decoding latents.\n");
@@ -2823,12 +2732,6 @@ int main(int argc, char** argv)
         return 0;
     }
 
-    printf("\nm_path_with_slash: %s\n", g_main_args.m_path_with_slash.c_str());
-    make_safe_model_path(repo_name);
-    if (g_main_args.m_path_with_slash.length() < g_main_args.m_path_safe.length())
-        g_main_args.m_path_safe = g_main_args.m_path_with_slash;
-    printf("m_path_safe:       %s\n", g_main_args.m_path_safe.c_str());
-
     if (!g_main_args.m_download) {
         printf("The model \"%s\" needs to be downloaded, "
                "but auto-downloading is disabled from command line.\n"
@@ -2837,9 +2740,21 @@ int main(int argc, char** argv)
         return -1;
     }
 
-    return -1; // for now
+    if (g_main_args.m_embed_params) { // m_path_safe is used only in image comment
+        // removing everything but last 2 directories of model path
+        std::string safe_path = g_main_args.m_path_with_slash;
+#if _WIN32
+        // replacing all \ with /
+        safe_path = std::regex_replace(safe_path, std::regex("\\\\"), "/");
+#endif
+        size_t p = safe_path.find_last_of("/", safe_path.find_last_of("/", safe_path.find_last_of("/") - 1) - 1);
+        if (p != std::string::npos) safe_path = safe_path.substr(p + 1);
+        if (g_main_args.m_path_with_slash.length() < safe_path.length())
+            g_main_args.m_path_safe = g_main_args.m_path_with_slash;
+        else
+            g_main_args.m_path_safe = safe_path;
+    }
 
-  
     try
     {
         double t1 = ncnn::get_current_time();
