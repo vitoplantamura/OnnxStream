@@ -73,6 +73,7 @@ struct MainArgs
     std::string m_steps = "10";
     std::string m_seed = std::to_string(std::time(0) % 1024 * 1024);
     std::string m_save_latents = "";
+    std::string m_path_safe = ""; // if empty, comment is not stored
     bool m_decoder_calibrate = false;
     bool m_rpi = false;
     bool m_xl = false;
@@ -84,6 +85,7 @@ struct MainArgs
     bool m_decode_im = false;
     bool m_preview_im = false;
     bool m_preview_8x = false;
+    bool m_embed_params = false;
     std::string m_curl_parallel = "16";
     std::string m_res = "";
     std::string m_threads = "";
@@ -337,6 +339,18 @@ inline static void save_image(std::uint8_t* img, unsigned w, unsigned h, int alp
     }
     const std::string extended_name = file_name + app + ext;
 
+    // if m_path_safe is empty or embedding is disabled, do not write comment
+    const std::string options = (!g_main_args.m_embed_params || !g_main_args.m_path_safe.length()) ? "" :
+                                g_main_args.m_prompt \
+                                + (!g_main_args.m_neg_prompt.length() ? "" : "\nNegative prompt: " + g_main_args.m_neg_prompt)
+                                + "\nSteps: " + g_main_args.m_steps + (!appendix.length() ? "" : " (" + appendix + ")")
+                                + ", Seed: " + g_main_args.m_seed
+                                + ", Size: " + g_main_args.m_res
+                                + ", Model: \"" + g_main_args.m_path_safe + "\" "
+                                                + (g_main_args.m_turbo ? "(SDXL-Turbo)" :
+                                                   g_main_args.m_xl ? "(SDXL)" : "(SD 1.5)")
+                                + ", Sampler: Euler Ancestral, Version: OnnxStream";
+
 #ifdef USE_LIBJPEGTURBO
     // extention is in filename and is jpeg
     if (last_dot > last_slash &&
@@ -380,6 +394,15 @@ inline static void save_image(std::uint8_t* img, unsigned w, unsigned h, int alp
 
         jpeg_start_compress(&cinfo, true);                  // do write all tables
 
+        if (options.length()) { // skip empty comment insertion
+            // making a pair { key, value }, same as in png_set_text()
+            // limiting length of value to 65535 - sizeof(WORD) - "parameters".length() - 2 trailing zeros
+            // so that (WORD)length + comment fit to 65535 bytes
+            const std::string comment = std::string("parameters\0", strlen("parameters") + 1)
+                + options.substr(0, 65535 - 2 - strlen("parameters") - 1 - 1) + std::string("\0", 1);
+            jpeg_write_marker(&cinfo, JPEG_COM, (const unsigned char*)comment.c_str(), comment.length());
+        }
+
         while (cinfo.next_scanline < cinfo.image_height) {
             row_pointer = &img[cinfo.next_scanline * row_stride];
             jpeg_write_scanlines(&cinfo, &row_pointer, 1);  // number of lines
@@ -407,6 +430,14 @@ inline static void save_image(std::uint8_t* img, unsigned w, unsigned h, int alp
         png_set_IHDR(png_ptr, info_ptr, w, h, 8,
             alpha ? PNG_COLOR_TYPE_RGB_ALPHA : PNG_COLOR_TYPE_RGB,
             PNG_INTERLACE_NONE, PNG_COMPRESSION_TYPE_BASE, PNG_FILTER_TYPE_BASE);
+        if (options.length()) { // skip empty comment insertion
+            png_set_text(png_ptr,
+                         info_ptr,
+                         std::vector<png_text>{{.compression = PNG_TEXT_COMPRESSION_NONE,
+                                                .key         = (char*)std::string("parameters").c_str(),
+                                                .text        = (char*)options.c_str()}}.data(),
+                         1);
+        }
         png_write_info(png_ptr, info_ptr);
         w *= alpha ? 4 : 3;
         for (unsigned y = 0; y < h; y++)
@@ -414,6 +445,7 @@ inline static void save_image(std::uint8_t* img, unsigned w, unsigned h, int alp
             png_write_row(png_ptr, (png_const_bytep)(img + y * w));
         }
     }
+    png_write_end(png_ptr, info_ptr);
     png_destroy_write_struct(&png_ptr, &info_ptr);
     }
     fclose(fp);
@@ -530,6 +562,46 @@ inline static void save_image(std::uint8_t* img, unsigned w, unsigned h, int alp
         fputc(((~c) >> 8) & 255, fp);
         fputc((~c) & 255, fp);
     }
+
+    if (options.length()) { // skip empty comment insertion
+        // making a pair { key, value }, same as in png_set_text()
+        const std::string comment = std::string("parameters\0", strlen("parameters") + 1) + options;
+
+        // writing comment chunk: length + "tEXt" + comment + checksum
+        {
+            {
+                fputc( (comment.length()) >> 24       , fp);
+                fputc(((comment.length()) >> 16) & 255, fp);
+                fputc(((comment.length()) >> 8 ) & 255, fp);
+                fputc( (comment.length()) & 255       , fp);
+            }
+
+        c = ~0U;
+
+            for (i = 0; i < 4; i++)              // tEXt
+            {
+                fputc(("tEXt")[i], fp);
+                c ^= (("tEXt")[i]);
+                c = (c >> 4) ^ t[c & 15];
+                c = (c >> 4) ^ t[c & 15];
+            }
+        }
+
+        for (i = 0; i < comment.length(); i++)   // comment
+        {
+            fputc(comment[i], fp);
+            c ^= (comment[i]);
+            c = (c >> 4) ^ t[c & 15];
+            c = (c >> 4) ^ t[c & 15];
+        }
+
+        {                                        // comment chunk checksum
+            fputc((~c) >> 24, fp);
+            fputc(((~c) >> 16) & 255, fp);
+            fputc(((~c) >> 8) & 255, fp);
+            fputc((~c) & 255, fp);
+        }
+    } // end of comment chunk
 
     {
         {
@@ -1825,6 +1897,10 @@ inline void stable_diffusion(std::string positive_prompt = std::string{}, const 
     std::cout << "output_path: " << output_path << std::endl;
     std::cout << "steps: " << step << std::endl;
     std::cout << "seed: " << seed << std::endl;
+    if (g_main_args.m_embed_params)
+        std::cout << "generation parameters of model \"" << g_main_args.m_path_safe << "\" will be saved in images" << std::endl;
+    if (n_threads)
+        std::cout << "threads: " << n_threads << std::endl;
     std::cout << "----------------[prompt]------------------" << std::endl;
     auto [cond, uncond] = prompt_solver(positive_prompt, negative_prompt);
     std::cout << "----------------[diffusion]---------------" << std::endl;
@@ -2013,6 +2089,10 @@ void stable_diffusion_xl(std::string positive_prompt, const std::string& output_
     std::cout << "output_path: " << output_path << std::endl;
     std::cout << "steps: " << steps << std::endl;
     std::cout << "seed: " << seed << std::endl;
+    if (g_main_args.m_embed_params)
+        std::cout << "generation parameters of model \"" << g_main_args.m_path_safe << "\" will be saved in images" << std::endl;
+    if (n_threads)
+        std::cout << "threads: " << n_threads << std::endl;
     std::cout << "----------------[prompt]------------------" << std::endl;
 
     tensor_vector<int64_t> tokens, tokens_neg;
@@ -2264,6 +2344,10 @@ int main(int argc, char** argv)
         {
             g_main_args.m_preview_im = true;
         }
+        else if (arg == "--embed-parameters")
+        {
+            g_main_args.m_embed_params = true;
+        }
         else if (arg == "--preview-steps-x8" || arg == "--preview-steps-8x")
         {
             g_main_args.m_preview_im = true;
@@ -2308,6 +2392,7 @@ int main(int argc, char** argv)
             printf("--rpi               Configures the models to run on a Raspberry Pi.\n");
             printf("--rpi-lowmem        Configures the models to run on a Raspberry Pi Zero 2.\n");
             printf("--threads           Sets the number of threads, values =< 0 mean max-N.\n");
+            printf("--embed-parameters  Store parameters of generation (e. g. model path) in image comments. Be sure to not place models in private directories, their names will be stored in images.\n");
 
             return -1;
         }
@@ -2365,9 +2450,7 @@ int main(int argc, char** argv)
                 n_threads = (desired_threads <= 0) ? n_threads + desired_threads : desired_threads;
             }
         }
-        if (n_threads) {
-            printf("threads: %d\n", n_threads);
-        } else
+        if (!n_threads)
             printf("Number of CPUs not detected, using default number of threads.\n");
     }
 
@@ -2601,6 +2684,8 @@ int main(int argc, char** argv)
         return -1;
     }
 
+    // m_path_safe is currently empty and, because latents can be from other model,
+    // comment with generation parameters will not be added to decoded images
     if (g_main_args.m_decode_latents.size())
     {
         printf("Decoding latents.\n");
@@ -2653,6 +2738,21 @@ int main(int argc, char** argv)
                "Exiting.\n",
                g_main_args.m_path_with_slash.c_str());
         return -1;
+    }
+
+    if (g_main_args.m_embed_params) { // m_path_safe is used only in image comment
+        // removing everything but last 2 directories of model path
+        std::string safe_path = g_main_args.m_path_with_slash;
+#if _WIN32
+        // replacing all \ with /
+        safe_path = std::regex_replace(safe_path, std::regex("\\\\"), "/");
+#endif
+        size_t p = safe_path.find_last_of("/", safe_path.find_last_of("/", safe_path.find_last_of("/") - 1) - 1);
+        if (p != std::string::npos) safe_path = safe_path.substr(p + 1);
+        if (g_main_args.m_path_with_slash.length() < safe_path.length())
+            g_main_args.m_path_safe = g_main_args.m_path_with_slash;
+        else
+            g_main_args.m_path_safe = safe_path;
     }
 
     try
