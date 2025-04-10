@@ -3,7 +3,7 @@
 #
 # This file is only used to build the Wasm binaries of OnnxStream.
 #
-# To build:
+# To build (tested with bazel=7.0.0):
 #
 # bazel build -c opt --copt="-Wno-unused-function" --copt="-Wno-unused-but-set-variable" //:onnxstream-wasm
 # bazel build -c opt --copt="-Wno-unused-function" --copt="-Wno-unused-but-set-variable" --copt="-msimd128" //:onnxstream-wasm-simd
