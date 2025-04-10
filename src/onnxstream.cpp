@@ -1407,7 +1407,7 @@ public:
                 m_ops_cache[cache_key].m_op = convolution_op;
         }
 
-        if (!from_ops_cache)
+        //if (!from_ops_cache) BUG: always reshape the convolution, even in this case!
         {
             size_t workspace_size = 0;
             size_t workspace_alignment = 0;
