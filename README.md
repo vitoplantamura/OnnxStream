@@ -1,5 +1,6 @@
 ﻿#### News 📣
 
+- April 15, 2025: Added WebAssembly demo of **OpenAI's Whisper** [here](https://github.com/vitoplantamura/OnnxStream/tree/master/examples/Whisper_wasm) (running in the browser).
 - September 19, 2024: Added WebAssembly support for the library! Demo of the **YOLOv8** object detection model [here](https://yolo.vitoplantamura.com/) (running in the browser).
 - January 14, 2024: Added LLM chat application (**TinyLlama 1.1B and Mistral 7B**) with initial GPU support! More info [here](https://github.com/vitoplantamura/OnnxStream/blob/master/assets/LLM.md).
 - December 14, 2023: Added support for **Stable Diffusion XL Turbo 1.0**! (thanks to @AeroX2)
@@ -13,6 +14,7 @@
 - **[Stable Diffusion XL Turbo 1.0](https://github.com/vitoplantamura/OnnxStream#stable-diffusion-xl-turbo-10)**
 - **[TinyLlama 1.1B and Mistral 7B](https://github.com/vitoplantamura/OnnxStream/blob/master/assets/LLM.md)**
 - **[YOLOv8](https://yolo.vitoplantamura.com/)** (running in the browser)
+- **[OpenAI's Whisper](https://github.com/vitoplantamura/OnnxStream/tree/master/examples/Whisper_wasm)** (running in the browser)
 - [Features of OnnxStream](https://github.com/vitoplantamura/OnnxStream#features-of-onnxstream)
 - [Performance](https://github.com/vitoplantamura/OnnxStream#performance)
 - [Attention Slicing and Quantization](https://github.com/vitoplantamura/OnnxStream#attention-slicing-and-quantization)

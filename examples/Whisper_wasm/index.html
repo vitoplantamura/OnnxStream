@@ -1,0 +1,1229 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no">
+    <title>OpenAI's Whisper in the browser, run by OnnxStream (WASM)</title>
+</head>
+
+<body>
+
+    <div id="mainDiv">
+
+        <h2 id="pageTitle">OpenAI's Whisper in the browser, run by OnnxStream (WASM)</h2>
+
+        <span>
+            This is a demo of the WASM build of OnnxStream: Whisper runs fully in the browser without any backend server.
+            The OnnxStream JS API is very similar to the C++ API: you can specify a model as a series of operations in text format, you can add input tensors, read output tensors etc.
+            The Whisper ONNX models from the <a href="https://github.com/k2-fsa/sherpa-onnx/tree/95ba6b40396b04505b2c6f972f3e734d65966115/scripts/whisper" target="_blank">sherpa-onnx</a> project were converted to the text format compatible with OnnxStream using <a href="https://github.com/vitoplantamura/OnnxStream/blob/master/onnx2txt/onnx2txt.ipynb" target="_blank">onnx2txt</a>.
+            Feel free to view the source of this page: it is about 1200 lines of HTML and JS code that demonstrate how to use the API (specifically the "initModel" and "runModel" functions).
+        </span>
+
+        <button id="testJfk" onclick="onJFKBtnFn(this)" disabled>Test with JFK.wav</button>
+        or
+        <button id="start" onclick="startRecording()" disabled>Record from the Microphone</button>
+        or
+        <button id="testFile" onclick="document.getElementById('file').click()" disabled>Use MP3 or WAV file</button>
+        <input type="file" id="file" name="file" onchange="loadAudio(event)" style="display:none" />
+
+        <div style="float: right;">
+            <label for="language">Language:</label>
+            <select id="language" disabled>
+                <option value="en">English</option>
+                <option value="ar">Arabic</option>
+                <option value="hy">Armenian</option>
+                <option value="az">Azerbaijani</option>
+                <option value="eu">Basque</option>
+                <option value="be">Belarusian</option>
+                <option value="bn">Bengali</option>
+                <option value="bg">Bulgarian</option>
+                <option value="ca">Catalan</option>
+                <option value="zh">Chinese</option>
+                <option value="hr">Croatian</option>
+                <option value="cs">Czech</option>
+                <option value="da">Danish</option>
+                <option value="nl">Dutch</option>
+                <option value="en">English</option>
+                <option value="et">Estonian</option>
+                <option value="tl">Filipino</option>
+                <option value="fi">Finnish</option>
+                <option value="fr">French</option>
+                <option value="gl">Galician</option>
+                <option value="ka">Georgian</option>
+                <option value="de">German</option>
+                <option value="el">Greek</option>
+                <option value="gu">Gujarati</option>
+                <option value="iw">Hebrew</option>
+                <option value="hi">Hindi</option>
+                <option value="hu">Hungarian</option>
+                <option value="is">Icelandic</option>
+                <option value="id">Indonesian</option>
+                <option value="ga">Irish</option>
+                <option value="it">Italian</option>
+                <option value="ja">Japanese</option>
+                <option value="kn">Kannada</option>
+                <option value="ko">Korean</option>
+                <option value="la">Latin</option>
+                <option value="lv">Latvian</option>
+                <option value="lt">Lithuanian</option>
+                <option value="mk">Macedonian</option>
+                <option value="ms">Malay</option>
+                <option value="mt">Maltese</option>
+                <option value="no">Norwegian</option>
+                <option value="fa">Persian</option>
+                <option value="pl">Polish</option>
+                <option value="pt">Portuguese</option>
+                <option value="ro">Romanian</option>
+                <option value="ru">Russian</option>
+                <option value="sr">Serbian</option>
+                <option value="sk">Slovak</option>
+                <option value="sl">Slovenian</option>
+                <option value="es">Spanish</option>
+                <option value="sw">Swahili</option>
+                <option value="sv">Swedish</option>
+                <option value="ta">Tamil</option>
+                <option value="te">Telugu</option>
+                <option value="th">Thai</option>
+                <option value="tr">Turkish</option>
+                <option value="uk">Ukrainian</option>
+                <option value="ur">Urdu</option>
+                <option value="vi">Vietnamese</option>
+                <option value="cy">Welsh</option>
+                <option value="yi">Yiddish</option>
+            </select>
+        </div>
+
+        <pre id="log"></pre>
+
+        <div style="float: right;">
+            <label for="selectedModel">Model:</label>
+            <select id="selectedModel">
+                <option value="tiny.en">tiny.en (38MB+111MB)</option>
+                <option value="tiny">tiny (38MB+111MB)</option>
+                <option value="base.en">base.en (96MB+192MB)</option>
+                <option value="base">base (96MB+192MB)</option>
+                <!-- <option value="small.en">small.en (407MB+545MB)</option> -->
+                <!-- <option value="small">small (407MB+545MB)</option> -->
+            </select>
+        </div>
+
+    </div>
+
+    <style>
+
+        body {
+            margin: 0;
+        }
+
+        span {
+            display: inline-block;
+            margin-bottom: 40px;
+        }
+
+        #mainDiv {
+            width: 800px;
+            margin: 0 auto;
+        }
+
+        #pageTitle {
+            text-align: center;
+        }
+
+        #log {
+            background-color: black;
+            color: Lime;
+            width: 796px;
+            height: 13pc;
+            overflow-y: scroll;
+            border-left: 4px solid black;
+            border-right: 0px solid black;
+            border-top: 3px solid black;
+            border-bottom: 3px solid black;
+            white-space: pre-wrap;
+        }
+
+    </style>
+
+    <script type="text/javascript">
+        const comboBox = document.getElementById("selectedModel");
+
+        comboBox.addEventListener("change", function () {
+            const selectedValue = this.value;
+            if (selectedValue && selectedValue != "tiny.en") {
+                const currentPageUrl = window.location.pathname;
+                const newUrl = `${currentPageUrl}?model=${selectedValue}`;
+                window.location.href = newUrl;
+            } else {
+                const currentPageUrl = window.location.pathname;
+                window.location.href = currentPageUrl;
+            }
+        });
+
+        function getParameterByName(name) {
+            name = name.replace(/[\[\]]/g, '\\$&');
+            const regex = new RegExp('[?&]' + name + '(=([^&#]*)|&|#|$)'),
+                results = regex.exec(window.location.href);
+            if (!results) return null;
+            if (!results[2]) return '';
+            return decodeURIComponent(results[2].replace(/\+/g, ' '));
+        }
+
+        window.modelName = "tiny.en";
+        const selectedOption = getParameterByName('model');
+        if (selectedOption) {
+            comboBox.value = selectedOption;
+            window.modelName = selectedOption;
+        }
+    </script>
+
+    <script type="text/javascript" src="OnnxStreamModel.js"></script>
+
+    <script type="text/javascript">
+
+//-----------------------------------------------------------------------------
+// The code in this <script> element creates the spectrogram of an audio file.
+// The relevant C++ code was extracted from this project (in order to create a
+// reference implementation): https://github.com/csukuangfj/kaldi-native-fbank
+// Gemini 2.0 FT was then used to convert the C++ code to JS code.
+//-----------------------------------------------------------------------------
+
+// slaney, hz to mel
+function melScaleSlaney(freq) {
+    if (freq <= 1000) {
+        return freq * 3 / 200.0;
+    }
+
+    // return 15 + 27 * logf(freq / 1000) / logf(6.4f)
+    //
+    // Note: 27/log(6.4) = 14.545078505785561
+
+    return 15 + 14.545078505785561 * Math.log(freq / 1000);
+}
+
+// slaney, mel to hz
+function inverseMelScaleSlaney(mel_freq) {
+    if (mel_freq <= 15) {
+        return 200.0 / 3 * mel_freq;
+    }
+
+    // return 1000 * expf((mel_freq - 15) * logf(6.4f) / 27);
+
+    // Note: log(6.4)/27 = 0.06875177742094911
+
+    return 1000 * Math.exp((mel_freq - 15) * 0.06875177742094911);
+}
+
+let bins_ = [];
+let window_ = [];  // of size opts.WindowSize() - will be initialized later
+let opts_num_bins = 80; // 25;
+let opts_low_freq = 0; // 20;
+let opts_high_freq = 0;
+let frame_opts_samp_freq = 16000;
+let frame_opts_frame_length_ms = 25.0;
+let frame_opts_frame_shift_ms = 10.0;
+let frame_opts_WindowSize = Math.floor(frame_opts_samp_freq * 0.001 * frame_opts_frame_length_ms);
+let frame_opts_WindowShift = Math.floor(frame_opts_samp_freq * 0.001 * frame_opts_frame_shift_ms);
+
+function melBanks_InitLibrosaMelBanks(/*opts, frame_opts, vtln_warp_factor*/) {
+    //htk_mode_ = opts.htk_mode;
+    let num_bins = opts_num_bins;
+    if (num_bins < 3) {
+        //KNF_LOG(FATAL) << "Must have at least 3 mel bins";
+        console.error("Must have at least 3 mel bins"); // Or throw an error
+        return;
+    }
+
+    let sample_freq = frame_opts_samp_freq;
+    let window_length_padded = frame_opts_WindowSize;
+    //KNF_CHECK_EQ(window_length_padded % 2, 0);
+
+    let num_fft_bins = Math.floor(window_length_padded / 2);
+    let nyquist = 0.5 * sample_freq;
+
+    let low_freq = opts_low_freq, high_freq;
+    if (opts_high_freq > 0.0) {
+        high_freq = opts_high_freq;
+    }
+    else {
+        high_freq = nyquist + opts_high_freq;
+    }
+
+    if (low_freq < 0.0 || low_freq >= nyquist || high_freq <= 0.0 ||
+        high_freq > nyquist || high_freq <= low_freq) {
+        //KNF_LOG(FATAL) << "Bad values in options: low-freq " << low_freq
+        //    << " and high-freq " << high_freq << " vs. nyquist "
+        //    << nyquist;
+        console.error("Bad values in options: low-freq " + low_freq +
+            " and high-freq " + high_freq + " vs. nyquist " + nyquist); // Or throw error
+        return;
+    }
+
+    let fft_bin_width = sample_freq / window_length_padded;
+
+    let mel_low_freq = melScaleSlaney(low_freq);
+    let mel_high_freq = melScaleSlaney(high_freq);
+
+    //debug_ = opts.debug_mel;
+
+    // divide by num_bins+1 in next line because of end-effects where the bins
+    // spread out to the sides.
+    let mel_freq_delta = (mel_high_freq - mel_low_freq) / (num_bins + 1);
+
+    let slaney_norm = true; // false;
+    /*if (!opts.norm.empty()) {
+        if (opts.norm != "slaney") {
+            //KNF_LOG(FATAL) << "Unsupported norm: " << opts.norm;
+        }
+        slaney_norm = true;
+    }*/
+
+    bins_ = Array(num_bins).fill(null).map(() => ({ first: 0, second: [] })); // Initialize bins_ as array of objects
+    for (let bin = 0; bin < num_bins; ++bin) {
+        let left_mel = mel_low_freq + bin * mel_freq_delta;
+        let center_mel = mel_low_freq + (bin + 1) * mel_freq_delta;
+        let right_mel = mel_low_freq + (bin + 2) * mel_freq_delta;
+
+        let left_hz = inverseMelScaleSlaney(left_mel);
+        let center_hz = inverseMelScaleSlaney(center_mel);
+        let right_hz = inverseMelScaleSlaney(right_mel);
+
+        // this_bin will be a vector of coefficients that is only
+        // nonzero where this mel bin is active.
+        //
+        // It is not an error to use num_fft_bins + 1 here. It is different
+        // from Kaldi.
+        let this_bin = Array(num_fft_bins + 1).fill(0);
+
+        let first_index = -1, last_index = -1;
+        for (let i = 0; i < num_fft_bins + 1; ++i) {
+            let hz = (fft_bin_width * i);  // Center frequency of this fft bin.
+            if (hz > left_hz && hz < right_hz) {
+                let weight;
+                if (hz <= center_hz) {
+                    weight = (hz - left_hz) / (center_hz - left_hz);
+                }
+                else {
+                    weight = (right_hz - hz) / (right_hz - center_hz);
+                }
+
+                if (slaney_norm) {
+                    weight *= 2 / (right_hz - left_hz);
+                }
+
+                this_bin[i] = weight;
+                if (first_index === -1) {
+                    first_index = i;
+                }
+                last_index = i;
+            }
+        }  // for (int32_t i = 0; i < num_fft_bins + 1; ++i)
+
+        //KNF_CHECK(first_index != -1 && last_index >= first_index &&
+        //    "You may have set num_mel_bins too large.");
+        if (first_index === -1 || last_index < first_index) {
+            console.error("You may have set num_mel_bins too large."); // Or throw error
+            return;
+        }
+
+
+        bins_[bin].first = first_index;
+        let size = last_index + 1 - first_index;
+        bins_[bin].second = this_bin.slice(first_index, first_index + size); // Use slice to copy part of array
+    }  // for (int32_t bin = 0; bin < num_bins; ++bin)
+
+    /*if (debug_) {
+        std::ostringstream os;
+        for (size_t i = 0; i < bins_.size(); i++) {
+            os << "bin " << i << ", offset = " << bins_[i].first << ", vec = ";
+            for (auto k : bins_[i].second) os << k << ", ";
+            os << "\n";
+        }
+        fprintf(stderr, "%s\n", os.str().c_str());
+    }*/
+}
+
+// "power_spectrum" contains fft energies.
+function mel_banks__Compute(power_spectrum, mel_energies_out) {
+    let num_bins = bins_.length;
+
+    for (let i = 0; i < num_bins; i++) {
+        let offset = bins_[i].first;
+        const v = bins_[i].second;
+        let energy = 0;
+        for (let k = 0; k < v.length; ++k) {
+            energy += v[k] * power_spectrum[k + offset];
+        }
+
+        // HTK-like flooring- for testing purposes (we prefer dither)
+        /*if (htk_mode_ && energy < 1.0) {
+            energy = 1.0;
+        }*/
+
+        mel_energies_out[i] = energy;
+
+        // The following assert was added due to a problem with OpenBlas that
+        // we had at one point (it was a bug in that library).  Just to detect
+        // it early.
+        //KNF_CHECK_EQ(energy, energy);  // check that energy is not nan
+        if (isNaN(energy)) {
+            console.error("Energy is NaN"); // Or throw error
+            return;
+        }
+    }
+
+    /*if (debug_) {
+        fprintf(stderr, "MEL BANKS:\n");
+        for (int32_t i = 0; i < num_bins; i++)
+            fprintf(stderr, " %f", mel_energies_out[i]);
+        fprintf(stderr, "\n");
+    }*/
+}
+
+const M_2PI = 6.283185307179586476925286766559005;
+
+function dft(input) {
+    // this function is modified from
+    // https://github.com/ggerganov/whisper.cpp/blob/master/whisper.cpp#L2353
+    let N = input.length;
+    let out = Array(N * 2).fill(0);
+
+    let M_2PI_over_N = M_2PI / N;
+    for (let k = 0; k < N; ++k) {
+        let re = 0;
+        let im = 0;
+
+        for (let n = 0; n < N; ++n) {
+            let angle = M_2PI_over_N * k * n;
+            re += input[n] * Math.cos(angle);
+            im -= input[n] * Math.sin(angle);
+        }
+
+        out[k * 2 + 0] = re;
+        out[k * 2 + 1] = im;
+    }
+    return out;
+}
+
+// Cooley-Tukey FFT
+// poor man's implementation - use something better
+// input is real-valued
+// output is complex-valued
+function fft(input) {
+    // this function is copied from
+    // https://github.com/ggerganov/whisper.cpp/blob/master/whisper.cpp#L2373C1-L2429C1
+
+    let N = input.length;
+    let out = Array(N * 2).fill(0);
+
+    if (N === 1) {
+        out[0] = input[0];
+        out[1] = 0;
+        return out;
+    }
+
+    if (N % 2 === 1) {
+        return dft(input);
+    }
+
+    let even = [];
+    let odd = [];
+
+    for (let i = 0; i < N; ++i) {
+        if (i % 2 === 0) {
+            even.push(input[i]);
+        }
+        else {
+            odd.push(input[i]);
+        }
+    }
+
+    let even_fft = fft(even);
+    let odd_fft = fft(odd);
+
+    for (let k = 0; k < N / 2; ++k) {
+        let theta = M_2PI * k / N;
+
+        let re = Math.cos(theta);
+        let im = -Math.sin(theta);
+
+        let re_odd = odd_fft[2 * k + 0];
+        let im_odd = odd_fft[2 * k + 1];
+
+        out[2 * k + 0] = even_fft[2 * k + 0] + re * re_odd - im * im_odd;
+        out[2 * k + 1] = even_fft[2 * k + 1] + re * im_odd + im * re_odd;
+
+        out[2 * (k + N / 2) + 0] =
+            even_fft[2 * k + 0] - re * re_odd + im * im_odd;
+        out[2 * (k + N / 2) + 1] =
+            even_fft[2 * k + 1] - re * im_odd - im * re_odd;
+    }
+    return out;
+}
+
+function whisperFeatureComputer_Compute(/*signal_raw_log_energy*/ _, /*vtln_warp*/ _2, signal_frame, feature) {
+    //KNF_CHECK_EQ(signal_frame->size(), frame_opts_.PaddedWindowSize());
+    // we have already applied window function to signal_frame before
+    // calling this method
+    let fft_out = fft(signal_frame);
+
+    let num_fft = signal_frame.length;
+    let power = Array(num_fft / 2 + 1).fill(0);
+    for (let i = 0; i <= num_fft / 2; ++i) {
+        let re = fft_out[2 * i + 0];
+        let im = fft_out[2 * i + 1];
+        power[i] = re * re + im * im;
+    }
+
+    // feature is pre-allocated by the user
+    mel_banks__Compute(power, feature);
+}
+
+function initialize_hann_window ()
+{
+    let frame_length = frame_opts_WindowSize;
+    window_ = Array(frame_length);
+    let a = M_2PI / frame_length;
+    let window_data = window_; // No need for pointer in JS
+    for (let i = 0; i < frame_length; i++) {
+        let i_fl = i;
+        window_data[i] = 0.50 - 0.50 * Math.cos(a * i_fl);
+    }
+}
+
+// **Note:** This Javascript function for reading audio is a placeholder.
+// File reading in browsers and Node.js is handled differently.
+// For browsers, you'd typically use the File API and FileReader to
+// handle user-selected audio files.
+// For Node.js, you can use the 'fs' module to read files from the filesystem.
+// This example provides a basic structure but might need adjustments
+// depending on your specific environment (browser or Node.js) and how you want to handle audio input.
+
+async function read_16bit_raw_audio(filename) {
+    // **Browser Example using Fetch API (for loading from a server or relative path)**
+    // For local file access in browsers, using <input type="file"> and FileReader is more common.
+    // For Node.js, use 'fs' module (e.g., fs.readFileSync).
+
+    try {
+        const response = await fetch(filename); // or use path for local file in Node.js with 'fs'
+        if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+        }
+        const arrayBuffer = await response.arrayBuffer();
+        const dataView = new DataView(arrayBuffer);
+        const file_size = arrayBuffer.byteLength;
+
+        if (file_size % 2 !== 0) {
+            throw new Error("File size is not a multiple of 2 (invalid 16-bit audio): " + filename);
+        }
+
+        const num_samples = file_size / 2;
+        const audio_data = new Array(num_samples);
+
+        for (let i = 0; i < num_samples; ++i) {
+            let sample = dataView.getInt16(i * 2, true); // true for little-endian
+            audio_data[i] = sample / 32768.0; // Normalize
+        }
+        return audio_data;
+
+    } catch (e) {
+        console.error("Failed to open or read file: " + filename, e);
+        throw new Error("Failed to open file: " + filename + ", " + e.message);
+    }
+}
+
+function process_features(features, H, W) {
+
+    let log_spec = Array(H * W).fill(0);
+    let min_val = 1e-10;
+
+    for (let i = 0; i < H * W; ++i) {
+        log_spec[i] = Math.log10(Math.max(features[i], min_val));
+    }
+
+    //let max_log_spec = Math.max(...log_spec); // Use Math.max(...array) to find max
+    let max_log_spec = log_spec.reduce((max, current) => Math.max(max, current), -Infinity);
+    for (let i = 0; i < H * W; ++i) {
+        log_spec[i] = Math.max(log_spec[i], max_log_spec - 8.0);
+    }
+
+    let mel = Array(H * W).fill(0);
+    for (let i = 0; i < H * W; ++i) {
+        mel[i] = (log_spec[i] + 4.0) / 4.0;
+    }
+
+    H += 1500;
+    mel.length = H * W; // Resize and pad with 0 automatically in JS
+    mel.fill(0, (H - 1500) * W); // Fill newly added parts with 0
+
+    if (H > 3000) { // truncate to 30 seconds
+        H = 3000;
+        mel.length = H * W;
+    }
+
+    let transposed_mel = Array(mel.length).fill(0); // Initialize with correct size
+    for (let i = 0; i < H; ++i) {
+        for (let j = 0; j < W; ++j) {
+            transposed_mel[j * H + i] = mel[i * W + j];
+        }
+    }
+    return transposed_mel;
+}
+
+function create_mel (jfk)
+{
+    let signal_frame = Array(frame_opts_WindowSize).fill(0);
+    let this_feature = Array(80).fill(0); // computer_.Dim()
+    let res = []; // tensor_vector<float>
+
+    for (let i = 0; i <= jfk.length - frame_opts_WindowSize; i += frame_opts_WindowShift) { // Corrected loop condition
+        signal_frame = jfk.slice(i, i + frame_opts_WindowSize); // Use slice to extract frame
+
+        {
+            let window_ptr = window_; // No pointer in JS
+            for (let index = 0; index < signal_frame.length; index++) { // Iterate using index
+                signal_frame[index] *= window_ptr[index]; // Apply window
+            }
+        }
+        whisperFeatureComputer_Compute(0, 0, signal_frame, this_feature);
+        res.push(...this_feature); // Using push(...array) to insert array elements
+    }
+
+    res = process_features(res, Math.floor(res.length / 80), 80); // Corrected division for H
+
+    return res;
+}
+
+function init_mel ()
+{
+    initialize_hann_window ();
+    melBanks_InitLibrosaMelBanks();
+}
+
+async function load_metadata(filename) {
+    let obj = null;
+
+    try {
+        const response = await fetch(filename);
+        if (!response.ok) {
+            console.error(`Error opening file: ${filename}, HTTP status: ${response.status}`);
+            return tokens;
+        }
+        const text = await response.text();
+        obj = JSON.parse(text.replace(/'/g, "\""));
+        for (const key in obj) {
+            if (obj.hasOwnProperty(key)) {
+                const value = obj[key];
+                if (typeof value === 'string' && !isNaN(parseFloat(value)) && isFinite(Number(value))) {
+                    obj[key] = Number(value);
+                }
+            }
+        }
+    } catch (error) {
+        console.error(`Error opening or reading file: ${filename}`, error);
+    }
+
+    return obj;
+}
+
+// Function to load tokens from file and decode Base64 token values
+async function load_tokens(filename) {
+    let tokens = {};
+
+    try {
+        const response = await fetch(filename);
+        if (!response.ok) {
+            console.error(`Error opening file: ${filename}, HTTP status: ${response.status}`);
+            return tokens;
+        }
+        const text = await response.text();
+        const lines = text.split('\n');
+
+        for (const line of lines) {
+            const parts = line.split(' '); // Assuming space-separated
+            if (parts.length === 2) {
+                const encodedToken = parts[0];
+                const id = parseInt(parts[1]);
+                if (!isNaN(id)) {
+                    try {
+                        const binaryString = atob(encodedToken);
+                        const bytes = new Uint8Array(binaryString.length);
+                        for (let i = 0; i < binaryString.length; i++) {
+                            bytes[i] = binaryString.charCodeAt(i);
+                        }
+                        const decoder = new TextDecoder('utf-8');
+                        const unicodeString = decoder.decode(bytes);
+                        tokens[id] = unicodeString;
+                    } catch {
+                    }
+                }
+            }
+        }
+    } catch (error) {
+        console.error(`Error opening or reading file: ${filename}`, error);
+    }
+
+    return tokens;
+}
+
+    </script>
+
+    <script type="text/javascript">
+
+        async function onJFKBtnFn(btn)
+        {
+            if (window.runInference) {
+                if (!window.jfkAudio) {
+                    logLine("Downloading audio file...");
+                    window.jfkAudio = await read_16bit_raw_audio("jfk.raw"); // Path adjusted for JS - assuming in same directory or accessible via path
+                    logLine(": done!", true, 4);
+                }
+                await window.runInference(window.jfkAudio);
+            }
+        }
+
+    </script>
+
+<script type='text/javascript'>
+
+//--------------------------------------------------------------------------------------
+// The code in this <script> element was extracted from: https://whisper.ggerganov.com/
+//--------------------------------------------------------------------------------------
+
+            function setAudio(audio) {
+                if (window.runInference && audio)
+                    window.runInference(audio);
+            }
+            function printTextarea(x) {
+                console.log(x);
+            }
+
+            // web audio context
+            var context = null;
+
+            // audio data
+            var audio = null;
+
+            //
+            // audio file
+            //
+
+            const kSampleRate = 16000;
+            const kMaxAudio_s = 30;
+
+            window.AudioContext = window.AudioContext || window.webkitAudioContext;
+            window.OfflineAudioContext = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+
+            function loadAudio(event) {
+                if (!context) {
+                    context = new AudioContext({
+                        sampleRate: kSampleRate,
+                        channelCount: 1,
+                        echoCancellation: false,
+                        autoGainControl:  true,
+                        noiseSuppression: true,
+                    });
+                }
+
+                var file = event.target.files[0] || null;
+                if (file == null) {
+                    return;
+                }
+
+                var reader = new FileReader();
+                reader.onload = function(event) {
+                    var buf = new Uint8Array(reader.result);
+
+                    context.decodeAudioData(buf.buffer, function(audioBuffer) {
+                        var offlineContext = new OfflineAudioContext(audioBuffer.numberOfChannels, audioBuffer.length, audioBuffer.sampleRate);
+                        var source = offlineContext.createBufferSource();
+                        source.buffer = audioBuffer;
+                        source.connect(offlineContext.destination);
+                        source.start(0);
+
+                        offlineContext.startRendering().then(function(renderedBuffer) {
+                            audio = renderedBuffer.getChannelData(0);
+
+                            // truncate to first 30 seconds
+                            if (audio.length > kMaxAudio_s*kSampleRate) {
+                                audio = audio.slice(0, kMaxAudio_s*kSampleRate);
+                                printTextarea('js: truncated audio to first ' + kMaxAudio_s + ' seconds');
+                            }
+
+                            setAudio(audio);
+                        });
+                    }, function(e) {
+                        printTextarea('js: error decoding audio: ' + e);
+                        audio = null;
+                        setAudio(audio);
+                    });
+                }
+                reader.readAsArrayBuffer(file);
+            }
+
+            //
+            // microphone
+            //
+
+            var mediaRecorder = null;
+            var doRecording = false;
+            var startTime = 0;
+            var stream = null;
+
+            function startRecording() {
+
+                var intervalFn = function() {
+                    if (Date.now() - startTime > 30 * 1000) {
+                        doRecording = false;
+                    }
+                    var l;
+                    if (!doRecording) {
+                        mediaRecorder.stop();
+                        stream.getTracks().forEach(function(track) {
+                            track.stop();
+                        });
+                        l = "Record from the Microphone";
+                        intervalFn = function() {};
+                    }
+                    else {
+                        const s = Math.floor((Date.now() - startTime) / 1000);
+                        l = `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')} (Click to Stop, MAX 30s)`;
+                    }
+                    document.getElementById('start').innerHTML = l;
+                };
+
+                if (doRecording) {
+                    doRecording = false;
+                    intervalFn();
+                    return;
+                }
+
+                if (!context) {
+                    context = new AudioContext({
+                        sampleRate: kSampleRate,
+                        channelCount: 1,
+                        echoCancellation: false,
+                        autoGainControl:  true,
+                        noiseSuppression: true,
+                    });
+                }
+
+                doRecording = true;
+                startTime = Date.now();
+
+                var chunks = [];
+                stream = null;
+
+                intervalFn();
+
+                navigator.mediaDevices.getUserMedia({audio: true, video: false})
+                    .then(function(s) {
+                        stream = s;
+                        mediaRecorder = new MediaRecorder(stream);
+                        mediaRecorder.ondataavailable = function(e) {
+                            chunks.push(e.data);
+                        };
+                        mediaRecorder.onstop = function(e) {
+                            var blob = new Blob(chunks, { 'type' : 'audio/ogg; codecs=opus' });
+                            chunks = [];
+
+                            var reader = new FileReader();
+                            reader.onload = function(event) {
+                                var buf = new Uint8Array(reader.result);
+
+                                context.decodeAudioData(buf.buffer, function(audioBuffer) {
+                                    var offlineContext = new OfflineAudioContext(audioBuffer.numberOfChannels, audioBuffer.length, audioBuffer.sampleRate);
+                                    var source = offlineContext.createBufferSource();
+                                    source.buffer = audioBuffer;
+                                    source.connect(offlineContext.destination);
+                                    source.start(0);
+
+                                    offlineContext.startRendering().then(function(renderedBuffer) {
+                                        audio = renderedBuffer.getChannelData(0);
+                                        setAudio(audio);
+                                    });
+                                }, function(e) {
+                                    printTextarea('js: error decoding audio: ' + e);
+                                    audio = null;
+                                    setAudio(audio);
+                                });
+                            }
+
+                            reader.readAsArrayBuffer(blob);
+                        };
+                        mediaRecorder.start();
+                    })
+                    .catch(function(err) {
+                        printTextarea('js: error getting audio stream: ' + err);
+                    });
+
+                var interval = setInterval(function() {
+                    if (!doRecording) {
+                        clearInterval(interval);
+                    }
+                    intervalFn();
+                }, 1000);
+            }
+
+</script>
+
+    <script type="text/javascript">
+
+        function logLine(s, n, o) {
+
+            var log = document.getElementById("log");
+            var h = log.innerHTML;
+            if (o !== undefined)
+                h = h.substring(0, h.length - o);
+            h += s + (n === false ? '' : '\n');
+            log.innerHTML = h;
+            log.scrollTop = log.scrollHeight;
+        }
+
+        document.addEventListener("DOMContentLoaded", async function () {
+
+            try {
+
+                // initialize the model if not already initialized
+
+                if (window.modelInited != true) {
+
+                    window.modelInited = true;
+
+                    // load the WASM module; try with different versions, starting with the most performant one
+
+                    var loadModule = function (name) {
+
+                        return new Promise((resolve, reject) => {
+
+                            var script = document.createElement('script');
+
+                            script.setAttribute('src', name);
+
+                            script.onload = function () {
+
+                                try {
+
+                                    var obj = {
+                                        print: function (e) {
+                                            logLine(e);
+                                        },
+                                        onRuntimeInitialized: function (e) {
+                                            window.moduleName = name;
+                                            if (window.models === undefined) window.models = [];
+                                            window.models.push(new Model(this));
+                                            resolve(true);
+                                        }
+                                    };
+
+                                    switch (name) {
+                                        case 'onnxstream-wasm.js':
+                                            new OnnxStreamModule(obj);
+                                            break;
+                                        case 'onnxstream-wasm-simd.js':
+                                            new OnnxStreamModuleSimd(obj);
+                                            break;
+                                        case 'onnxstream-wasm-threaded-simd.js':
+                                            new OnnxStreamModuleThreadedSimd(obj);
+                                            break;
+                                        default:
+                                            reject();
+                                    }
+                                }
+                                catch (e) {
+                                    resolve(false);
+                                }
+                            };
+
+                            document.body.appendChild(script);
+                        });
+                    };
+
+                    if ((!await loadModule('onnxstream-wasm-threaded-simd.js') &&
+                        !await loadModule('onnxstream-wasm-simd.js') &&
+                        !await loadModule('onnxstream-wasm.js')) ||
+                        !await loadModule(window.moduleName)) {
+
+                        throw new Error('Unable to instantiate module');
+                    }
+
+                    logLine("WASM Module => Multithreading: " +
+                        (window.moduleName.includes("threaded") ? "YES" : "NO") + ". SIMD: " +
+                        (window.moduleName.includes("simd") ? "YES" : "NO") + ".");
+
+                    // now we can initialize the Model object and download the weights
+
+                    await initModel(0);
+                    await initModel(1);
+                }
+
+                init_mel();
+
+                const tokens = await load_tokens(window.modelName + "/" + window.modelName + "-tokens.txt");
+                const metadata = await load_metadata(window.modelName + "/" + window.modelName + "-metadata.txt");
+
+                logLine("Ready.");
+
+                let executing = false;
+
+                const setExecuting = function (value) {
+                    executing = value;
+                    const ctrls = ["testJfk", "start", "testFile"];
+                    if (metadata.is_multilingual === 1)
+                        ctrls.push("language");
+                    for (const e of ctrls)
+                        document.getElementById(e).disabled = value;
+                };
+
+                setExecuting(false);
+
+                const uiTimeoutStart = 10, uiTimeout = 1;
+
+                window.runInference = async function (audio) {
+
+                    if (executing) return;
+                    setExecuting(true);
+
+                    let sot_sequence = (typeof metadata.sot_sequence === 'string' ? metadata.sot_sequence.split(',').map(Number) : [metadata.sot_sequence]).concat([metadata.no_timestamps]);
+                    if (metadata.is_multilingual === 1) {
+
+                        let all_language_tokens = metadata.all_language_tokens.split(',').map(Number);
+                        let all_language_codes = metadata.all_language_codes.split(',');
+
+                        let lang_token = all_language_tokens[all_language_codes.indexOf(document.getElementById('language').value)];
+                        if (lang_token === undefined) {
+                            throw new Error("Language code not found.");
+                        }
+
+                        sot_sequence[1] = lang_token;
+                    }
+
+                    logLine("Creating spectrogram and running encoder...");
+
+                    let run = async function () {
+
+                        let res = create_mel(audio);
+
+                        res = await runModel(0, { mel: new Float32Array(res).buffer });
+
+                        logLine(": done!", true, 4);
+
+                        let clone = function (t) {
+                            return { shape: t.shape.slice(), data: t.data.slice() };
+                        };
+
+                        let logit = null;
+                        let cross_k = clone(res.cross_k);
+                        let cross_v = clone(res.cross_v);
+                        let self_k_cache = null;
+                        let self_v_cache = null;
+
+                        let i = 0;
+
+                        run = async function () {
+
+                            let tokens_in = !i ? sot_sequence : [logit];
+                            res = await runModel(1, { tokens: tokens_in, offset: i, cross_k: cross_k, cross_v: cross_v,
+                                self_k_cache: self_k_cache, self_v_cache: self_v_cache,
+                                self_cache_shape: [metadata.n_text_layer, 1, metadata.n_text_ctx, metadata.n_text_state]});
+
+                            self_k_cache = clone(res.self_k_cache);
+                            self_v_cache = clone(res.self_v_cache);
+                            if (res.logits.shape.length != 3 || res.logits.shape[0] != 1) {
+                                throw new Error("Shape of logits is invalid.");
+                            }
+                            let logits = res.logits.data.slice(res.logits.shape[2] * (res.logits.shape[1] - 1));
+
+                            if (!i) {
+                                logits[metadata.eot] = -Infinity;
+                                logits[metadata.blank_id] = -Infinity;
+                            }
+                            logits[metadata.no_timestamps] = -Infinity;
+                            logits[metadata.sot] = -Infinity;
+                            logits[metadata.no_speech] = -Infinity;
+                            logits[metadata.translate] = -Infinity;
+
+                            let max_value = -Infinity;
+                            for (let j = 0; j < logits.length; j++) {
+                                if (logits[j] > max_value) {
+                                    max_value = logits[j];
+                                    logit = j;
+                                }
+                            }
+
+                            if (logit === metadata.eot) {
+                                logLine("");
+                                setExecuting(false);
+                                return;
+                            }
+
+                            let token = tokens[logit];
+                            if (!i) logLine("Running decoder: ", false);
+                            logLine(token === undefined ? "<>" : token, false);
+
+                            i += tokens_in.length;
+                            setTimeout(run, uiTimeout);
+                        };
+
+                        setTimeout(run, uiTimeout);
+                    };
+
+                    setTimeout(run, uiTimeoutStart);
+                };
+            }
+            catch (e) {
+
+                alert(e);
+            }
+        });
+
+        async function downloadFile(index, name, type) {
+
+            //let url = "https://huggingface.co/vitoplantamura/whisper-onnxstream/resolve/main/"; // doesn't work: HF is rate limited! :-(
+            let url = "";
+            url += window.modelName + "/" + window.modelName + (!index ? "-encoder_fp32/" : "-decoder_fp32/") + name;
+
+            var r = await fetch(url);
+
+            if (!r.ok)
+                throw new Error("Unable to download " + name);
+
+            if (type == "text")
+                return await r.text();
+            else if (type == "buffer")
+                return await r.arrayBuffer();
+            else
+                throw new Error("downloadFile: invalid type.");
+        }
+
+        function showProgress(index, pos, total) {
+
+            var chrs = 75;
+
+            var log = document.getElementById("log");
+
+            if (pos == null) {
+
+                logLine("Downloading " + (!index ? "encoder" : "decoder") + ": [" + ".".repeat(chrs) + "]");
+            }
+            else if (pos == total - 1) {
+
+                var html = log.innerHTML;
+                log.innerHTML = html.substring(0, html.length - chrs - 3) + "done!\n";
+            }
+            else {
+
+                var n = parseInt((pos / total) * chrs);
+
+                var html = log.innerHTML;
+                var i = html.length - chrs - 2 + n;
+                log.innerHTML = html.substring(0, i) + "#" + html.substring(i + 1);
+            }
+        }
+
+        async function initModel(index) {
+
+            // enable some features during inference
+
+            window.models[index].set_option("support_dynamic_shapes", true); // allow dynamic shapes for the outputs
+            window.models[index].set_option("use_ops_cache", true); // cache the XNNPACK convolution operator
+            window.models[index].set_option("use_next_op_cache", true); // parse the model.txt file only once
+
+            // download the model.txt file
+
+            var model_txt = await downloadFile(index, "model.txt", "text");
+
+            // load the model
+
+            window.models[index].read_string(model_txt);
+
+            // get the filenames of the weights, download them and add them to the model
+
+            showProgress(index);
+
+            let weights = window.models[index].get_weights_names()
+                .split('|')
+                .map((s) => { let p = s.split(':'); return { type: p[0], name: p[1]}; });
+
+            let currentIndex1 = 0;
+            let currentIndex2 = 0;
+            const worker = async () => {
+                while (true) {
+                    const i = currentIndex1++;
+                    if (i >= weights.length) {
+                        break;
+                    }
+
+                    let w = weights[i];
+                    w.buf = await downloadFile(index, w.name, "buffer");
+
+                    while (currentIndex2 < weights.length) {
+                        const t = weights[currentIndex2];
+                        if (t.buf === undefined) {
+                            break;
+                        }
+                        window.models[index].add_weights_file(t.type, t.name, t.buf);
+                        t.buf = null;
+                        showProgress(index, currentIndex2++, weights.length);
+                    }
+                };
+            };
+
+            const workerPromises = [];
+            for (let i = 0; i < 5; i++) {
+                workerPromises.push(worker());
+            }
+
+            await Promise.allSettled(workerPromises);
+        }
+
+        async function runModel(index, input) {
+
+            // add the input tensors to the model
+
+            models[index].clear_tensors();
+
+            if (!index)
+            {
+                models[index].add_tensor('mel', [1, 80, input.mel.byteLength / 4 / 80], input.mel);
+            }
+            else
+            {
+                let shape = input.self_cache_shape;
+                let count = shape.reduce((a, c) => a * c, 1);
+                models[index].add_tensor('tokens', [1, input.tokens.length], input.tokens.map(n => BigInt(n)), "int64");
+                models[index].add_tensor('offset', [1], [BigInt(input.offset)], "int64");
+                models[index].add_tensor('in_5F_n_5F_layer_5F_self_5F_k_5F_cache', shape, input.self_k_cache ? input.self_k_cache.data.buffer : new Float32Array(count).buffer);
+                models[index].add_tensor('in_5F_n_5F_layer_5F_self_5F_v_5F_cache', shape, input.self_v_cache ? input.self_v_cache.data.buffer : new Float32Array(count).buffer);
+                models[index].add_tensor('n_5F_layer_5F_cross_5F_k', input.cross_k.shape, input.cross_k.data.buffer);
+                models[index].add_tensor('n_5F_layer_5F_cross_5F_v', input.cross_v.shape, input.cross_v.data.buffer);
+            }
+
+            // run the model
+
+            models[index].run();
+
+            // get the output tensors
+
+            if (!index)
+            {
+                var cross_k = models[index].get_tensor('n_5F_layer_5F_cross_5F_k');
+                var cross_v = models[index].get_tensor('n_5F_layer_5F_cross_5F_v');
+
+                return { cross_k, cross_v };
+            }
+            else
+            {
+                var self_k_cache = models[index].get_tensor('out_5F_n_5F_layer_5F_self_5F_k_5F_cache');
+                var self_v_cache = models[index].get_tensor('out_5F_n_5F_layer_5F_self_5F_v_5F_cache');
+                var logits = models[index].get_tensor('logits');
+
+                return { self_k_cache, self_v_cache, logits };
+            }
+        }
+
+    </script>
+
+</body>
+
+</html>
