@@ -108,6 +108,8 @@
 
     <script type="text/javascript">
 
+        var downloadUrlWithSlash = "https://huggingface.co/vitoplantamura/YOLOv8-onnxstream/resolve/main/";
+
         function logLine(s) {
 
             var log = document.getElementById("log");
@@ -356,7 +358,7 @@
 
         async function downloadFile(name, type) {
 
-            var r = await fetch("yolov8n_fp32/" + name);
+            var r = await fetch(!downloadUrlWithSlash.length ? ("yolov8n_fp32/" + name) : (downloadUrlWithSlash + name));
 
             if (!r.ok)
                 throw new Error("Unable to download " + name);
@@ -419,15 +421,121 @@
 
             // get the filenames of the weights, download them and add them to the model
 
-            showProgress();
-            var weights = window.model.get_weights_names().split('|');
-            for (var i = 0; i < weights.length; i++) {
-                var parts = weights[i].split(':');
-                var type = parts[0];
-                var name = parts[1];
-                var buf = await downloadFile(name, "buffer");
-                window.model.add_weights_file(type, name, buf);
-                showProgress(i, weights.length);
+            if (!downloadUrlWithSlash.length) {
+
+                showProgress();
+                var weights = window.model.get_weights_names().split('|');
+                for (var i = 0; i < weights.length; i++) {
+                    var parts = weights[i].split(':');
+                    var type = parts[0];
+                    var name = parts[1];
+                    var buf = await downloadFile(name, "buffer");
+                    window.model.add_weights_file(type, name, buf);
+                    showProgress(i, weights.length);
+                }
+
+            } else {
+
+                const weights = window.model.get_weights_names().split('|')
+                    .map(s => { let a = s.split(':'); return { type: a[0], name: a[1] }; });
+
+                if (window.location.href.indexOf("logtarcommand") >= 0) {
+                    console.log("tar --create --file=weights.tar " + weights.map(o => o.name).join(" "));
+                }
+
+                const name2ids = new Map();
+                for (let i=0; i<weights.length; i++) {
+                    const w = weights[i];
+                    if (!name2ids.has(w.name)) {
+                        name2ids.set(w.name, [i]);
+                    }
+                    else {
+                        name2ids.get(w.name).push(i);
+                    }
+                }
+
+                const url = downloadUrlWithSlash + 'yolov8n_fp32.weights.tar';
+                const response = await fetch(url);
+                if (!response.ok || !response.body) {
+                    throw new Error(`Unable to fetch: ${url}`);
+                }
+
+                const contentLength = response.headers.get('Content-Length');
+                const totalSize = contentLength ? parseInt(contentLength, 10) : 0;
+                if (totalSize <= 0) {
+                    throw new Error("Total file size unknown!");
+                }
+
+                const reader = response.body.getReader();
+                let bytesProcessed = 0;
+
+                showProgress();
+                let progressCurrent = 0;
+                let buffer = new Uint8Array(0);
+                const textDecoder = new TextDecoder('utf-8');
+                let id = 0;
+                function processBinaryChunk(chunk, currentBytes, totalBytes) {
+
+                    const merged = new Uint8Array(buffer.length + chunk.length);
+                    merged.set(buffer);
+                    merged.set(chunk, buffer.length);
+                    buffer = merged;
+
+                    while (buffer.length >= 512) {
+                        const sizeBytes = buffer.slice(124, 136);
+                        const octalString = textDecoder.decode(sizeBytes);
+                        const fileSize = parseInt(octalString, 8);
+                        if (isNaN(fileSize)) {
+                            break;
+                        }
+
+                        const fileSizePadded = (fileSize % 512) ? fileSize + (512 - (fileSize % 512)) : fileSize;
+                        if (buffer.length < 512 + fileSizePadded) {
+                            break;
+                        }
+                        else {
+
+                            if (id >= weights.length) {
+                                throw new Error("wrong number of files in tar file");
+                            }
+
+                            let file = buffer.slice(512, 512 + fileSize);
+
+                            const w = weights[id];
+                            const ids = name2ids.get(w.name);
+                            if (fileSize == 0) {
+                                if (ids.length < 2 || w.file == null) {
+                                    throw new Error("file size in tar header is zero but file is not a duplicate");
+                                }
+                                file = w.file;
+                            }
+                            else if (ids.length >= 2) {
+                                for (const el of ids) {
+                                    weights[el].file = file;
+                                }
+                            }
+
+                            window.model.add_weights_file(w.type, w.name, file.buffer);
+
+                            buffer = buffer.slice(512 + fileSizePadded);
+                            id++;
+                        }
+                    }
+
+                    const progressNew = (currentBytes / totalBytes) * 100;
+                    while (progressCurrent < progressNew) {
+                        showProgress(progressCurrent++, 100);
+                    }
+                }
+                
+                while (true) {
+                    const ret = await reader.read();
+                    if (ret.done) {
+                        break;
+                    }
+                    bytesProcessed += ret.value.byteLength;
+                    processBinaryChunk(ret.value, bytesProcessed, totalSize);
+                }
             }
         }
 
