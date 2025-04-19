@@ -103,8 +103,8 @@
                 <option value="tiny">tiny (38MB+111MB)</option>
                 <option value="base.en">base.en (96MB+192MB)</option>
                 <option value="base">base (96MB+192MB)</option>
-                <!-- <option value="small.en">small.en (407MB+545MB)</option> -->
-                <!-- <option value="small">small (407MB+545MB)</option> -->
+                <option value="small.en">small.en (407MB+545MB)</option>
+                <option value="small">small (407MB+545MB)</option>
             </select>
         </div>
 
@@ -869,6 +869,8 @@ async function load_tokens(filename) {
 
     <script type="text/javascript">
 
+        var downloadUrlWithSlash = "https://huggingface.co/vitoplantamura/whisper-onnxstream/resolve/main/";
+
         function logLine(s, n, o) {
 
             var log = document.getElementById("log");
@@ -959,8 +961,8 @@ async function load_tokens(filename) {
 
                 init_mel();
 
-                const tokens = await load_tokens(window.modelName + "/" + window.modelName + "-tokens.txt");
-                const metadata = await load_metadata(window.modelName + "/" + window.modelName + "-metadata.txt");
+                const tokens = await load_tokens(downloadUrlWithSlash + window.modelName + "/" + window.modelName + "-tokens.txt");
+                const metadata = await load_metadata(downloadUrlWithSlash + window.modelName + "/" + window.modelName + "-metadata.txt");
 
                 logLine("Ready.");
 
@@ -1079,9 +1081,7 @@ async function load_tokens(filename) {
 
         async function downloadFile(index, name, type) {
 
-            //let url = "https://huggingface.co/vitoplantamura/whisper-onnxstream/resolve/main/"; // doesn't work: HF is rate limited! :-(
-            let url = "";
-            url += window.modelName + "/" + window.modelName + (!index ? "-encoder_fp32/" : "-decoder_fp32/") + name;
+            const url = downloadUrlWithSlash + window.modelName + "/" + window.modelName + (!index ? "-encoder_fp32/" : "-decoder_fp32/") + name;
 
             var r = await fetch(url);
 
@@ -1139,42 +1139,148 @@ async function load_tokens(filename) {
 
             // get the filenames of the weights, download them and add them to the model
 
-            showProgress(index);
+            if (!downloadUrlWithSlash.length) {
 
-            let weights = window.models[index].get_weights_names()
-                .split('|')
-                .map((s) => { let p = s.split(':'); return { type: p[0], name: p[1]}; });
+                showProgress(index);
 
-            let currentIndex1 = 0;
-            let currentIndex2 = 0;
-            const worker = async () => {
-                while (true) {
-                    const i = currentIndex1++;
-                    if (i >= weights.length) {
-                        break;
-                    }
+                let weights = window.models[index].get_weights_names()
+                    .split('|')
+                    .map((s) => { let p = s.split(':'); return { type: p[0], name: p[1]}; });
 
-                    let w = weights[i];
-                    w.buf = await downloadFile(index, w.name, "buffer");
-
-                    while (currentIndex2 < weights.length) {
-                        const t = weights[currentIndex2];
-                        if (t.buf === undefined) {
+                let currentIndex1 = 0;
+                let currentIndex2 = 0;
+                const worker = async () => {
+                    while (true) {
+                        const i = currentIndex1++;
+                        if (i >= weights.length) {
                             break;
                         }
-                        window.models[index].add_weights_file(t.type, t.name, t.buf);
-                        t.buf = null;
-                        showProgress(index, currentIndex2++, weights.length);
-                    }
+
+                        let w = weights[i];
+                        w.buf = await downloadFile(index, w.name, "buffer");
+
+                        while (currentIndex2 < weights.length) {
+                            const t = weights[currentIndex2];
+                            if (t.buf === undefined) {
+                                break;
+                            }
+                            window.models[index].add_weights_file(t.type, t.name, t.buf);
+                            t.buf = null;
+                            showProgress(index, currentIndex2++, weights.length);
+                        }
+                    };
                 };
-            };
 
-            const workerPromises = [];
-            for (let i = 0; i < 5; i++) {
-                workerPromises.push(worker());
+                const workerPromises = [];
+                for (let i = 0; i < 5; i++) {
+                    workerPromises.push(worker());
+                }
+
+                await Promise.allSettled(workerPromises);
+
+            } else {
+
+                const weights = window.models[index].get_weights_names().split('|')
+                    .map(s => { let a = s.split(':'); return { type: a[0], name: a[1] }; });
+
+                if (window.location.href.indexOf("logtarcommand") >= 0) {
+                    console.log("tar --create --file=../" + window.modelName + (!index ? "-encoder_fp32" : "-decoder_fp32") + ".weights.tar" + " " + weights.map(o => o.name).join(" "));
+                }
+
+                const name2ids = new Map();
+                for (let i=0; i<weights.length; i++) {
+                    const w = weights[i];
+                    if (!name2ids.has(w.name)) {
+                        name2ids.set(w.name, [i]);
+                    }
+                    else {
+                        name2ids.get(w.name).push(i);
+                    }
+                }
+
+                const url = downloadUrlWithSlash + window.modelName + "/" + window.modelName + (!index ? "-encoder_fp32" : "-decoder_fp32") + ".weights.tar";
+                const response = await fetch(url);
+                if (!response.ok || !response.body) {
+                    throw new Error(`Unable to fetch: ${url}`);
+                }
+
+                const contentLength = response.headers.get('Content-Length');
+                const totalSize = contentLength ? parseInt(contentLength, 10) : 0;
+                if (totalSize <= 0) {
+                    throw new Error("Total file size unknown!");
+                }
+
+                const reader = response.body.getReader();
+                let bytesProcessed = 0;
+
+                showProgress(index);
+                let progressCurrent = 0;
+                let buffer = new Uint8Array(0);
+                const textDecoder = new TextDecoder('utf-8');
+                let id = 0;
+                function processBinaryChunk(chunk, currentBytes, totalBytes) {
+
+                    const merged = new Uint8Array(buffer.length + chunk.length);
+                    merged.set(buffer);
+                    merged.set(chunk, buffer.length);
+                    buffer = merged;
+
+                    while (buffer.length >= 512) {
+                        const sizeBytes = buffer.slice(124, 136);
+                        const octalString = textDecoder.decode(sizeBytes);
+                        const fileSize = parseInt(octalString, 8);
+                        if (isNaN(fileSize)) {
+                            break;
+                        }
+
+                        const fileSizePadded = (fileSize % 512) ? fileSize + (512 - (fileSize % 512)) : fileSize;
+                        if (buffer.length < 512 + fileSizePadded) {
+                            break;
+                        }
+                        else {
+
+                            if (id >= weights.length) {
+                                throw new Error("wrong number of files in tar file");
+                            }
+
+                            let file = buffer.slice(512, 512 + fileSize);
+
+                            const w = weights[id];
+                            const ids = name2ids.get(w.name);
+                            if (fileSize == 0) {
+                                if (ids.length < 2 || w.file == null) {
+                                    throw new Error("file size in tar header is zero but file is not a duplicate");
+                                }
+                                file = w.file;
+                            }
+                            else if (ids.length >= 2) {
+                                for (const el of ids) {
+                                    weights[el].file = file;
+                                }
+                            }
+
+                            window.models[index].add_weights_file(w.type, w.name, file.buffer);
+
+                            buffer = buffer.slice(512 + fileSizePadded);
+                            id++;
+                        }
+                    }
+
+                    const progressNew = (currentBytes / totalBytes) * 100;
+                    while (progressCurrent < progressNew) {
+                        showProgress(index, progressCurrent++, 100);
+                    }
+                }
+                
+                while (true) {
+                    const ret = await reader.read();
+                    if (ret.done) {
+                        break;
+                    }
+                    bytesProcessed += ret.value.byteLength;
+                    processBinaryChunk(ret.value, bytesProcessed, totalSize);
+                }
             }
-
-            await Promise.allSettled(workerPromises);
         }
 
         async function runModel(index, input) {
@@ -1183,20 +1289,22 @@ async function load_tokens(filename) {
 
             models[index].clear_tensors();
 
+            const mangle = function (n) { return n.replace(/_/g, "_5F_"); };
+
             if (!index)
             {
-                models[index].add_tensor('mel', [1, 80, input.mel.byteLength / 4 / 80], input.mel);
+                models[index].add_tensor(mangle('mel'), [1, 80, input.mel.byteLength / 4 / 80], input.mel);
             }
             else
             {
                 let shape = input.self_cache_shape;
                 let count = shape.reduce((a, c) => a * c, 1);
-                models[index].add_tensor('tokens', [1, input.tokens.length], input.tokens.map(n => BigInt(n)), "int64");
-                models[index].add_tensor('offset', [1], [BigInt(input.offset)], "int64");
-                models[index].add_tensor('in_5F_n_5F_layer_5F_self_5F_k_5F_cache', shape, input.self_k_cache ? input.self_k_cache.data.buffer : new Float32Array(count).buffer);
-                models[index].add_tensor('in_5F_n_5F_layer_5F_self_5F_v_5F_cache', shape, input.self_v_cache ? input.self_v_cache.data.buffer : new Float32Array(count).buffer);
-                models[index].add_tensor('n_5F_layer_5F_cross_5F_k', input.cross_k.shape, input.cross_k.data.buffer);
-                models[index].add_tensor('n_5F_layer_5F_cross_5F_v', input.cross_v.shape, input.cross_v.data.buffer);
+                models[index].add_tensor(mangle('tokens'), [1, input.tokens.length], input.tokens.map(n => BigInt(n)), "int64");
+                models[index].add_tensor(mangle('offset'), [1], [BigInt(input.offset)], "int64");
+                models[index].add_tensor(mangle('in_n_layer_self_k_cache'), shape, input.self_k_cache ? input.self_k_cache.data.buffer : new Float32Array(count).buffer);
+                models[index].add_tensor(mangle('in_n_layer_self_v_cache'), shape, input.self_v_cache ? input.self_v_cache.data.buffer : new Float32Array(count).buffer);
+                models[index].add_tensor(mangle('n_layer_cross_k'), input.cross_k.shape, input.cross_k.data.buffer);
+                models[index].add_tensor(mangle('n_layer_cross_v'), input.cross_v.shape, input.cross_v.data.buffer);
             }
 
             // run the model
@@ -1207,16 +1315,16 @@ async function load_tokens(filename) {
 
             if (!index)
             {
-                var cross_k = models[index].get_tensor('n_5F_layer_5F_cross_5F_k');
-                var cross_v = models[index].get_tensor('n_5F_layer_5F_cross_5F_v');
+                var cross_k = models[index].get_tensor(mangle('n_layer_cross_k'));
+                var cross_v = models[index].get_tensor(mangle('n_layer_cross_v'));
 
                 return { cross_k, cross_v };
             }
             else
             {
-                var self_k_cache = models[index].get_tensor('out_5F_n_5F_layer_5F_self_5F_k_5F_cache');
-                var self_v_cache = models[index].get_tensor('out_5F_n_5F_layer_5F_self_5F_v_5F_cache');
-                var logits = models[index].get_tensor('logits');
+                var self_k_cache = models[index].get_tensor(mangle('out_n_layer_self_k_cache'));
+                var self_v_cache = models[index].get_tensor(mangle('out_n_layer_self_v_cache'));
+                var logits = models[index].get_tensor(mangle('logits'));
 
                 return { self_k_cache, self_v_cache, logits };
             }
