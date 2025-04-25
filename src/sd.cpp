@@ -81,7 +81,7 @@ struct MainArgs
     bool m_tiled = true;
     bool m_rpi_lowmem = false;
     bool m_ram = false;
-    char m_download = 'a';
+    char m_download = 'n';
     bool m_decode_im = false;
     bool m_preview_im = false;
     bool m_preview_8x = false;
@@ -2733,8 +2733,8 @@ int main(int argc, char** argv)
     }
 
     if (!g_main_args.m_download) {
-        printf("The model \"%s\" needs to be downloaded, "
-               "but auto-downloading is disabled from command line.\n"
+        printf("The model \"%s\" was not downloaded, "
+               "run once with --download option or specify correct --models-path.\n"
                "Exiting.\n",
                g_main_args.m_path_with_slash.c_str());
         return -1;
