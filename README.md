@@ -365,6 +365,7 @@ These are the command line options of the Stable Diffusion example:
 --preview-steps-x8  Magnify previews to full resolution.
 --decode-steps      Decode and save every diffusion step in full resolution.
 --embed-parameters  Store parameters of generation (e. g. model path) in image comments.
+--sampler           Select sampling method.
 ```
 
 Options you're probably interested in: `--xl`, `--turbo`, `--prompt`, `--steps`, `--rpi`.
