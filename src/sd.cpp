@@ -1330,9 +1330,13 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
             double t1 = ncnn::get_current_time();
             ncnn::Mat denoised = CFGDenoiser_CompVisDenoiser(net, log_sigmas, x_mat, sigma[i], c, uc, sdxl_params, model);
 
+#define ORIGINAL_SAMPLER_ALGORITHMS 1
             switch (g_main_args.m_sampler) {
             case EULER: // Euler
             {
+#if       !ORIGINAL_SAMPLER_ALGORITHMS
+                const float sigma_mul = sigma[i + 1] / sigma[i];
+#endif // !ORIGINAL_SAMPLER_ALGORITHMS
                 for (int c = 0; c < 4; c++)
                 {
                     float* x_ptr = x_mat.channel(c);
@@ -1340,7 +1344,12 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                     float* d_ptr = denoised.channel(c);
                     for (; x_ptr < x_ptr_end; x_ptr++)
                     {
+#if       ORIGINAL_SAMPLER_ALGORITHMS
                         *x_ptr = *x_ptr + ((*x_ptr - *d_ptr) / sigma[i]) * (sigma[i + 1] - sigma[i]);
+#else  // ORIGINAL_SAMPLER_ALGORITHMS
+                        // simplified
+                        *x_ptr = (*x_ptr - *d_ptr) * sigma_mul + *d_ptr;
+#endif // ORIGINAL_SAMPLER_ALGORITHMS
                         d_ptr++;
                     }
                 }
@@ -1348,11 +1357,24 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
             } // euler_a
 
             default: { // Euler Ancestral
+#if       ORIGINAL_SAMPLER_ALGORITHMS
                 const float sigma_up = std::min(sigma[i + 1], std::sqrt(sigma[i + 1] * sigma[i + 1] * (sigma[i] * sigma[i] - sigma[i + 1] * sigma[i + 1]) / (sigma[i] * sigma[i])));
                 const float sigma_down = std::sqrt(sigma[i + 1] * sigma[i + 1] - sigma_up * sigma_up);
+#else  // ORIGINAL_SAMPLER_ALGORITHMS
+                // double precision, simplified
+                const double double_sigma_up = std::min((double)sigma[i + 1], 
+                    std::abs(sigma[i + 1] * 
+                             std::sqrt(((double)sigma[i] * sigma[i] - (double)sigma[i + 1] * sigma[i + 1])) / 
+                             sigma[i]));
+                const float sigma_down = std::sqrt((double)sigma[i + 1] * sigma[i + 1] - double_sigma_up * double_sigma_up);
+                const float sigma_up = double_sigma_up;
+#endif // ORIGINAL_SAMPLER_ALGORITHMS
                 std::srand(seed++);
                 ncnn::Mat randn = randn_4_w_h(rand() % 1000, g_main_args.m_latw, g_main_args.m_lath);
 
+#if       !ORIGINAL_SAMPLER_ALGORITHMS
+                const float sigma_mul = sigma_down / sigma[i];
+#endif // !ORIGINAL_SAMPLER_ALGORITHMS
                 for (int c = 0; c < 4; c++)
                 {
                     float* x_ptr = x_mat.channel(c);
@@ -1361,7 +1383,12 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                     float* r_ptr = randn.channel(c);
                     for (; x_ptr < x_ptr_end; x_ptr++)
                     {
+#if       ORIGINAL_SAMPLER_ALGORITHMS
                         *x_ptr = *x_ptr + ((*x_ptr - *d_ptr) / sigma[i]) * (sigma_down - sigma[i]) + *r_ptr * sigma_up;
+#else  // ORIGINAL_SAMPLER_ALGORITHMS
+                        // simplified
+                        *x_ptr = (*x_ptr - *d_ptr) * sigma_mul + *d_ptr + *r_ptr * sigma_up;
+#endif // ORIGINAL_SAMPLER_ALGORITHMS
                         d_ptr++;
                         r_ptr++;
                     }
