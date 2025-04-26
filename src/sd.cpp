@@ -1331,6 +1331,22 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
             ncnn::Mat denoised = CFGDenoiser_CompVisDenoiser(net, log_sigmas, x_mat, sigma[i], c, uc, sdxl_params, model);
 
             switch (g_main_args.m_sampler) {
+            case EULER: // Euler
+            {
+                for (int c = 0; c < 4; c++)
+                {
+                    float* x_ptr = x_mat.channel(c);
+                    const float* x_ptr_end = x_ptr + g_main_args.m_latw * g_main_args.m_lath;
+                    float* d_ptr = denoised.channel(c);
+                    for (; x_ptr < x_ptr_end; x_ptr++)
+                    {
+                        *x_ptr = *x_ptr + ((*x_ptr - *d_ptr) / sigma[i]) * (sigma[i + 1] - sigma[i]);
+                        d_ptr++;
+                    }
+                }
+                break;
+            } // euler_a
+
             default: { // Euler Ancestral
                 const float sigma_up = std::min(sigma[i + 1], std::sqrt(sigma[i + 1] * sigma[i + 1] * (sigma[i] * sigma[i] - sigma[i + 1] * sigma[i + 1]) / (sigma[i] * sigma[i])));
                 const float sigma_down = std::sqrt(sigma[i + 1] * sigma[i + 1] - sigma_up * sigma_up);
