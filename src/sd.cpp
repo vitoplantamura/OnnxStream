@@ -1308,7 +1308,8 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
         }
 #endif
 
-        for (int i = 0; i < static_cast<int>(sigma.size()) - 1; i++)
+        const int steps = static_cast<int>(sigma.size()) - 1;
+        for (int i = 0; i < steps; i++)
         {
             std::cout << "step:" << i << "\t\t";
             double t1 = ncnn::get_current_time();
@@ -1335,7 +1336,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                 }
             }
 
-            if(g_main_args.m_preview_im) {       // directly decode latent in low resolution
+            if(g_main_args.m_preview_im) {   // directly decode latent in low resolution
                 std::cout << "---> preview:\t\t";
                 double t1 = ncnn::get_current_time();
                 const std::string im_appendix = "_preview_" + std::to_string(i);
@@ -1347,8 +1348,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                 double t2 = ncnn::get_current_time();
                 SHOW_LONG_TIME_MS( t2 - t1 )
             }
-            if(g_main_args.m_decode_im                            // pass through decoder
-               && i < static_cast<int>(sigma.size()) - 2) {       // if step is not last
+            if(g_main_args.m_decode_im && i < steps - 1) {   // pass through decoder if step is not last
                 std::cout << "---> decode:\t\t";
                 double t1 = ncnn::get_current_time();
                 ncnn::Mat sample = ncnn::Mat(x_mat.w, x_mat.h, x_mat.c, x_mat.v.data());
