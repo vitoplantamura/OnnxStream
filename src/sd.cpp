@@ -62,6 +62,17 @@
 using namespace onnxstream;
 #endif
 
+enum sampler_type {
+    EULER_A,
+    EULER,
+    NUM_OF_SAMPLERS // always last
+};
+
+const std::string sampler_name[NUM_OF_SAMPLERS] = {
+    "euler_a",
+    "euler"
+};
+
 struct MainArgs
 {
     std::string m_path_with_slash = "./";
@@ -89,6 +100,9 @@ struct MainArgs
     std::string m_curl_parallel = "16";
     std::string m_res = "";
     std::string m_threads = "";
+
+    std::string m_sampler_name = sampler_name[EULER_A];
+    sampler_type m_sampler = EULER_A;
 
     // calculated:
     unsigned int m_latw = 512 / 8, m_lath = 512 / 8;
@@ -349,7 +363,8 @@ inline static void save_image(std::uint8_t* img, unsigned w, unsigned h, int alp
                                 + ", Model: \"" + g_main_args.m_path_safe + "\" "
                                                 + (g_main_args.m_turbo ? "(SDXL-Turbo)" :
                                                    g_main_args.m_xl ? "(SDXL)" : "(SD 1.5)")
-                                + ", Sampler: Euler Ancestral, Version: OnnxStream";
+                                + ", Sampler: " + g_main_args.m_sampler_name
+                                + ", Version: OnnxStream";
 
 #ifdef USE_LIBJPEGTURBO
     // extention is in filename and is jpeg
@@ -1314,8 +1329,6 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
             std::cout << "step:" << i << "\t\t";
             double t1 = ncnn::get_current_time();
             ncnn::Mat denoised = CFGDenoiser_CompVisDenoiser(net, log_sigmas, x_mat, sigma[i], c, uc, sdxl_params, model);
-            double t2 = ncnn::get_current_time();
-            SHOW_LONG_TIME_MS( t2 - t1 )
             float sigma_up = std::min(sigma[i + 1], std::sqrt(sigma[i + 1] * sigma[i + 1] * (sigma[i] * sigma[i] - sigma[i + 1] * sigma[i + 1]) / (sigma[i] * sigma[i])));
             float sigma_down = std::sqrt(sigma[i + 1] * sigma[i + 1] - sigma_up * sigma_up);
             std::srand(seed++);
@@ -1335,6 +1348,9 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                     r_ptr++;
                 }
             }
+
+            double t2 = ncnn::get_current_time();
+            SHOW_LONG_TIME_MS( t2 - t1 )
 
             if(g_main_args.m_preview_im) {   // directly decode latent in low resolution
                 std::cout << "---> preview:\t\t";
@@ -2365,6 +2381,10 @@ int main(int argc, char** argv)
         {
             str = &g_main_args.m_res;
         }
+        else if (arg == "--sampler")
+        {
+            str = &g_main_args.m_sampler_name;
+        }
         else
         {
             printf("Invalid command line argument: \"%s\".\n\n", arg.c_str());
@@ -2393,6 +2413,9 @@ int main(int argc, char** argv)
             printf("--rpi-lowmem        Configures the models to run on a Raspberry Pi Zero 2.\n");
             printf("--threads           Sets the number of threads, values =< 0 mean max-N.\n");
             printf("--embed-parameters  Store parameters of generation (e. g. model path) in image comments. Be sure to not place models in private directories, their names will be stored in images.\n");
+            printf("--sampler           Sampler, one of [ ");
+                for (unsigned int s = 0; s < NUM_OF_SAMPLERS - 1; s++) { printf("%s / ", sampler_name[s].c_str()); }
+                printf("%s ], default is %s.\n", sampler_name[NUM_OF_SAMPLERS - 1].c_str(), sampler_name[EULER_A].c_str());
 
             return -1;
         }
@@ -2452,6 +2475,21 @@ int main(int argc, char** argv)
         }
         if (!n_threads)
             printf("Number of CPUs not detected, using default number of threads.\n");
+    }
+
+    {
+        bool v = false;
+        for (unsigned s = 0; s < NUM_OF_SAMPLERS; s++)
+            if(g_main_args.m_sampler_name == sampler_name[s]) {
+                g_main_args.m_sampler = (sampler_type)s;
+                v = true;
+            }
+        if (!v) {
+            printf("Unknown sampler name \"%s\", valid are: ", g_main_args.m_sampler_name.c_str());
+            for (unsigned int s = 0; s < NUM_OF_SAMPLERS - 1; s++) { printf("%s, ", sampler_name[s].c_str()); }
+            printf("%s.\n", sampler_name[NUM_OF_SAMPLERS - 1].c_str());
+            return -1;
+        }
     }
 
     if (!g_main_args.m_res.size())
