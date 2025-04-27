@@ -86,6 +86,7 @@ struct MainArgs
     bool m_preview_im = false;
     bool m_preview_8x = false;
     bool m_embed_params = false;
+    bool m_use_sd15_tiled_decoder = false;
     std::string m_curl_parallel = "16";
     std::string m_res = "";
     std::string m_threads = "";
@@ -1006,6 +1007,91 @@ inline static ncnn::Mat decoder_solver(ncnn::Mat& sample)
     return x_samples_ddim;
 }
 
+inline static ncnn::Mat sd_tiled_decoder(ncnn::Mat& sample)
+{
+// same 32x32 => 256x256 as sdxl_decoder(), but for fixed 512x512 size
+    constexpr float factor[4] = { 5.48998f, 5.48998f, 5.48998f, 5.48998f }; // SD 1.5
+    sample.substract_mean_normalize(0, factor);
+    ncnn::Mat res = ncnn::Mat(512, 512, 3);
+
+    auto slice_and_inf = [&sample](int sx, int sy) -> tensor_vector<float>
+    {
+        if (sx > 32 || sy > 32)
+            throw std::invalid_argument("slice_and_inf: invalid sx and/or sy.");
+        tensor_vector<float> v(4 * 32 * 32);
+        float* src = sample.v.data();   // (float*)sample;
+        float* dst = v.data();
+
+        for (int c = 0; c < 4; c++)
+        {
+            for (int y = 0; y < 32; y++)
+                for (int x = 0; x < 32; x++)
+                    *dst++ = src[(sy + y) * 64 + sx + x];
+            src += 64 * 64;
+        }
+
+        Model model(n_threads);
+        model.m_ops_printf = g_main_args.m_ops_printf;
+        model.read_file((g_main_args.m_path_with_slash + "vae_decoder_fp16_l32/model.txt").c_str());
+
+        Tensor t;
+        t.m_name = "latent_5F_sample"; // as SDXL
+        t.m_shape = { 1, 4, 32, 32 };
+        t.set_vector(std::move(v));
+        model.push_tensor(std::move(t));
+
+        model.run();
+        return std::move(model.m_data[0].get_vector<float>());
+    };
+
+    auto blend = [&res](const tensor_vector<float>& v, int dx, int dy)
+    {
+        const unsigned int w = 512, h = 512;
+
+        if (dx + 256 > w || dy + 256 > h)
+            throw std::invalid_argument("blend: invalid dx and/or dy.");
+
+        const float* src = v.data();
+        for (int c = 0; c < 3; c++)
+        {
+            float* dst = res.channel(c);
+            for (int y = 0; y < 256; y++)
+                for (int x = 0; x < 256; x++)
+                {
+                    float s = *src++;
+                    float& d = dst[(dy + y) * w + dx + x];
+                    float f = 1;
+
+                    if (dy && y < 64)
+                        f = (float)y / 64;
+                    if (dx && x < 64)
+                        f *= (float)x / 64;
+
+                    d = s * f + d * (1 - f);
+                }
+        }
+    };
+
+    for (int y = 0; y < 64; y += 24)
+    {
+        if (y > 32) y = 32;
+        for (int x = 0; x < 64; x += 24)
+        {
+            if (x > 32) x = 32;
+            blend(slice_and_inf(x, y), x * 8, y * 8);
+            if (x == 32)
+                break;
+        }
+        if (y == 32)
+            break;
+    }
+
+    constexpr float _mean_[3] = { -1.0f, -1.0f, -1.0f };
+    constexpr float _norm_[3] = { 127.5f, 127.5f, 127.5f };
+    res.substract_mean_normalize(_mean_, _norm_);
+    return res;
+}
+
 static inline ncnn::Mat randn_4_w_h(int seed, int w, int h)
 {
     std::vector<float> arr;
@@ -1354,7 +1440,11 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                 ncnn::Mat sample = ncnn::Mat(x_mat.w, x_mat.h, x_mat.c, x_mat.v.data());
                 const std::string im_appendix = "_" + std::to_string(i);
                 if(!sdxl_params) {
-                    ncnn::Mat x_samples_ddim = decoder_solver(sample);
+                    ncnn::Mat x_samples_ddim;
+                    if (g_main_args.m_use_sd15_tiled_decoder)
+                        x_samples_ddim = sd_tiled_decoder(sample);
+                    else
+                        x_samples_ddim = decoder_solver(sample);
                     {
                         std::vector<std::uint8_t> buffer;
                         buffer.resize( 512 * 512 * 3 );
@@ -1891,10 +1981,12 @@ inline static std::pair<ncnn::Mat, ncnn::Mat> prompt_solver(std::string const& p
 
 inline void stable_diffusion(std::string positive_prompt = std::string{}, const std::string& output_path = std::string{}, int step = 30, int seed = 42, std::string negative_prompt = std::string{})
 {
-    std::cout << "----------------[start]------------------" << std::endl;
+    std::cout << "----------------[start]-------------------" << std::endl;
     std::cout << "positive_prompt: " << positive_prompt << std::endl;
     std::cout << "negative_prompt: " << negative_prompt << std::endl;
     std::cout << "output_path: " << output_path << std::endl;
+    if (g_main_args.m_use_sd15_tiled_decoder)
+        std::cout << "SD1.5 tiled decoder is available, using it" << std::endl;
     std::cout << "steps: " << step << std::endl;
     std::cout << "seed: " << seed << std::endl;
     if (g_main_args.m_embed_params)
@@ -1912,7 +2004,12 @@ inline void stable_diffusion(std::string positive_prompt = std::string{}, const 
         ::write_file(g_main_args.m_save_latents.c_str(), tensor_vector<float>((float*)sample, (float*)sample + sample.total()));
     }
 
-    ncnn::Mat x_samples_ddim = decoder_solver(sample);
+    ncnn::Mat x_samples_ddim;
+    if (g_main_args.m_use_sd15_tiled_decoder)
+        x_samples_ddim = sd_tiled_decoder(sample);
+    else
+        x_samples_ddim = decoder_solver(sample);
+
     //std::cout << "----------------[4x]--------------------" << std::endl;
     //x_samples_ddim = esr4x(x_samples_ddim);
     std::cout << "----------------[save]--------------------" << std::endl;
@@ -2080,7 +2177,7 @@ void sdxl_decoder(ncnn::Mat& sample, const std::string& output_path, bool tiled,
 
 void stable_diffusion_xl(std::string positive_prompt, const std::string& output_path, int steps, std::string negative_prompt, int seed)
 {
-    std::cout << "----------------[start]------------------" << std::endl;
+    std::cout << "----------------[start]-------------------" << std::endl;
     std::cout << "positive_prompt: " << positive_prompt << std::endl;
     if (g_main_args.m_turbo)
         std::cout << "SDXL turbo doesn't support negative_prompts" << std::endl;
@@ -2570,20 +2667,20 @@ int main(int argc, char** argv)
                 "vae_decoder_qu8/range_data.txt" };
         }
 
+        auto does_exist = [](const std::string& f) -> bool
+        {
+            FILE* test = fopen(f.c_str(), "r");
+                if (test)
+                fclose(test);
+            return test ? true : false;
+        };
+
         if (g_main_args.m_download == 'f')
         {
             g_main_args.m_path_with_slash += repo_name + "/";
         }
         else
         {
-            auto does_exist = [](const std::string& f) -> bool
-            {
-                FILE* test = fopen(f.c_str(), "r");
-                if (test)
-                    fclose(test);
-                return test ? true : false;
-            };
-
             if (!does_exist(g_main_args.m_path_with_slash + files.back()))
             {
                 g_main_args.m_path_with_slash += repo_name + "/";
@@ -2677,6 +2774,9 @@ int main(int argc, char** argv)
                 printf(" done!\n");
             }
         }
+
+        g_main_args.m_use_sd15_tiled_decoder = g_main_args.m_tiled && !g_main_args.m_xl &&
+            does_exist(g_main_args.m_path_with_slash + "vae_decoder_fp16_l32/model.txt");
     }
     catch (const std::exception& e)
     {
@@ -2700,7 +2800,12 @@ int main(int argc, char** argv)
 
                 if(g_main_args.m_preview_im)
                     sd_preview(sample, g_main_args.m_output, "_preview");
-                ncnn::Mat x_samples_ddim = decoder_solver(sample);
+
+                ncnn::Mat x_samples_ddim;
+                if (g_main_args.m_use_sd15_tiled_decoder)
+                    x_samples_ddim = sd_tiled_decoder(sample);
+                else
+                    x_samples_ddim = decoder_solver(sample);
 
                 std::vector<std::uint8_t> buffer;
                 buffer.resize(512 * 512 * 3);
