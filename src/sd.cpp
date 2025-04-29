@@ -65,12 +65,14 @@ using namespace onnxstream;
 enum sampler_type {
     EULER_A,
     EULER,
+    DPMPP2M,
     NUM_OF_SAMPLERS // always last
 };
 
 const std::string sampler_name[NUM_OF_SAMPLERS] = {
     "euler_a",
-    "euler"
+    "euler",
+    "dpm++2m",
 };
 
 struct MainArgs
@@ -1409,6 +1411,8 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
         }
 #endif
 
+        ncnn::Mat old_denoised; // for DPM++ (2M)
+        const unsigned int /*long*/ latent_length = g_main_args.m_latw * g_main_args.m_lath;
         const int steps = static_cast<int>(sigma.size()) - 1;
         for (int i = 0; i < steps; i++)
         {
@@ -1419,6 +1423,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
 #define ORIGINAL_SAMPLER_ALGORITHMS 1
             switch (g_main_args.m_sampler) {
             case EULER: // Euler
+            // adapted from https://github.com/leejet/stable-diffusion.cpp
             {
 #if       !ORIGINAL_SAMPLER_ALGORITHMS
                 const float sigma_mul = sigma[i + 1] / sigma[i];
@@ -1426,7 +1431,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                 for (int c = 0; c < 4; c++)
                 {
                     float* x_ptr = x_mat.channel(c);
-                    const float* x_ptr_end = x_ptr + g_main_args.m_latw * g_main_args.m_lath;
+                    const float* x_ptr_end = x_ptr + latent_length;
                     float* d_ptr = denoised.channel(c);
                     for (; x_ptr < x_ptr_end; x_ptr++)
                     {
@@ -1441,6 +1446,89 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                 }
                 break;
             } // euler_a
+
+            case DPMPP2M: // DPM++ (2M)
+            // adapted from https://github.com/leejet/stable-diffusion.cpp
+            {
+#if       ORIGINAL_SAMPLER_ALGORITHMS
+                if (!i || !sigma[i + 1]) {
+                    if (!i) old_denoised = ncnn::Mat(x_mat.w, x_mat.h, x_mat.c, x_mat.v.data());
+                    float a = sigma[i + 1] / sigma[i];
+                    float b = exp(log(sigma[i + 1]) - log(sigma[i])) - 1.f;
+                    for (int c = 0; c < 4; c++)
+                    {
+                        float* x_ptr = x_mat.channel(c);
+                        const float* x_ptr_end = x_ptr + latent_length;
+                        float* d_ptr = denoised.channel(c);
+                        float* o_ptr = old_denoised.channel(c);
+                        for (; x_ptr < x_ptr_end; x_ptr++)
+                        {
+                            *x_ptr = a * *x_ptr - b * *d_ptr;
+                            *o_ptr++ = *d_ptr++;
+                        }
+                    }
+                } else {
+                    float t       = -log(sigma[i]);
+                    float t_next  = -log(sigma[i + 1]);
+                    float h       = t_next - t;
+                    float a       = sigma[i + 1] / sigma[i];
+                    float b       = exp(-h) - 1.f;
+                    float h_last  = t + log(sigma[i - 1]);
+                    float r       = h_last / h;
+                    for (int c = 0; c < 4; c++)
+                    {
+                        float* x_ptr = x_mat.channel(c);
+                        const float* x_ptr_end = x_ptr + latent_length;
+                        float* d_ptr = denoised.channel(c);
+                        float* o_ptr = old_denoised.channel(c);
+                        for (; x_ptr < x_ptr_end; x_ptr++)
+                        {
+                            float d = (1.f + 1.f / (2.f * r)) * *d_ptr 
+                                          - (1.f / (2.f * r)) * *o_ptr;
+                            *x_ptr = a * *x_ptr - b * d;
+                            *o_ptr++ = *d_ptr++;
+                        }
+                    }
+                }
+#else  // ORIGINAL_SAMPLER_ALGORITHMS
+                // simplified
+                const float sigma_mul = sigma[i + 1] / sigma[i];
+                if (!i || !sigma[i + 1]) {
+                    if (!i) old_denoised = ncnn::Mat(x_mat.w, x_mat.h, x_mat.c, x_mat.v.data());
+                    // Euler step
+                    for (int c = 0; c < 4; c++)
+                    {
+                        float* x_ptr = x_mat.channel(c);
+                        const float* x_ptr_end = x_ptr + latent_length;
+                        float* d_ptr = denoised.channel(c);
+                        float* o_ptr = old_denoised.channel(c);
+                        for (; x_ptr < x_ptr_end; x_ptr++)
+                        {
+                            *x_ptr = (*x_ptr - *d_ptr) * sigma_mul + *d_ptr;
+                            *o_ptr++ = *d_ptr++;
+                        }
+                    }
+                } else {
+                    float b = sigma_mul - 1.f;
+                    float r = .5f * log(sigma_mul) / log(sigma[i - 1] / sigma[i]) * b;
+                    b -= r;
+
+                    for (int c = 0; c < 4; c++)
+                    {
+                        float* x_ptr = x_mat.channel(c);
+                        const float* x_ptr_end = x_ptr + latent_length;
+                        float* d_ptr = denoised.channel(c);
+                        float* o_ptr = old_denoised.channel(c);
+                        for (; x_ptr < x_ptr_end; x_ptr++)
+                        {
+                            *x_ptr = sigma_mul * *x_ptr - b * *d_ptr - r * *o_ptr;
+                            *o_ptr++ = *d_ptr++;
+                        }
+                    }
+                }
+#endif // ORIGINAL_SAMPLER_ALGORITHMS
+                break;
+            } // dpm++2m
 
             default: { // Euler Ancestral
 #if       ORIGINAL_SAMPLER_ALGORITHMS
@@ -1464,7 +1552,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                 for (int c = 0; c < 4; c++)
                 {
                     float* x_ptr = x_mat.channel(c);
-                    const float* x_ptr_end = x_ptr + g_main_args.m_latw * g_main_args.m_lath;
+                    const float* x_ptr_end = x_ptr + latent_length;
                     float* d_ptr = denoised.channel(c);
                     float* r_ptr = randn.channel(c);
                     for (; x_ptr < x_ptr_end; x_ptr++)
@@ -2052,6 +2140,7 @@ inline void stable_diffusion(std::string positive_prompt = std::string{}, const 
     if (g_main_args.m_use_sd15_tiled_decoder)
         std::cout << "SD1.5 tiled decoder is available, using it" << std::endl;
     std::cout << "steps: " << step << std::endl;
+    std::cout << "sampler: " << sampler_name[g_main_args.m_sampler] << std::endl;
     std::cout << "seed: " << seed << std::endl;
     if (g_main_args.m_embed_params)
         std::cout << "generation parameters of model \"" << g_main_args.m_path_safe << "\" will be saved in images" << std::endl;
@@ -2249,6 +2338,7 @@ void stable_diffusion_xl(std::string positive_prompt, const std::string& output_
         std::cout << "negative_prompt: " << negative_prompt << std::endl;
     std::cout << "output_path: " << output_path << std::endl;
     std::cout << "steps: " << steps << std::endl;
+    std::cout << "sampler: " << sampler_name[g_main_args.m_sampler] << std::endl;
     std::cout << "seed: " << seed << std::endl;
     if (g_main_args.m_embed_params)
         std::cout << "generation parameters of model \"" << g_main_args.m_path_safe << "\" will be saved in images" << std::endl;
