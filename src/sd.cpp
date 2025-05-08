@@ -50,6 +50,8 @@
 #include "jerror.h"
 #endif
 
+#include "cpuinfo.h"
+
 #if USE_NCNN
 #include "benchmark.h"
 #include "net.h"
@@ -76,6 +78,8 @@ struct MainArgs
     std::string m_path_safe = ""; // if empty, comment is not stored
     bool m_decoder_calibrate = false;
     bool m_rpi = false;
+    char m_auto_rpi = 'a'; // autodetect fp16 by default
+    bool m_fp16_detected = true; // if fp16 detection is not used, will be enabled by default
     bool m_xl = false;
     bool m_turbo = false;
     bool m_tiled = true;
@@ -1993,6 +1997,12 @@ inline void stable_diffusion(std::string positive_prompt = std::string{}, const 
         std::cout << "generation parameters of model \"" << g_main_args.m_path_safe << "\" will be saved in images" << std::endl;
     if (n_threads)
         std::cout << "threads: " << n_threads << std::endl;
+    if (g_main_args.m_rpi)
+        std::cout << "using FP32 arithmetic (" <<
+        (g_main_args.m_fp16_detected ? "forced)" : "FP16 is not detected)") << std::endl;
+    else
+        std::cout << "using FP16 arithmetic" <<
+        (g_main_args.m_fp16_detected ? "" : " (forced)") << std::endl;
     std::cout << "----------------[prompt]------------------" << std::endl;
     auto [cond, uncond] = prompt_solver(positive_prompt, negative_prompt);
     std::cout << "----------------[diffusion]---------------" << std::endl;
@@ -2190,6 +2200,12 @@ void stable_diffusion_xl(std::string positive_prompt, const std::string& output_
         std::cout << "generation parameters of model \"" << g_main_args.m_path_safe << "\" will be saved in images" << std::endl;
     if (n_threads)
         std::cout << "threads: " << n_threads << std::endl;
+    if (g_main_args.m_rpi)
+        std::cout << "using FP32 arithmetic (" <<
+        (g_main_args.m_fp16_detected ? "forced)" : "FP16 is not detected)") << std::endl;
+    else
+        std::cout << "using FP16 arithmetic" <<
+        (g_main_args.m_fp16_detected ? "" : " (forced)") << std::endl;
     std::cout << "----------------[prompt]------------------" << std::endl;
 
     tensor_vector<int64_t> tokens, tokens_neg;
@@ -2391,7 +2407,33 @@ int main(int argc, char** argv)
         }
         else if (arg == "--rpi")
         {
-            g_main_args.m_rpi = true;
+            if (i + 1 >= argc || !strncmp(argv[i + 1], "--", 2)) { // not moving argv[] index yet
+                g_main_args.m_auto_rpi = 'y'; // no value == yes
+                continue;
+            }
+            char d = tolower(argv[++i][0]); // char or 0
+            switch (d) {
+                case 'a': // auto
+                case 'y': // yes
+                case 'n': // no
+                    break; // pass as is
+                case 'f': {
+                    d = 'y'; // force == yes
+                    break; }
+                case 'd': {
+                    d = 'n'; // disable == no
+                    break; }
+                default: {
+                    printf("Unknown argument of --rpi option, valid are auto, force and disable.\n");
+                    return -1; }
+            }
+            g_main_args.m_auto_rpi = d;
+        }
+        else if (!strncmp(arg.c_str(), "--rpi-d",     strlen("--rpi-d"))     // rpi-disable
+              || !strncmp(arg.c_str(), "--disable-r", strlen("--disable-r")) // disable-rpi
+              || !strncmp(arg.c_str(), "--no-r",      strlen("--no-r")))     // no-rpi
+        {
+            g_main_args.m_auto_rpi = 'n'; // alternative '--rpi no' syntax, for convenience
         }
         else if (arg == "--xl")
         {
@@ -2408,7 +2450,7 @@ int main(int argc, char** argv)
         }
         else if (arg == "--rpi-lowmem")
         {
-            g_main_args.m_rpi = true;
+            g_main_args.m_auto_rpi = 'y';
             g_main_args.m_rpi_lowmem = true;
         }
         else if (arg == "--ram")
@@ -2430,12 +2472,21 @@ int main(int argc, char** argv)
                 case 'a':
                 case 'f':
                 case 'n': break;
+                case 'd': {
+                    d = 'n'; // disable == no
+                    break; }
                 default: {
                     printf("Unknown argument of --download option, valid are auto, force and never.\n");
-                    return -1;
-                }
+                    return -1; }
             }
             g_main_args.m_download = d;
+        }
+        else if (!strncmp(arg.c_str(), "--disable-d", strlen("--disable-d")) // download
+              || !strncmp(arg.c_str(), "--disable-a", strlen("--disable-a")) // auto-dl
+              || !strncmp(arg.c_str(), "--no-d",      strlen("--no-d"))      // no-dl
+              || !strncmp(arg.c_str(), "--no-a",      strlen("--no-a")))     // no-auto-dl
+        {
+            g_main_args.m_download = 'n'; // alternative '--download no' syntax, for convenience
         }
         else if (arg == "--preview-steps")
         {
@@ -2486,7 +2537,7 @@ int main(int argc, char** argv)
             printf("--ram               Uses the RAM WeightsProvider (Experimental).\n");
             printf("--download          A[uto] / F[orce] / N[ever] (re)download current model.\n");
             printf("--curl-parallel     Sets the number of parallel downloads with CURL. Default is 16.\n");
-            printf("--rpi               Configures the models to run on a Raspberry Pi.\n");
+            printf("--rpi               A[utodetect] / F[orce] / D[isable] to configure the models to run on a Raspberry Pi.\n");
             printf("--rpi-lowmem        Configures the models to run on a Raspberry Pi Zero 2.\n");
             printf("--threads           Sets the number of threads, values =< 0 mean max-N.\n");
             printf("--embed-parameters  Store parameters of generation (e. g. model path) in image comments. Be sure to not place models in private directories, their names will be stored in images.\n");
@@ -2858,6 +2909,29 @@ int main(int argc, char** argv)
             g_main_args.m_path_safe = g_main_args.m_path_with_slash;
         else
             g_main_args.m_path_safe = safe_path;
+    }
+
+    // if cpuinfo is not available, simply remove its calls,
+    // fp16 will be always enabled if --rpi is not specified
+    cpuinfo_initialize();
+    g_main_args.m_fp16_detected = cpuinfo_has_x86_avx512fp16()
+                     || cpuinfo_has_x86_amx_fp16()
+//                     || cpuinfo_has_arm_vfpv3_fp16()     // detected on cortex-a53, but fp16 can not be used there
+//                     || cpuinfo_has_arm_vfpv3_fp16_d32() // detected on cortex-a53, but fp16 can not be used there
+                     || cpuinfo_has_arm_fp16_arith()
+//                     || cpuinfo_has_arm_neon_fp16()      // detected on cortex-a53, but fp16 can not be used there
+                     || cpuinfo_has_arm_neon_fp16_arith();
+    g_main_args.m_rpi = !g_main_args.m_fp16_detected;
+    if (g_main_args.m_auto_rpi == 'y') g_main_args.m_rpi = true;
+    else if (g_main_args.m_auto_rpi == 'n') g_main_args.m_rpi = false;
+    if (g_main_args.m_ops_printf) {
+        printf("cpuinfo_has_x86_avx512fp16(): %i\n",      cpuinfo_has_x86_avx512fp16());
+        printf("cpuinfo_has_x86_amx_fp16(): %i\n",        cpuinfo_has_x86_amx_fp16());
+//        printf("cpuinfo_has_arm_vfpv3_fp16(disabled): %i\n",      cpuinfo_has_arm_vfpv3_fp16());
+//        printf("cpuinfo_has_arm_vfpv3_fp16_d32(disabled): %i\n",  cpuinfo_has_arm_vfpv3_fp16_d32());
+        printf("cpuinfo_has_arm_fp16_arith(): %i\n",      cpuinfo_has_arm_fp16_arith());
+//        printf("cpuinfo_has_arm_neon_fp16(disabled): %i\n",       cpuinfo_has_arm_neon_fp16());
+        printf("cpuinfo_has_arm_neon_fp16_arith(): %i\n", cpuinfo_has_arm_neon_fp16_arith());
     }
 
     try
