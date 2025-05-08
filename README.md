@@ -358,7 +358,7 @@ These are the command line options of the Stable Diffusion example:
 --ram               Uses the RAM WeightsProvider (Experimental).
 --download          A[uto] / F[orce] / N[ever] (re)download current model.
 --curl-parallel     Sets the number of parallel downloads with CURL. Default is 16.
---rpi               Configures the models to run on a Raspberry Pi.
+--rpi               A[uto] / F[orce] / N[ot] configures the models to run on a Raspberry Pi.
 --rpi-lowmem        Configures the models to run on a Raspberry Pi Zero 2.
 --threads           Sets the number of threads, negative values use (cores - N) threads.
 --preview-steps     Save every diffusion step in low resolution.
