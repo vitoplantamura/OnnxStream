@@ -1413,9 +1413,24 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
         }
 #endif
 
-        ncnn::Mat old_denoised; // for DPM++ (2M)
-        const unsigned int /*long*/ latent_length = g_main_args.m_latw * g_main_args.m_lath;
         const int steps = static_cast<int>(sigma.size()) - 1;
+
+        // a workaround instead of configurable noise scheduler,
+        // for Turbo model + non-ancestral samplers, use the result instead of sigma [i + 1]
+        auto sigma_reshaper = [=](const float si1, const int i) -> const float {
+            // only correct for turbo model
+            if (!g_main_args.m_turbo) 
+                return si1;
+
+            constexpr float p = 0.0f; // -n - smoother images, +n - sharper
+            const float sigma_curve = ( std::pow((steps - i) / (float)steps, std::pow(2.f, -p - .5f) / steps) // straight, lower values at last steps
+                                      + std::pow((i + 1)     / (float)steps, std::pow(2.f, -p - .5f) / steps) // reversed, lower values at first steps
+                                      ) /2;
+            return si1 * (sigma_curve ? std::max(0.0001f, sigma_curve) : 0.f);
+        };
+
+        ncnn::Mat old_denoised; // for DPM++ (2M) and 2-step samplers
+        const unsigned int /*long*/ latent_length = g_main_args.m_latw * g_main_args.m_lath;
         for (int i = 0; i < steps; i++)
         {
             std::cout << "step:" << i << "\t\t";
@@ -1423,12 +1438,25 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
             ncnn::Mat denoised = CFGDenoiser_CompVisDenoiser(net, log_sigmas, x_mat, sigma[i], c, uc, sdxl_params, model);
 
 #define ORIGINAL_SAMPLER_ALGORITHMS 1
-            switch (g_main_args.m_sampler) {
+            sampler_type sampler = g_main_args.m_sampler;
+            switch (sampler) {
+            case DPMPP2M:
+            case DPMPP2S_A:
+                // https://github.com/huggingface/diffusers/pull/5541
+                // DPM++ samplers have underflows and should be replaced with Euler
+                // at last step for SDXL (Turbo)
+                if (g_main_args.m_xl && (i == steps - 1)) sampler = EULER;
+                break;
+            default: {}
+            }
+
+            switch (sampler) {
             case EULER: // Euler
             // adapted from https://github.com/leejet/stable-diffusion.cpp
             {
+                const float si1 = sigma_reshaper(sigma[i + 1], i);
 #if       !ORIGINAL_SAMPLER_ALGORITHMS
-                const float sigma_mul = sigma[i + 1] / sigma[i];
+                const float sigma_mul = si1 / sigma[i];
 #endif // !ORIGINAL_SAMPLER_ALGORITHMS
                 for (int c = 0; c < 4; c++)
                 {
@@ -1438,7 +1466,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                     for (; x_ptr < x_ptr_end; x_ptr++)
                     {
 #if       ORIGINAL_SAMPLER_ALGORITHMS
-                        *x_ptr = *x_ptr + ((*x_ptr - *d_ptr) / sigma[i]) * (sigma[i + 1] - sigma[i]);
+                        *x_ptr = *x_ptr + ((*x_ptr - *d_ptr) / sigma[i]) * (si1 - sigma[i]);
 #else  // ORIGINAL_SAMPLER_ALGORITHMS
                         // simplified
                         *x_ptr = (*x_ptr - *d_ptr) * sigma_mul + *d_ptr;
@@ -1592,11 +1620,12 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
             case DPMPP2M: // DPM++ (2M)
             // adapted from https://github.com/leejet/stable-diffusion.cpp
             {
+                const float si1 = sigma_reshaper(sigma[i + 1], i);
 #if       ORIGINAL_SAMPLER_ALGORITHMS
-                if (!i || !sigma[i + 1]) {
+                if (!i || !si1) {
                     if (!i) old_denoised = ncnn::Mat(x_mat.w, x_mat.h, x_mat.c, x_mat.v.data());
-                    float a = sigma[i + 1] / sigma[i];
-                    float b = exp(log(sigma[i + 1]) - log(sigma[i])) - 1.f;
+                    float a = si1 / sigma[i];
+                    float b = exp(log(si1) - log(sigma[i])) - 1.f;
                     for (int c = 0; c < 4; c++)
                     {
                         float* x_ptr = x_mat.channel(c);
@@ -1611,9 +1640,9 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                     }
                 } else {
                     float t       = -log(sigma[i]);
-                    float t_next  = -log(sigma[i + 1]);
+                    float t_next  = -log(si1);
                     float h       = t_next - t;
-                    float a       = sigma[i + 1] / sigma[i];
+                    float a       = si1 / sigma[i];
                     float b       = exp(-h) - 1.f;
                     float h_last  = t + log(sigma[i - 1]);
                     float r       = h_last / h;
@@ -1634,8 +1663,8 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                 }
 #else  // ORIGINAL_SAMPLER_ALGORITHMS
                 // simplified
-                const float sigma_mul = sigma[i + 1] / sigma[i];
-                if (!i || !sigma[i + 1]) {
+                const float sigma_mul = si1 / sigma[i];
+                if (!i || !si1) {
                     if (!i) old_denoised = ncnn::Mat(x_mat.w, x_mat.h, x_mat.c, x_mat.v.data());
                     // Euler step
                     for (int c = 0; c < 4; c++)
