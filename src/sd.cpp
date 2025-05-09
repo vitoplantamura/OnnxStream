@@ -65,6 +65,7 @@ using namespace onnxstream;
 enum sampler_type {
     EULER_A,
     EULER,
+    DPM2,
     DPMPP2M,
     DPMPP2S_A,
     NUM_OF_SAMPLERS // always last
@@ -73,6 +74,7 @@ enum sampler_type {
 const std::string sampler_name[NUM_OF_SAMPLERS] = {
     "euler_a",
     "euler",
+    "dpm2",
     "dpm++2m",
     "dpm++2s_a",
 };
@@ -1440,6 +1442,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
 #define ORIGINAL_SAMPLER_ALGORITHMS 1
             sampler_type sampler = g_main_args.m_sampler;
             switch (sampler) {
+            case DPM2:
             case DPMPP2M:
             case DPMPP2S_A:
                 // https://github.com/huggingface/diffusers/pull/5541
@@ -1700,6 +1703,115 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
 #endif // ORIGINAL_SAMPLER_ALGORITHMS
                 break;
             } // dpm++2m
+
+            case DPM2: // DPM2
+            // adapted from https://github.com/leejet/stable-diffusion.cpp
+            {
+                const float si1 = sigma_reshaper(sigma[i + 1], i);
+                if (!i) // array x2 in Stable Diffusion.cpp
+                    old_denoised = ncnn::Mat(x_mat.w, x_mat.h, x_mat.c, x_mat.v.data());
+#if       ORIGINAL_SAMPLER_ALGORITHMS
+                if (!si1) {
+                    // Euler step
+                    float dt = si1 - sigma[i];
+                    for (int c = 0; c < 4; c++)
+                    {
+                        float* x_ptr = x_mat.channel(c);
+                        const float* x_ptr_end = x_ptr + latent_length;
+                        float* d_ptr = denoised.channel(c);
+                        for (; x_ptr < x_ptr_end; x_ptr++)
+                        {
+                            float d = (*x_ptr - *d_ptr) / sigma[i];
+                            *x_ptr = *x_ptr + d * dt;
+                            d_ptr++;
+                        }
+                    }
+                } else {
+                    // DPM-Solver-2
+                    float sigma_mid = exp(0.5f * (log(sigma[i]) + log(si1)));
+                    float dt_1      = sigma_mid - sigma[i];
+                    float dt_2      = si1 - sigma[i];
+                    for (int c = 0; c < 4; c++)
+                    {
+                        float* x_ptr = x_mat.channel(c);
+                        const float* x_ptr_end = x_ptr + latent_length;
+                        float* x2_ptr = old_denoised.channel(c);
+                        float* d_ptr = denoised.channel(c);
+                        for (; x_ptr < x_ptr_end; x_ptr++)
+                        {
+                            float d = (*x_ptr - *d_ptr) / sigma[i];
+                            *x2_ptr = *x_ptr + d * dt_1;
+                            d_ptr++;
+                            x2_ptr++;
+                        }
+                    }
+                    denoised = CFGDenoiser_CompVisDenoiser(net, log_sigmas, old_denoised, sigma_mid, c, uc, sdxl_params, model);
+                    for (int c = 0; c < 4; c++)
+                    {
+                        float* x_ptr = x_mat.channel(c);
+                        const float* x_ptr_end = x_ptr + latent_length;
+                        float* x2_ptr = old_denoised.channel(c);
+                        float* d_ptr = denoised.channel(c);
+                        for (; x_ptr < x_ptr_end; x_ptr++)
+                        {
+                            float d2 = (*x2_ptr - *d_ptr) / sigma_mid;
+                            *x_ptr = *x_ptr + d2 * dt_2;
+                            d_ptr++;
+                            x2_ptr++;
+                        }
+                    }
+                }
+#else  // ORIGINAL_SAMPLER_ALGORITHMS
+                if (!si1) {
+                    // Euler step
+                    float dt = si1 / sigma[i] - 1.f;
+                    for (int c = 0; c < 4; c++)
+                    {
+                        float* x_ptr = x_mat.channel(c);
+                        const float* x_ptr_end = x_ptr + latent_length;
+                        float* d_ptr = denoised.channel(c);
+                        for (; x_ptr < x_ptr_end; x_ptr++)
+                        {
+                            *x_ptr += (*x_ptr - *d_ptr) * dt;
+                            d_ptr++;
+                        }
+                    }
+                } else {
+                    // DPM-Solver-2
+                    float sigma_mid = std::sqrt(sigma[i] * si1);
+                    float dt = sigma_mid / sigma[i] - 1.f;
+                    for (int c = 0; c < 4; c++)
+                    {
+                        float* x_ptr = x_mat.channel(c);
+                        const float* x_ptr_end = x_ptr + latent_length;
+                        float* x2_ptr = old_denoised.channel(c);
+                        float* d_ptr = denoised.channel(c);
+                        for (; x_ptr < x_ptr_end; x_ptr++)
+                        {
+                            *x2_ptr = *x_ptr + (*x_ptr - *d_ptr) * dt;
+                            d_ptr++;
+                            x2_ptr++;
+                        }
+                    }
+                    denoised = CFGDenoiser_CompVisDenoiser(net, log_sigmas, old_denoised, sigma_mid, c, uc, sdxl_params, model);
+                    dt = (si1 - sigma[i]) / sigma_mid;
+                    for (int c = 0; c < 4; c++)
+                    {
+                        float* x_ptr = x_mat.channel(c);
+                        const float* x_ptr_end = x_ptr + latent_length;
+                        float* x2_ptr = old_denoised.channel(c);
+                        float* d_ptr = denoised.channel(c);
+                        for (; x_ptr < x_ptr_end; x_ptr++)
+                        {
+                            *x_ptr += (*x2_ptr - *d_ptr) * dt;
+                            d_ptr++;
+                            x2_ptr++;
+                        }
+                    }
+                }
+#endif // ORIGINAL_SAMPLER_ALGORITHMS
+                break;
+            } // dpm2
 
             default: { // Euler Ancestral
 #if       ORIGINAL_SAMPLER_ALGORITHMS
