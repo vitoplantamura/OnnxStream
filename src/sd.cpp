@@ -68,6 +68,7 @@ enum sampler_type {
     DPM2,
     DPMPP2M,
     DPMPP2S_A,
+    LCM,
     NUM_OF_SAMPLERS // always last
 };
 
@@ -77,6 +78,7 @@ const std::string sampler_name[NUM_OF_SAMPLERS] = {
     "dpm2",
     "dpm++2m",
     "dpm++2s_a",
+    "lcm",
 };
 
 struct MainArgs
@@ -1812,6 +1814,32 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
 #endif // ORIGINAL_SAMPLER_ALGORITHMS
                 break;
             } // dpm2
+
+            case LCM: // Latent consistency models
+            // adapted from https://github.com/leejet/stable-diffusion.cpp
+            {
+                float sigma_next = sigma[i + 1];
+                if (sigma_next <= 0) {
+                    x_mat = ncnn::Mat(denoised.w, denoised.h, denoised.c, denoised.v.data());
+                } else {
+                    std::srand(seed++);
+                    ncnn::Mat randn = randn_4_w_h(rand() % 1000, g_main_args.m_latw, g_main_args.m_lath);
+                    for (int c = 0; c < 4; c++)
+                    {
+                        float* x_ptr = x_mat.channel(c);
+                        const float* x_ptr_end = x_ptr + latent_length;
+                        float* d_ptr = denoised.channel(c);
+                        float* r_ptr = randn.channel(c);
+                        for (; x_ptr < x_ptr_end; x_ptr++)
+                        {
+                            *x_ptr = *d_ptr + sigma_next * *r_ptr;
+                            d_ptr++;
+                            r_ptr++;
+                        }
+                    }
+                }
+                break;
+            } // lcm
 
             default: { // Euler Ancestral
 #if       ORIGINAL_SAMPLER_ALGORITHMS
