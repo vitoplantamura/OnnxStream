@@ -1814,8 +1814,8 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                     }
                 } else {
                     float b = sigma_mul - 1.f;
-                    float r = .5f * log(sigma_mul) / log(sigma[i - 1] / sigma[i]) * b;
-                    b -= r;
+                    float r = .5f * log(sigma_mul) / log(sigma[i] / sigma[i - 1]) * b;
+                    b = -(b + r);
 
                     for (int c = 0; c < 4; c++)
                     {
@@ -1825,7 +1825,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                         float* o_ptr = old_denoised.channel(c);
                         for (; x_ptr < x_ptr_end; x_ptr++)
                         {
-                            *x_ptr = sigma_mul * *x_ptr - b * *d_ptr - r * *o_ptr;
+                            *x_ptr = sigma_mul * *x_ptr + b * *d_ptr + r * *o_ptr;
                             *o_ptr++ = *d_ptr++;
                         }
                     }
