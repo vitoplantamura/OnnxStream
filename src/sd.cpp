@@ -1460,9 +1460,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
             // adapted from https://github.com/leejet/stable-diffusion.cpp
             {
                 const float si1 = sigma_reshaper(sigma[i + 1], i);
-#if       !ORIGINAL_SAMPLER_ALGORITHMS
-                const float sigma_mul = si1 / sigma[i];
-#endif // !ORIGINAL_SAMPLER_ALGORITHMS
+#if       ORIGINAL_SAMPLER_ALGORITHMS
                 for (int c = 0; c < 4; c++)
                 {
                     float* x_ptr = x_mat.channel(c);
@@ -1470,15 +1468,25 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                     float* d_ptr = denoised.channel(c);
                     for (; x_ptr < x_ptr_end; x_ptr++)
                     {
-#if       ORIGINAL_SAMPLER_ALGORITHMS
-                        *x_ptr = *x_ptr + ((*x_ptr - *d_ptr) / sigma[i]) * (si1 - sigma[i]);
-#else  // ORIGINAL_SAMPLER_ALGORITHMS
-                        // simplified
-                        *x_ptr = (*x_ptr - *d_ptr) * sigma_mul + *d_ptr;
-#endif // ORIGINAL_SAMPLER_ALGORITHMS
+                        *x_ptr = *x_ptr + (*x_ptr - *d_ptr) / sigma[i] * (si1 - sigma[i]);
                         d_ptr++;
                     }
                 }
+#else  // ORIGINAL_SAMPLER_ALGORITHMS
+                // simplified
+                const float sigma_mul = si1 / sigma[i];
+                for (int c = 0; c < 4; c++)
+                {
+                    float* x_ptr = x_mat.channel(c);
+                    const float* x_ptr_end = x_ptr + latent_length;
+                    float* d_ptr = denoised.channel(c);
+                    for (; x_ptr < x_ptr_end; x_ptr++)
+                    {
+                        *x_ptr = (*x_ptr - *d_ptr) * sigma_mul + *d_ptr;
+                        d_ptr++;
+                    }
+                }
+#endif // ORIGINAL_SAMPLER_ALGORITHMS
                 break;
             } // euler
 
