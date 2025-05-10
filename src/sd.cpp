@@ -2911,22 +2911,24 @@ int main(int argc, char** argv)
             g_main_args.m_path_safe = safe_path;
     }
 
-    // Using same logic as XNNPACK,
+    // Using same logic as XNNPACK:
     // https://github.com/google/XNNPACK/blob/f10adfeabe2edad4be1c9983db7a5f3482c007fe/src/xnnpack/hardware-config.h#L175
     // https://github.com/google/XNNPACK/blob/f10adfeabe2edad4be1c9983db7a5f3482c007fe/src/configs/hardware-config.c#L92
     // https://github.com/google/XNNPACK/blob/f10adfeabe2edad4be1c9983db7a5f3482c007fe/src/configs/hardware-config.c#L122
+    //
+    // If support of Windows for ARM will be needed,
+    // XNNPACK directly uses IsProcessorFeaturePresent():
+    // https://github.com/google/XNNPACK/blob/f10adfeabe2edad4be1c9983db7a5f3482c007fe/src/configs/hardware-config.c#L73-L83
+    //
     // If cpuinfo is not available, simply remove its calls,
     // fp16 will be always enabled if --rpi is not specified
     cpuinfo_initialize();
-    g_main_args.m_fp16_detected = cpuinfo_has_x86_avx2()
-//                               || cpuinfo_has_arm_fp16_arith()
-                               || cpuinfo_has_arm_neon_fp16_arith();
+    g_main_args.m_fp16_detected = cpuinfo_has_x86_avx2() || cpuinfo_has_arm_neon_fp16_arith();
     g_main_args.m_rpi = !g_main_args.m_fp16_detected;
     if (g_main_args.m_auto_rpi == 'y') g_main_args.m_rpi = true;
     else if (g_main_args.m_auto_rpi == 'n') g_main_args.m_rpi = false;
     if (g_main_args.m_ops_printf) {
         printf("cpuinfo_has_x86_avx2(): %i\n",            cpuinfo_has_x86_avx2());
-//        printf("cpuinfo_has_arm_fp16_arith(): %i\n",      cpuinfo_has_arm_fp16_arith());
         printf("cpuinfo_has_arm_neon_fp16_arith(): %i\n", cpuinfo_has_arm_neon_fp16_arith());
     }
 
