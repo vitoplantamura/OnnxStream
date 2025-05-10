@@ -1999,7 +1999,7 @@ inline void stable_diffusion(std::string positive_prompt = std::string{}, const 
         std::cout << "threads: " << n_threads << std::endl;
     if (g_main_args.m_rpi)
         std::cout << "using FP32 arithmetic (" <<
-        (g_main_args.m_fp16_detected ? "forced)" : "FP16 is not detected)") << std::endl;
+        (g_main_args.m_fp16_detected ? "forced)" : "FP16 not detected)") << std::endl;
     else
         std::cout << "using FP16 arithmetic" <<
         (g_main_args.m_fp16_detected ? "" : " (forced)") << std::endl;
@@ -2202,7 +2202,7 @@ void stable_diffusion_xl(std::string positive_prompt, const std::string& output_
         std::cout << "threads: " << n_threads << std::endl;
     if (g_main_args.m_rpi)
         std::cout << "using FP32 arithmetic (" <<
-        (g_main_args.m_fp16_detected ? "forced)" : "FP16 is not detected)") << std::endl;
+        (g_main_args.m_fp16_detected ? "forced)" : "FP16 not detected)") << std::endl;
     else
         std::cout << "using FP16 arithmetic" <<
         (g_main_args.m_fp16_detected ? "" : " (forced)") << std::endl;
@@ -2911,26 +2911,20 @@ int main(int argc, char** argv)
             g_main_args.m_path_safe = safe_path;
     }
 
-    // if cpuinfo is not available, simply remove its calls,
+    // Using same logic as XNNPACK,
+    // https://github.com/google/XNNPACK/blob/f10adfeabe2edad4be1c9983db7a5f3482c007fe/src/xnnpack/hardware-config.h#L175
+    // If cpuinfo is not available, simply remove its calls,
     // fp16 will be always enabled if --rpi is not specified
     cpuinfo_initialize();
-    g_main_args.m_fp16_detected = cpuinfo_has_x86_avx512fp16()
-                     || cpuinfo_has_x86_amx_fp16()
-//                     || cpuinfo_has_arm_vfpv3_fp16()     // detected on cortex-a53, but fp16 can not be used there
-//                     || cpuinfo_has_arm_vfpv3_fp16_d32() // detected on cortex-a53, but fp16 can not be used there
-                     || cpuinfo_has_arm_fp16_arith()
-//                     || cpuinfo_has_arm_neon_fp16()      // detected on cortex-a53, but fp16 can not be used there
-                     || cpuinfo_has_arm_neon_fp16_arith();
+    g_main_args.m_fp16_detected = cpuinfo_has_x86_avx2()
+                               || cpuinfo_has_arm_fp16_arith()
+                               || cpuinfo_has_arm_neon_fp16_arith();
     g_main_args.m_rpi = !g_main_args.m_fp16_detected;
     if (g_main_args.m_auto_rpi == 'y') g_main_args.m_rpi = true;
     else if (g_main_args.m_auto_rpi == 'n') g_main_args.m_rpi = false;
     if (g_main_args.m_ops_printf) {
-        printf("cpuinfo_has_x86_avx512fp16(): %i\n",      cpuinfo_has_x86_avx512fp16());
-        printf("cpuinfo_has_x86_amx_fp16(): %i\n",        cpuinfo_has_x86_amx_fp16());
-//        printf("cpuinfo_has_arm_vfpv3_fp16(disabled): %i\n",      cpuinfo_has_arm_vfpv3_fp16());
-//        printf("cpuinfo_has_arm_vfpv3_fp16_d32(disabled): %i\n",  cpuinfo_has_arm_vfpv3_fp16_d32());
+        printf("cpuinfo_has_x86_avx2(): %i\n",            cpuinfo_has_x86_avx2());
         printf("cpuinfo_has_arm_fp16_arith(): %i\n",      cpuinfo_has_arm_fp16_arith());
-//        printf("cpuinfo_has_arm_neon_fp16(disabled): %i\n",       cpuinfo_has_arm_neon_fp16());
         printf("cpuinfo_has_arm_neon_fp16_arith(): %i\n", cpuinfo_has_arm_neon_fp16_arith());
     }
 
