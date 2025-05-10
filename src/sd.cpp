@@ -3157,6 +3157,7 @@ int main(int argc, char** argv)
             if(g_main_args.m_sampler_name == sampler_name[s]) {
                 g_main_args.m_sampler = (sampler_type)s;
                 v = true;
+                break;
             }
         if (!v) {
             printf("Unknown sampler name \"%s\", valid are: ", g_main_args.m_sampler_name.c_str());
