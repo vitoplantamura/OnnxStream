@@ -12,6 +12,10 @@
 #define NOMINMAX
 #include <windows.h>
 #include <psapi.h>
+#ifndef PF_ARM_V82_DP_INSTRUCTIONS_AVAILABLE
+ // https://github.com/google/XNNPACK/blob/f10adfeabe2edad4be1c9983db7a5f3482c007fe/src/configs/hardware-config.c#L17
+ #define PF_ARM_V82_DP_INSTRUCTIONS_AVAILABLE 43
+#endif
 #elif defined(__linux__)
 #include <unistd.h>   // for sysconf()
 #endif
@@ -102,6 +106,43 @@ struct MainArgs
 static MainArgs g_main_args;
 
 static unsigned n_threads = 0;
+
+inline static bool detect_fp16_support() noexcept
+{
+    // copied from XNNPACK backend:
+    // https://github.com/google/XNNPACK/blob/f10adfeabe2edad4be1c9983db7a5f3482c007fe/src/xnnpack/common.h#L17
+    // https://github.com/google/XNNPACK/blob/f10adfeabe2edad4be1c9983db7a5f3482c007fe/src/xnnpack/hardware-config.h#L175
+    // https://github.com/google/XNNPACK/blob/f10adfeabe2edad4be1c9983db7a5f3482c007fe/src/configs/hardware-config.c#L72
+#if defined(__arm__) || defined(_M_ARM) || \
+defined(__aarch64__) || defined(_M_ARM64) || defined(_M_ARM64EC)
+#ifdef _WIN32
+    bool use_arm_neon_fp16_arith = false;
+    SYSTEM_INFO system_info;
+    GetSystemInfo(&system_info);
+    switch (system_info.wProcessorLevel) {
+    case 0x803:  // Kryo 385 Silver
+        use_arm_neon_fp16_arith = true;
+        break;
+    default:
+        // Assume that Dot Product support implies FP16 support.
+        // ARM manuals don't guarantee that, but it holds in practice.
+        use_arm_neon_fp16_arith = !!IsProcessorFeaturePresent(PF_ARM_V82_DP_INSTRUCTIONS_AVAILABLE);
+        break;
+    }
+    return use_arm_neon_fp16_arith;
+#else // !_WIN32
+    cpuinfo_initialize();
+    return cpuinfo_has_arm_neon_fp16_arith();
+#endif // _WIN32
+#elif /* X86 */ \
+defined(__i386__) || defined(__i486__) || defined(__i586__) || defined(__i686__) || defined(_M_IX86) || \
+defined(__x86_64__) || defined(__x86_64) || defined(_M_X64) && !defined(_M_ARM64EC)
+    cpuinfo_initialize();
+    return cpuinfo_has_x86_avx2();
+#else // !X86 && !ARM
+    return true; // old logic, assuming FP16 is present if no --rpi is given
+#endif
+}
 
 #if !USE_NCNN
 
@@ -2431,7 +2472,7 @@ int main(int argc, char** argv)
         }
         else if (!strncmp(arg.c_str(), "--rpi-d",     strlen("--rpi-d"))     // rpi-disable
               || !strncmp(arg.c_str(), "--disable-r", strlen("--disable-r")) // disable-rpi
-              || !strncmp(arg.c_str(), "--no-r",      strlen("--no-r")))     // no-rpi
+              || !strncmp(arg.c_str(), "--not-r",      strlen("--not-r")))     // not-rpi
         {
             g_main_args.m_auto_rpi = 'n'; // alternative '--rpi no' syntax, for convenience
         }
@@ -2483,8 +2524,8 @@ int main(int argc, char** argv)
         }
         else if (!strncmp(arg.c_str(), "--disable-d", strlen("--disable-d")) // download
               || !strncmp(arg.c_str(), "--disable-a", strlen("--disable-a")) // auto-dl
-              || !strncmp(arg.c_str(), "--no-d",      strlen("--no-d"))      // no-dl
-              || !strncmp(arg.c_str(), "--no-a",      strlen("--no-a")))     // no-auto-dl
+              || !strncmp(arg.c_str(), "--not-d",      strlen("--not-d"))      // not-dl
+              || !strncmp(arg.c_str(), "--not-a",      strlen("--not-a")))     // not-auto-dl
         {
             g_main_args.m_download = 'n'; // alternative '--download no' syntax, for convenience
         }
@@ -2911,25 +2952,11 @@ int main(int argc, char** argv)
             g_main_args.m_path_safe = safe_path;
     }
 
-    // Using same logic as XNNPACK:
-    // https://github.com/google/XNNPACK/blob/f10adfeabe2edad4be1c9983db7a5f3482c007fe/src/xnnpack/hardware-config.h#L175
-    // https://github.com/google/XNNPACK/blob/f10adfeabe2edad4be1c9983db7a5f3482c007fe/src/configs/hardware-config.c#L92
-    // https://github.com/google/XNNPACK/blob/f10adfeabe2edad4be1c9983db7a5f3482c007fe/src/configs/hardware-config.c#L122
-    //
-    // If support of Windows for ARM will be needed,
-    // XNNPACK directly uses IsProcessorFeaturePresent():
-    // https://github.com/google/XNNPACK/blob/f10adfeabe2edad4be1c9983db7a5f3482c007fe/src/configs/hardware-config.c#L73-L83
-    //
-    // If cpuinfo is not available, simply remove its calls,
-    // fp16 will be always enabled if --rpi is not specified
-    cpuinfo_initialize();
-    g_main_args.m_fp16_detected = cpuinfo_has_x86_avx2() || cpuinfo_has_arm_neon_fp16_arith();
-    g_main_args.m_rpi = !g_main_args.m_fp16_detected;
-    if (g_main_args.m_auto_rpi == 'y') g_main_args.m_rpi = true;
-    else if (g_main_args.m_auto_rpi == 'n') g_main_args.m_rpi = false;
-    if (g_main_args.m_ops_printf) {
-        printf("cpuinfo_has_x86_avx2(): %i\n",            cpuinfo_has_x86_avx2());
-        printf("cpuinfo_has_arm_neon_fp16_arith(): %i\n", cpuinfo_has_arm_neon_fp16_arith());
+    g_main_args.m_fp16_detected = detect_fp16_support(); // also used in FP16 indication
+    switch (g_main_args.m_auto_rpi) {
+        case 'y': g_main_args.m_rpi = true;  break;
+        case 'n': g_main_args.m_rpi = false; break;
+        default:  g_main_args.m_rpi = !g_main_args.m_fp16_detected;
     }
 
     try
