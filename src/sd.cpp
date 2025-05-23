@@ -74,6 +74,7 @@ enum sampler_type {
     HEUN,
     DPM2,
     DPMPP2M,
+    DPMPP2MV2,
     DPMPP2S_A,
     LCM,
     NUM_OF_SAMPLERS // always last
@@ -85,6 +86,7 @@ const std::string sampler_name[NUM_OF_SAMPLERS] = {
     "heun",
     "dpm2",
     "dpm++2m",
+    "dpm++2mv2",
     "dpm++2s_a",
     "lcm",
 };
@@ -1494,6 +1496,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
             switch (sampler) {
             case DPM2:
             case DPMPP2M:
+            case DPMPP2MV2:
             case DPMPP2S_A:
                 // https://github.com/huggingface/diffusers/pull/5541
                 // DPM++ samplers have underflows and should be replaced with Euler
@@ -1878,6 +1881,105 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
 #endif // ORIGINAL_SAMPLER_ALGORITHMS
                 break;
             } // dpm++2m
+
+            case DPMPP2MV2: // DPM++ (2M) v2
+            // adapted from https://github.com/leejet/stable-diffusion.cpp
+            {
+                const float si1 = sigma_reshaper(sigma[i + 1], i);
+#if       ORIGINAL_SAMPLER_ALGORITHMS
+                if (!i || !si1) {
+                    if (!i) old_denoised = ncnn::Mat(x_mat.w, x_mat.h, x_mat.c, x_mat.v.data());
+                    float a = si1 / sigma[i];
+                    float b = exp(log(si1) - log(sigma[i])) - 1.f;
+                    for (int c = 0; c < 4; c++)
+                    {
+                        float* x_ptr = x_mat.channel(c);
+                        const float* x_ptr_end = x_ptr + latent_length;
+                        float* d_ptr = denoised.channel(c);
+                        float* o_ptr = old_denoised.channel(c);
+                        for (; x_ptr < x_ptr_end; x_ptr++)
+                        {
+                            *x_ptr = a * *x_ptr - b * *d_ptr;
+                            *o_ptr++ = *d_ptr++;
+                        }
+                    }
+                } else {
+                    // correcting sigmas less for many steps, or images become too blurry
+                    float si2 = sigma[i + 1];
+                    if (si1 != si2) si2 += pow(3.f / steps, 1.f / 3) * (si1 - si2);
+
+                    float t       = -log(sigma[i]);
+                    float t_next  = -log(si2);
+                    float h       = t_next - t;
+                    float a       = si2 / sigma[i];
+                    float h_last  = t + log(sigma[i - 1]);
+                    float h_min   = std::min(h_last, h);
+                    float h_max   = std::max(h_last, h);
+                    float r       = h_max / h_min;
+                    float h_d    = (h_max + h_min) / 2.f;
+                    float b      = exp(-h_d) - 1.f;
+                    for (int c = 0; c < 4; c++)
+                    {
+                        float* x_ptr = x_mat.channel(c);
+                        const float* x_ptr_end = x_ptr + latent_length;
+                        float* d_ptr = denoised.channel(c);
+                        float* o_ptr = old_denoised.channel(c);
+                        for (; x_ptr < x_ptr_end; x_ptr++)
+                        {
+                            float d = (1.f + 1.f / (2.f * r)) * *d_ptr 
+                                          - (1.f / (2.f * r)) * *o_ptr;
+                            *x_ptr = a * *x_ptr - b * d;
+                            *o_ptr++ = *d_ptr++;
+                        }
+                    }
+                }
+#else  // ORIGINAL_SAMPLER_ALGORITHMS
+                // simplified
+                if (!i || !si1) {
+                    if (!i) old_denoised = ncnn::Mat(x_mat.w, x_mat.h, x_mat.c, x_mat.v.data());
+                    // Euler step
+                    const float sigma_mul = si1 / sigma[i];
+                    for (int c = 0; c < 4; c++)
+                    {
+                        float* x_ptr = x_mat.channel(c);
+                        const float* x_ptr_end = x_ptr + latent_length;
+                        float* d_ptr = denoised.channel(c);
+                        float* o_ptr = old_denoised.channel(c);
+                        for (; x_ptr < x_ptr_end; x_ptr++)
+                        {
+                            *x_ptr = (*x_ptr - *d_ptr) * sigma_mul + *d_ptr;
+                            *o_ptr++ = *d_ptr++;
+                        }
+                    }
+                } else {
+                    // correcting sigmas less for many steps, or images become too blurry
+                    float si2 = sigma[i + 1];
+                    if (si1 != si2) si2 += pow(3.f / steps, 1.f / 3) * (si1 - si2);
+
+                    float a       = si2 / sigma[i];
+                    float a_last  = sigma[i] / sigma[i - 1];
+                    float a_max   = std::max(a_last, a);
+                    float a_min   = std::min(a_last, a);
+                    float r       = std::log(a_max) / std::log(a_min) / 2.f;
+                    float m       = 1.f - std::sqrt(a_min * a_max);
+                    r *= -m;
+                    m -= r;
+                    for (int c = 0; c < 4; c++)
+                    {
+                        float* x_ptr = x_mat.channel(c);
+                        const float* x_ptr_end = x_ptr + latent_length;
+                        float* d_ptr = denoised.channel(c);
+                        float* o_ptr = old_denoised.channel(c);
+                        for (; x_ptr < x_ptr_end; x_ptr++)
+                        {
+                            *x_ptr = a * *x_ptr + *d_ptr * m + *o_ptr * r;
+                            *o_ptr++ = *d_ptr++;
+                        }
+                    }
+                }
+#endif // ORIGINAL_SAMPLER_ALGORITHMS
+                break;
+            } // dpm++2mv2
 
             case DPM2: // DPM2
             // adapted from https://github.com/leejet/stable-diffusion.cpp
@@ -3244,14 +3346,14 @@ int main(int argc, char** argv)
     }
 
     {
-        bool v = false;
+        bool valid = false;
         for (unsigned s = 0; s < NUM_OF_SAMPLERS; s++)
             if(g_main_args.m_sampler_name == sampler_name[s]) {
                 g_main_args.m_sampler = (sampler_type)s;
-                v = true;
+                valid = true;
                 break;
             }
-        if (!v) {
+        if (!valid) {
             printf("Unknown sampler name \"%s\", valid are: ", g_main_args.m_sampler_name.c_str());
             for (unsigned int s = 0; s < NUM_OF_SAMPLERS - 1; s++) { printf("%s, ", sampler_name[s].c_str()); }
             printf("%s.\n", sampler_name[NUM_OF_SAMPLERS - 1].c_str());
