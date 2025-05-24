@@ -76,6 +76,8 @@ enum sampler_type {
     DPMPP2M,
     DPMPP2MV2,
     DPMPP2S_A,
+    IPNDM,
+    IPNDM_V,
     LCM,
     NUM_OF_SAMPLERS // always last
 };
@@ -88,6 +90,8 @@ const std::string sampler_name[NUM_OF_SAMPLERS] = {
     "dpm++2m",
     "dpm++2mv2",
     "dpm++2s_a",
+    "ipndm",
+    "ipndm_v",
     "lcm",
 };
 
@@ -1482,8 +1486,14 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
             return si1 * (sigma_curve ? std::max(0.0001f, sigma_curve) : 0.f);
         };
 
+        sampler_type sampler = g_main_args.m_sampler;
         ncnn::Mat old_denoised; // for DPM++ (2M) and 2-step samplers
         ncnn::Mat old_d;        // for Heun
+
+        std::vector<ncnn::Mat> sampler_history_buffer; // for IPNDM
+        if (sampler == IPNDM || sampler == IPNDM_V) // reserving memory for 4 elements
+            for (int k = 0; k < 4; k++) sampler_history_buffer.push_back(ncnn::Mat(x_mat.w, x_mat.h, x_mat.c));
+
         const unsigned int /*long*/ latent_length = g_main_args.m_latw * g_main_args.m_lath;
         for (int i = 0; i < steps; i++)
         {
@@ -1492,7 +1502,6 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
             ncnn::Mat denoised = CFGDenoiser_CompVisDenoiser(net, log_sigmas, x_mat, sigma[i], c, uc, sdxl_params, model);
 
 #define ORIGINAL_SAMPLER_ALGORITHMS 1
-            sampler_type sampler = g_main_args.m_sampler;
             switch (sampler) {
             case DPM2:
             case DPMPP2M:
@@ -2089,6 +2098,85 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
 #endif // ORIGINAL_SAMPLER_ALGORITHMS
                 break;
             } // dpm2
+
+            case IPNDM:  // iPNDM sampler from https://github.com/zju-pi/diff-sampler/tree/main/diff-solvers-main
+            // adapted from https://github.com/leejet/stable-diffusion.cpp
+            {
+                const float si1 = sigma_reshaper(sigma[i + 1], i);
+                float sd = si1 - sigma[i];
+
+                // shifting 3 history elements
+                for (int k = 3; k; k--) sampler_history_buffer[k] = sampler_history_buffer[k - 1];
+
+                for (int c = 0; c < 4; c++)
+                {
+                    float* x_ptr = x_mat.channel(c);
+                    const float* x_ptr_end = x_ptr + latent_length;
+                    float* d_ptr = denoised.channel(c);
+                    float *b0_ptr = sampler_history_buffer[0].channel(c),
+                          *b1_ptr = sampler_history_buffer[1].channel(c),
+                          *b2_ptr = sampler_history_buffer[2].channel(c),
+                          *b3_ptr = sampler_history_buffer[3].channel(c);
+                    for (; x_ptr < x_ptr_end; x_ptr++)
+                    {
+                        float d = (*x_ptr - *d_ptr++) / sigma[i]; *b0_ptr++ = d;
+                        switch (i) {
+                        case 0: // first, Euler step
+                            *x_ptr += sd * d;
+                            break;
+                        case 1: // second, use one history point
+                            *x_ptr += sd * (3 * d  - *b1_ptr++) / 2;
+                            break;
+                        case 2: // third, use two history points
+                            *x_ptr += sd * (23 * d - 16 * *b1_ptr++ + 5 * *b2_ptr++) / 12;
+                            break;
+                        default: // fourth+, use three history points
+                            *x_ptr += sd * (55 * d - 59 * *b1_ptr++ + 37 * *b2_ptr++ - 9 * *b3_ptr++) / 24;
+                        }
+                    }
+                }
+                break;
+            } // ipndm
+
+            case IPNDM_V:  // iPNDM_v sampler from https://github.com/zju-pi/diff-sampler/tree/main/diff-solvers-main
+            // adapted from https://github.com/leejet/stable-diffusion.cpp
+            {
+                const float si1 = sigma_reshaper(sigma[i + 1], i);
+                float h_n = si1 - sigma[i];
+                float h_n_1 = (i > 0) ? (sigma[i] - sigma[i - 1]) : h_n;
+
+                // shifting 3 history elements
+                for (int k = 3; k; k--) sampler_history_buffer[k] = sampler_history_buffer[k - 1];
+
+                for (int c = 0; c < 4; c++)
+                {
+                    float* x_ptr = x_mat.channel(c);
+                    const float* x_ptr_end = x_ptr + latent_length;
+                    float* d_ptr = denoised.channel(c);
+                    float *b0_ptr = sampler_history_buffer[0].channel(c),
+                          *b1_ptr = sampler_history_buffer[1].channel(c),
+                          *b2_ptr = sampler_history_buffer[2].channel(c),
+                          *b3_ptr = sampler_history_buffer[3].channel(c);
+                    for (; x_ptr < x_ptr_end; x_ptr++)
+                    {
+                        float d = (*x_ptr - *d_ptr++) / sigma[i]; *b0_ptr++ = d;
+                        switch (i) {
+                        case 0: // first, Euler step
+                            *x_ptr += h_n * d;
+                            break;
+                        case 1: // second, use one history point
+                            *x_ptr += h_n * ((2 + (h_n / h_n_1)) * d - (h_n / h_n_1) * *b1_ptr++) / 2;
+                            break;
+                        case 2: // third, use two history points
+                            *x_ptr += h_n * (23 * d - 16 * *b1_ptr++ + 5 * *b2_ptr++) / 12;
+                            break;
+                        default: // fourth+, use three history points
+                            *x_ptr += h_n * (55 * d - 59 * *b1_ptr++ + 37 * *b2_ptr++ - 9 * *b3_ptr++) / 24;
+                        }
+                    }
+                }
+                break;
+            } // ipndm_v
 
             case LCM: // Latent consistency models
             // adapted from https://github.com/leejet/stable-diffusion.cpp
