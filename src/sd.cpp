@@ -78,6 +78,7 @@ enum sampler_type {
     DPMPP2S_A,
     IPNDM,
     IPNDM_V,
+    IPNDM_VO,
     LCM,
     NUM_OF_SAMPLERS // always last
 };
@@ -92,6 +93,7 @@ const std::string sampler_name[NUM_OF_SAMPLERS] = {
     "dpm++2s_a",
     "ipndm",
     "ipndm_v",
+    "ipndm_vo",
     "lcm",
 };
 
@@ -1490,8 +1492,9 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
         ncnn::Mat old_denoised; // for DPM++ (2M) and 2-step samplers
         ncnn::Mat old_d;        // for Heun
 
-        std::vector<ncnn::Mat> sampler_history_buffer; // for IPNDM
-        if (sampler == IPNDM || sampler == IPNDM_V) // reserving memory for 4 elements
+        // reserving memory for history elements
+        std::vector<ncnn::Mat> sampler_history_buffer;
+        if (sampler == IPNDM || sampler == IPNDM_V || sampler == IPNDM_VO) // iPNDM, 4 elements
             for (int k = 0; k < 4; k++) sampler_history_buffer.push_back(ncnn::Mat(x_mat.w, x_mat.h, x_mat.c));
 
         const unsigned int /*long*/ latent_length = g_main_args.m_latw * g_main_args.m_lath;
@@ -2106,7 +2109,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                 float sd = si1 - sigma[i];
 
                 // shifting 3 history elements
-                for (int k = 3; k; k--) sampler_history_buffer[k] = sampler_history_buffer[k - 1];
+                if (i) for (int k = 3; k; k--) sampler_history_buffer[k] = sampler_history_buffer[k - 1];
 
                 for (int c = 0; c < 4; c++)
                 {
@@ -2146,7 +2149,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                 float h_n_1 = (i > 0) ? (sigma[i] - sigma[i - 1]) : h_n;
 
                 // shifting 3 history elements
-                for (int k = 3; k; k--) sampler_history_buffer[k] = sampler_history_buffer[k - 1];
+                if (i) for (int k = 3; k; k--) sampler_history_buffer[k] = sampler_history_buffer[k - 1];
 
                 for (int c = 0; c < 4; c++)
                 {
@@ -2177,6 +2180,190 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                 }
                 break;
             } // ipndm_v
+
+            case IPNDM_VO:  // iPNDM_v sampler from https://github.com/zju-pi/diff-sampler/tree/main/diff-solvers-main
+            // replicated Python code of variable-step version, without modifications
+            // slower, needs ~2 times more steps
+            {
+                const float si1 = sigma_reshaper(sigma[i + 1], i);
+
+                // shifting 3 history elements
+                if (i) for (int k = 3; k; k--) sampler_history_buffer[k] = sampler_history_buffer[k - 1];
+                // not needed, array is copied
+                //sampler_history_buffer[0] = ncnn::Mat(x_mat.w, x_mat.h, x_mat.c);
+
+#if       ORIGINAL_SAMPLER_ALGORITHMS
+                for (int c = 0; c < 4; c++)
+                {
+                    float* x_ptr = x_mat.channel(c);
+                    const float* x_ptr_end = x_ptr + latent_length;
+                    float* d_ptr = denoised.channel(c);
+                    float *b0_ptr = sampler_history_buffer[0].channel(c),
+                          *b1_ptr = sampler_history_buffer[1].channel(c),
+                          *b2_ptr = sampler_history_buffer[2].channel(c),
+                          *b3_ptr = sampler_history_buffer[3].channel(c);
+                    for (; x_ptr < x_ptr_end; x_ptr++)
+                    {
+                        float d = (*x_ptr - *d_ptr++) / sigma[i]; *b0_ptr++ = d;
+                        switch (i) {
+                        case 0: // first, Euler step
+                        {
+                            float h_n = si1 - sigma[i];
+                            *x_ptr += h_n * d;
+                            break;
+                        }
+                        case 1: // second, use one history point
+                        {
+                            float h_n = (si1 - sigma[i]);
+                            float h_n_1 = (sigma[i] - sigma[i-1]);
+                            float coeff1 = (2 + (h_n / h_n_1)) / 2;
+                            float coeff2 = -(h_n / h_n_1) / 2;
+                            *x_ptr += h_n * (coeff1 * d + coeff2 * *b1_ptr++);
+                            break;
+                        }
+                        case 2: // third, use two history points
+                        {
+                            float h_n = (si1 - sigma[i]);
+                            float h_n_1 = (sigma[i] - sigma[i-1]);
+                            float h_n_2 = (sigma[i-1] - sigma[i-2]);
+                            float temp = (1 - h_n / (3 * (h_n + h_n_1)) 
+                                       * (h_n * (h_n + h_n_1)) 
+                                       / (h_n_1 * (h_n_1 + h_n_2))) / 2;
+                            float coeff1 = (2 + (h_n / h_n_1)) / 2 + temp;
+                            float coeff2 = -(h_n / h_n_1) / 2 
+                                         - (1 + h_n_1 / h_n_2) * temp;
+                            float coeff3 = temp * h_n_1 / h_n_2;
+                            *x_ptr += (si1 - sigma[i]) 
+                                   * (coeff1 * d + coeff2 
+                                   * *b1_ptr++ 
+                                   + coeff3 * *b2_ptr++);
+                            break;
+                        }
+                        default: // fourth+, use three history points
+                        {
+                            float h_n = (si1 - sigma[i]);
+                            float h_n_1 = (sigma[i] - sigma[i-1]);
+                            float h_n_2 = (sigma[i-1] - sigma[i-2]);
+                            float h_n_3 = (sigma[i-2] - sigma[i-3]);
+                            float temp1 = (1 - h_n / (3 * (h_n + h_n_1)) 
+                                        * (h_n * (h_n + h_n_1)) 
+                                        / (h_n_1 * (h_n_1 + h_n_2))) / 2;
+                            float temp2 = ((1 - h_n / (3 * (h_n + h_n_1))) 
+                                        / 2 + (1 - h_n / (2 * (h_n + h_n_1))) 
+                                        * h_n / (6 * (h_n + h_n_1 + h_n_2))) 
+                                        * (h_n * (h_n + h_n_1) * (h_n + h_n_1 
+                                        + h_n_2)) / (h_n_1 * (h_n_1 + h_n_2) 
+                                        * (h_n_1 + h_n_2 + h_n_3));
+                            float coeff1 = (2 + (h_n / h_n_1)) / 2 + temp1 
+                                         + temp2;
+                            float coeff2 = -(h_n / h_n_1) / 2 - (1 + h_n_1 
+                                         / h_n_2) * temp1 - (1 + (h_n_1 
+                                         / h_n_2) + (h_n_1 * (h_n_1 + h_n_2)
+                                         / (h_n_2 * (h_n_2 + h_n_3)))) * temp2;
+                            float coeff3 = temp1 * h_n_1 / h_n_2 + ((h_n_1 
+                                         / h_n_2) 
+                                         + (h_n_1 * (h_n_1 + h_n_2) / (h_n_2 
+                                         * (h_n_2 + h_n_3))) 
+                                         * (1 + h_n_2 / h_n_3)) * temp2;
+                            float coeff4 = -temp2 * (h_n_1 * (h_n_1 + h_n_2) 
+                                         / (h_n_2 * (h_n_2 + h_n_3))) * h_n_1 
+                                         / h_n_2;
+                            *x_ptr += (si1 - sigma[i]) * (coeff1 * d 
+                                    + coeff2 * *b1_ptr++ 
+                                    + coeff3 * *b2_ptr++
+                                    + coeff4 * *b3_ptr++);
+                        } // 4+
+                        } // switch()
+                    }
+                }
+#else  // ORIGINAL_SAMPLER_ALGORITHMS
+                float
+                //double
+                //long double
+                           h_n = si1 - sigma[i], 
+                           h_n_1, h_n_2, h_n_3, 
+                           coeff11, coeff12,
+                           coeff21, coeff22, coeff23,
+                           coeff31, coeff32, coeff33, coeff34;
+                if (i)     {
+                           h_n_1 = sigma[i] - sigma[i - 1];
+                           coeff11 = -h_n / h_n_1 * h_n / 2;
+                           coeff12 = h_n - coeff11;
+                }
+                if (i > 1) {
+                           h_n_2 = sigma[i - 1] - sigma[i - 2];
+                           auto temp = .5f - h_n / h_n_1 * h_n / (h_n_1 + h_n_2) / 6;
+                           coeff21 = h_n * ((2 + (h_n / h_n_1)) / 2 + temp);
+                           coeff22 = h_n * (-(h_n / h_n_1) / 2 - (1 + h_n_1 / h_n_2) * temp);
+                           coeff23 = h_n * temp * h_n_1 / h_n_2;
+                }
+                if (i > 2) {
+                           h_n_3 = sigma[i - 2] - sigma[i - 3];
+                           auto temp2 = (.5f - h_n / (h_n + h_n_1) / 6
+                                        + (h_n_1 + si1 - sigma[i - 1]) / (h_n + h_n_1)
+                                         * h_n / (h_n + h_n_1 + h_n_2) / 12
+                                        )
+                                        *  h_n                  /  h_n_1
+                                        * (h_n + h_n_1        ) / (h_n_1 + h_n_2        )
+                                        * (h_n + h_n_1 + h_n_2) / (h_n_1 + h_n_2 + h_n_3);
+                           coeff31 = coeff21 + h_n * temp2;
+                           coeff32 = coeff22 - h_n * ((1 + (h_n_1 
+                                   / h_n_2) + (h_n_1 * (h_n_1 + h_n_2)
+                                   / (h_n_2 * (h_n_2 + h_n_3)))) * temp2);
+                           coeff33 = coeff23 + h_n * (((h_n_1 
+                                   / h_n_2) 
+                                   + (h_n_1 * (h_n_1 + h_n_2) / (h_n_2 
+                                   * (h_n_2 + h_n_3))) 
+                                   * (1 + h_n_2 / h_n_3)) * temp2);
+                           coeff34 = h_n * (-temp2 * (h_n_1 * (h_n_1 + h_n_2) 
+                                   / (h_n_2 * (h_n_2 + h_n_3))) * h_n_1 
+                                   / h_n_2);
+                }
+
+                for (int c = 0; c < 4; c++)
+                {
+                    float* x_ptr = x_mat.channel(c);
+                    const float* x_ptr_end = x_ptr + latent_length;
+                    float* d_ptr = denoised.channel(c);
+                    float *b0_ptr = sampler_history_buffer[0].channel(c),
+                          *b1_ptr = sampler_history_buffer[1].channel(c),
+                          *b2_ptr = sampler_history_buffer[2].channel(c),
+                          *b3_ptr = sampler_history_buffer[3].channel(c);
+                    for (; x_ptr < x_ptr_end; x_ptr++)
+                    {
+                        float d = (*x_ptr - *d_ptr++) / sigma[i]; *b0_ptr++ = d;
+                        switch (i) {
+                        case 0: // first, Euler step
+                        {
+                            *x_ptr += h_n * d;
+                            break;
+                        }
+                        case 1: // second, use one history point
+                        {
+                            *x_ptr +=  coeff12 * d + coeff11 * *b1_ptr++;
+                            break;
+                        }
+                        case 2: // third, use two history points
+                        {
+
+                            *x_ptr += coeff21 * d 
+                                    + coeff22 * *b1_ptr++ 
+                                    + coeff23 * *b2_ptr++;
+                            break;
+                        }
+                        default: // fourth+, use three history points
+                        {
+                            *x_ptr += coeff31 * d 
+                                    + coeff32 * *b1_ptr++ 
+                                    + coeff33 * *b2_ptr++
+                                    + coeff34 * *b3_ptr++;
+                        } // 4+
+                        } // switch()
+                    }
+                }
+#endif // ORIGINAL_SAMPLER_ALGORITHMS
+                break;
+            } // ipndm_vo
 
             case LCM: // Latent consistency models
             // adapted from https://github.com/leejet/stable-diffusion.cpp
