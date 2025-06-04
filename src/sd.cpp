@@ -79,6 +79,7 @@ enum sampler_type {
     IPNDM,
     IPNDM_V,
     IPNDM_VO,
+    TAYLOR3,
     LCM,
     NUM_OF_SAMPLERS // always last
 };
@@ -94,6 +95,7 @@ const std::string sampler_name[NUM_OF_SAMPLERS] = {
     "ipndm",
     "ipndm_v",
     "ipndm_vo",
+    "taylor3",
     "lcm",
 };
 
@@ -1496,6 +1498,12 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
         std::vector<ncnn::Mat> sampler_history_buffer;
         if (sampler == IPNDM || sampler == IPNDM_V || sampler == IPNDM_VO) // iPNDM, 4 elements
             for (int k = 0; k < 4; k++) sampler_history_buffer.push_back(ncnn::Mat(x_mat.w, x_mat.h, x_mat.c));
+        else if (sampler == TAYLOR3) { // Taylor3, 1 buffer + 2 history elements, initialized to x
+            sampler_history_buffer.push_back(ncnn::Mat(x_mat.w, x_mat.h, x_mat.c));
+            sampler_history_buffer.push_back(ncnn::Mat(x_mat.w, x_mat.h, x_mat.c, x_mat.v.data()));
+            sampler_history_buffer.push_back(ncnn::Mat(x_mat.w, x_mat.h, x_mat.c, x_mat.v.data()));
+        }
+        float sampler_history_dt; // for Taylor3
 
         const unsigned int /*long*/ latent_length = g_main_args.m_latw * g_main_args.m_lath;
         for (int i = 0; i < steps; i++)
@@ -2364,6 +2372,108 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
 #endif // ORIGINAL_SAMPLER_ALGORITHMS
                 break;
             } // ipndm_vo
+
+            case TAYLOR3:  // third-order-Taylor extension of Euler
+            // adapted from https://github.com/aagdev/mlimgsynth
+            {
+                const float si1 = sigma_reshaper(sigma[i + 1], i);
+
+#if       ORIGINAL_SAMPLER_ALGORITHMS
+                float dt = si1 - sigma[i], idtp, f2, f3, d2, d3;
+                idtp = 1 / sampler_history_dt;
+                f2 = dt * dt / 2;
+                f3 = dt * dt * dt / 6;
+
+                // shifting 2 history elements
+                if (i) for (int k = 2; k; k--) sampler_history_buffer[k] = sampler_history_buffer[k - 1];
+
+                for (int c = 0; c < 4; c++)
+                {
+                    float* x_ptr = x_mat.channel(c);
+                    const float* x_ptr_end = x_ptr + latent_length;
+                    float* d_ptr = denoised.channel(c);
+                    float *b0_ptr = sampler_history_buffer[0].channel(c),
+                          *b1_ptr = sampler_history_buffer[1].channel(c),
+                          *b2_ptr = sampler_history_buffer[2].channel(c);
+                    for (; x_ptr < x_ptr_end; x_ptr++)
+                    {
+                        float d = (*x_ptr - *d_ptr++) / sigma[i]; *b0_ptr++ = d;
+                        switch (i) {
+                        case 0: // first, Euler step
+                        {
+                            *x_ptr += dt * d;
+                            break;
+                        }
+                        case 1: // second, using one history point
+                        {
+                            d2 = (d - *b1_ptr++) * idtp;
+                            *x_ptr += dt * d + f2 * d2;
+                            break;
+                        }
+                        default: // third+, using two history points
+                        {
+                            d2 = (d - *b1_ptr++) * idtp;
+                            d3 = (d2 - *b2_ptr++) * idtp;
+                            *x_ptr += dt * d + f2 * d2 + f3 * d3;
+                            break;
+                        } // 3+
+                        } // switch()
+                    }
+                }
+#else  // ORIGINAL_SAMPLER_ALGORITHMS
+                float
+                //double
+                //long double
+                    dt = si1 - sigma[i], f11, f12, f21, f22, f23;
+                if (i) {
+                    f12 = -dt * dt / sampler_history_dt / 2;
+                    f11 = dt - f12;
+                    if (i > 1) {
+                        f23 = f12 * dt / 3;
+                        f22 = f12 + f23 / sampler_history_dt;
+                        f21 = dt - f22;
+                    }
+                }
+
+                // shifting 2 history elements
+                if (i) for (int k = 2; k; k--) sampler_history_buffer[k] = sampler_history_buffer[k - 1];
+
+                for (int c = 0; c < 4; c++)
+                {
+                    float* x_ptr = x_mat.channel(c);
+                    const float* x_ptr_end = x_ptr + latent_length;
+                    float* d_ptr = denoised.channel(c);
+                    float *b0_ptr = sampler_history_buffer[0].channel(c),
+                          *b1_ptr = sampler_history_buffer[1].channel(c),
+                          *b2_ptr = sampler_history_buffer[2].channel(c);
+                    for (; x_ptr < x_ptr_end; x_ptr++)
+                    {
+                        float d = (*x_ptr - *d_ptr++) / sigma[i]; *b0_ptr++ = d;
+                        switch (i) {
+                        case 0: // first, Euler step
+                        {
+                            *x_ptr += dt * d;
+                            break;
+                        }
+                        case 1: // second, using one history point
+                        {
+                            *x_ptr += f11 * d + f12 * *b1_ptr++;
+                            break;
+                        }
+                        default: // third+, using two history points
+                        {
+                            *x_ptr += f21 * d + f22 * *b1_ptr++ + f23 * *b2_ptr++;
+                            break;
+                        } // 3+
+                        } // switch()
+                    }
+                }
+#endif // ORIGINAL_SAMPLER_ALGORITHMS
+
+                sampler_history_dt = dt;
+
+                break;
+            } // taylor3
 
             case LCM: // Latent consistency models
             // adapted from https://github.com/leejet/stable-diffusion.cpp
