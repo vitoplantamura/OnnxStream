@@ -75,6 +75,7 @@ enum sampler_type {
     DPM2,
     DPMPP2M,
     DPMPP2MV2,
+    DPMPP2S,
     DPMPP2S_A,
     IPNDM,
     IPNDM_V,
@@ -91,6 +92,7 @@ const std::string sampler_name[NUM_OF_SAMPLERS] = {
     "dpm2",
     "dpm++2m",
     "dpm++2mv2",
+    "dpm++2s",
     "dpm++2s_a",
     "ipndm",
     "ipndm_v",
@@ -1517,6 +1519,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
             case DPM2:
             case DPMPP2M:
             case DPMPP2MV2:
+            case DPMPP2S:
             case DPMPP2S_A:
                 // https://github.com/huggingface/diffusers/pull/5541
                 // DPM++ samplers have underflows and should be replaced with Euler
@@ -1677,6 +1680,48 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
 #endif // ORIGINAL_SAMPLER_ALGORITHMS
                 break;
             } // heun
+
+            case DPMPP2S: // DPM++ (2S)
+            // adapted from https://github.com/leejet/stable-diffusion.cpp
+            {
+                const float si1 = sigma_reshaper(sigma[i + 1], i);
+                if (!i) // intermediat half-step x
+                    old_denoised = ncnn::Mat(x_mat.w, x_mat.h, x_mat.c, x_mat.v.data());
+                if (!si1) {
+                    x_mat = ncnn::Mat(denoised.w, denoised.h, denoised.c, denoised.v.data());
+                } else {
+                    float a = si1 / sigma[i];
+                    float b = sqrt(a);
+                    for (int c = 0; c < 4; c++)
+                    {
+                        float* x_ptr = x_mat.channel(c);
+                        const float* x_ptr_end = x_ptr + latent_length;
+                        float* x2_ptr = old_denoised.channel(c);
+                        float* d_ptr = denoised.channel(c);
+                        for (; x_ptr < x_ptr_end; x_ptr++)
+                        {
+                            // First half-step
+                            *x2_ptr = *d_ptr + b * (*x_ptr - *d_ptr);
+                            d_ptr++;
+                            x2_ptr++;
+                        }
+                    }
+                    denoised = CFGDenoiser_CompVisDenoiser(net, log_sigmas, old_denoised, sigma[i + 1], c, uc, sdxl_params, model);
+                    for (int c = 0; c < 4; c++)
+                    {
+                        float* x_ptr = x_mat.channel(c);
+                        const float* x_ptr_end = x_ptr + latent_length;
+                        float* d_ptr = denoised.channel(c);
+                        for (; x_ptr < x_ptr_end; x_ptr++)
+                        {
+                            // Second half-step
+                            *x_ptr = *d_ptr + a * (*x_ptr - *d_ptr);
+                            d_ptr++;
+                        }
+                    }
+                }
+                break;
+            } // dpm++2s
 
             case DPMPP2S_A: // DPM++ (2S) Ancestral
             // adapted from https://github.com/leejet/stable-diffusion.cpp
