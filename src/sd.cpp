@@ -1492,6 +1492,13 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
             return si1 * (sigma_curve ? std::max(0.0001f, sigma_curve) : 0.f);
         };
 
+        // correcting sigmas less for many steps, or images become too blurry
+        auto sigma_reshaper_sharp = [=](const float si1, const int i) -> const float {
+            const float pre_res = sigma_reshaper(si1, i);
+            const float smoothness = 3 / (steps - 2.5f);
+            return si1 + ((pre_res == si1) ? 0 : smoothness / abs(smoothness) * pow(abs(smoothness), 1.f / 3) * (pre_res - si1));
+        };
+
         sampler_type sampler = g_main_args.m_sampler;
         ncnn::Mat old_denoised; // for DPM++ (2M) and 2-step samplers
         ncnn::Mat old_d;        // for Heun
@@ -1950,7 +1957,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
             case DPMPP2MV2: // DPM++ (2M) v2
             // adapted from https://github.com/leejet/stable-diffusion.cpp
             {
-                const float si1 = sigma_reshaper(sigma[i + 1], i);
+                const float si1 = sigma_reshaper_sharp(sigma[i + 1], i);
 #if       ORIGINAL_SAMPLER_ALGORITHMS
                 if (!i || !si1) {
                     if (!i) old_denoised = ncnn::Mat(x_mat.w, x_mat.h, x_mat.c, x_mat.v.data());
@@ -1969,14 +1976,10 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                         }
                     }
                 } else {
-                    // correcting sigmas less for many steps, or images become too blurry
-                    float si2 = sigma[i + 1];
-                    if (si1 != si2) si2 += pow(3.f / steps, 1.f / 3) * (si1 - si2);
-
                     float t       = -log(sigma[i]);
-                    float t_next  = -log(si2);
+                    float t_next  = -log(si1);
                     float h       = t_next - t;
-                    float a       = si2 / sigma[i];
+                    float a       = si1 / sigma[i];
                     float h_last  = t + log(sigma[i - 1]);
                     float h_min   = std::min(h_last, h);
                     float h_max   = std::max(h_last, h);
@@ -2017,11 +2020,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                         }
                     }
                 } else {
-                    // correcting sigmas less for many steps, or images become too blurry
-                    float si2 = sigma[i + 1];
-                    if (si1 != si2) si2 += pow(3.f / steps, 1.f / 3) * (si1 - si2);
-
-                    float a       = si2 / sigma[i];
+                    float a       = si1 / sigma[i];
                     float a_last  = sigma[i] / sigma[i - 1];
                     float a_max   = std::max(a_last, a);
                     float a_min   = std::min(a_last, a);
@@ -2398,7 +2397,6 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                         }
                         case 2: // third, use two history points
                         {
-
                             *x_ptr += coeff21 * d 
                                     + coeff22 * *b1_ptr++ 
                                     + coeff23 * *b2_ptr++;
@@ -2421,8 +2419,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
             case TAYLOR3:  // third-order-Taylor extension of Euler
             // adapted from https://github.com/aagdev/mlimgsynth
             {
-                const float si1 = sigma_reshaper(sigma[i + 1], i);
-
+                const float si1 = sigma_reshaper_sharp(sigma[i + 1], i);
 #if       ORIGINAL_SAMPLER_ALGORITHMS
                 float dt = si1 - sigma[i], idtp, f2, f3, d2, d3;
                 idtp = 1 / sampler_history_dt;
