@@ -81,6 +81,8 @@ enum sampler_type {
     IPNDM_V,
     IPNDM_VO,
     TAYLOR3,
+    DDPM,
+    DDPM_A,
     LCM,
     NUM_OF_SAMPLERS // always last
 };
@@ -98,6 +100,8 @@ const std::string sampler_name[NUM_OF_SAMPLERS] = {
     "ipndm_v",
     "ipndm_vo",
     "taylor3",
+    "ddpm",
+    "ddpm_a",
     "lcm",
 };
 
@@ -1514,6 +1518,8 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
         }
         float sampler_history_dt; // for Taylor3
 
+        float eta = .0f; // for DDPM, randomness
+
         const unsigned int /*long*/ latent_length = g_main_args.m_latw * g_main_args.m_lath;
         for (int i = 0; i < steps; i++)
         {
@@ -2516,6 +2522,49 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
 
                 break;
             } // taylor3
+
+            case DDPM_A: // Denoising Diffusion Probabilistic Models
+                eta = 1.f; // random == ancestral
+            case DDPM:
+            // adapted from https://github.com/Windsander/ADI-Stable-Diffusion
+            {
+                float s2 = sigma[i] * sigma[i];
+                float sn2 = sigma[i + 1] * sigma[i + 1];
+                float scale_back = sqrt(s2 + 1.0f);
+                float d = sqrt(sn2 + 1.0f);
+                float variance = (eta <= 0) ? 0.0f :
+                                 (eta * sqrt(s2 - sn2) / d * sigma[i + 1] / sigma[i]);
+                float a = sn2 / s2 * scale_back / d;
+                float b = (s2 - sn2) / d / s2;
+
+                if (variance <= 0) {
+                for (int c = 0; c < 4; c++)
+                {
+                    float* x_ptr = x_mat.channel(c);
+                    const float* x_ptr_end = x_ptr + latent_length;
+                    float* d_ptr = denoised.channel(c);
+                    for (; x_ptr < x_ptr_end; x_ptr++)
+                    {
+                        *x_ptr = *x_ptr * a + *d_ptr++ * b;
+                    }
+                }
+                } else { // variance > 0
+                std::srand(seed++);
+                ncnn::Mat randn = randn_4_w_h(rand() % 1000, g_main_args.m_latw, g_main_args.m_lath);
+                for (int c = 0; c < 4; c++)
+                {
+                    float* x_ptr = x_mat.channel(c);
+                    const float* x_ptr_end = x_ptr + latent_length;
+                    float* d_ptr = denoised.channel(c);
+                    float* r_ptr = randn.channel(c);
+                    for (; x_ptr < x_ptr_end; x_ptr++)
+                    {
+                        *x_ptr = *x_ptr * a + *d_ptr++ * b + *r_ptr++ * variance;
+                    }
+                }
+                }
+                break;
+            } // ddpm / ddpm_a
 
             case LCM: // Latent consistency models
             // adapted from https://github.com/leejet/stable-diffusion.cpp
