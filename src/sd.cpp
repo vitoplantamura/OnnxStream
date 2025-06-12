@@ -83,6 +83,7 @@ enum sampler_type {
     TAYLOR3,
     DDPM,
     DDPM_A,
+    DDIM,
     LCM,
     NUM_OF_SAMPLERS // always last
 };
@@ -102,6 +103,7 @@ const std::string sampler_name[NUM_OF_SAMPLERS] = {
     "taylor3",
     "ddpm",
     "ddpm_a",
+    "ddim",
     "lcm",
 };
 
@@ -1525,10 +1527,37 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
         {
             std::cout << "step:" << i << "\t\t";
             double t1 = ncnn::get_current_time();
-            ncnn::Mat denoised = CFGDenoiser_CompVisDenoiser(net, log_sigmas, x_mat, sigma[i], c, uc, sdxl_params, model);
 
-#define ORIGINAL_SAMPLER_ALGORITHMS 1
+            // initial corrections before denoising
             switch (sampler) {
+            case DDIM:
+                // DDIM sampler implementation in SD.cpp needs latents prescaling
+                // https://github.com/leejet/stable-diffusion.cpp/blob/10c6501bd05a697e014f1bee3a84e5664290c489/denoiser.hpp#L1071L1085
+                if (i == 0) {
+                    for (int c = 0; c < 4; c++)
+                    {
+                        float* x_ptr = x_mat.channel(c);
+                        const float* x_ptr_end = x_ptr + latent_length;
+                        for (; x_ptr < x_ptr_end; x_ptr++)
+                        {
+                            *x_ptr *= sqrt(sigma[i] * sigma[i] + 1) / sigma[i];
+                        }
+                    }
+                } else {
+                    float scale = sqrt(sigma[i] * sigma[i] + 1);
+                    if (g_main_args.m_turbo)                      // soften correction for Turbo model
+                        scale = pow(scale, 0.9925f - 2.5f / steps / steps); // to avoid oversharpening
+                    for (int c = 0; c < 4; c++)
+                    {
+                        float* x_ptr = x_mat.channel(c);
+                        const float* x_ptr_end = x_ptr + latent_length;
+                        for (; x_ptr < x_ptr_end; x_ptr++)
+                        {
+                            *x_ptr *= scale;
+                        }
+                    }
+                }
+                break;
             case DPM2:
             case DPMPP2M:
             case DPMPP2MV2:
@@ -1542,6 +1571,9 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
             default: {}
             }
 
+            ncnn::Mat denoised = CFGDenoiser_CompVisDenoiser(net, log_sigmas, x_mat, sigma[i], c, uc, sdxl_params, model);
+
+#define ORIGINAL_SAMPLER_ALGORITHMS 1
             switch (sampler) {
             case EULER: // Euler
             // adapted from https://github.com/leejet/stable-diffusion.cpp
@@ -2565,6 +2597,32 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                 }
                 break;
             } // ddpm / ddpm_a
+
+            case DDIM: // Denoising Diffusion Implicit Models
+            // adapted from https://github.com/leejet/stable-diffusion.cpp,
+            // simplified (without eta)
+            {
+                const float si1 = sigma_reshaper_sharp(sigma[i + 1], i);
+
+                //float
+                double
+                //long double
+                const sn2 = si1 * si1,
+                      alpha_prod_t_prev = 1 / (sn2 + 1),
+                      a = sqrt(1 - alpha_prod_t_prev) / sigma[i],
+                      b = sqrt(alpha_prod_t_prev) - a;
+                for (int c = 0; c < 4; c++)
+                {
+                    float* x_ptr = x_mat.channel(c);
+                    const float* x_ptr_end = x_ptr + latent_length;
+                    float* d_ptr = denoised.channel(c);
+                    for (; x_ptr < x_ptr_end; x_ptr++)
+                    {
+                        *x_ptr = *x_ptr * a + *d_ptr++ * b;
+                    }
+                }
+                break;
+            } // ddim
 
             case LCM: // Latent consistency models
             // adapted from https://github.com/leejet/stable-diffusion.cpp
