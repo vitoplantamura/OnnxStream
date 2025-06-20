@@ -84,6 +84,8 @@ enum sampler_type {
     DDPM,
     DDPM_A,
     DDIM,
+    TCD,
+    TCD_A,
     LCM,
     NUM_OF_SAMPLERS // always last
 };
@@ -104,6 +106,8 @@ const std::string sampler_name[NUM_OF_SAMPLERS] = {
     "ddpm",
     "ddpm_a",
     "ddim",
+    "tcd",
+    "tcd_a",
     "lcm",
 };
 
@@ -1520,7 +1524,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
         }
         float sampler_history_dt; // for Taylor3
 
-        float eta = .0f; // for DDPM, randomness
+        float eta = .0f; // for DDPM / DDIM / TCD, randomness
 
         const unsigned int /*long*/ latent_length = g_main_args.m_latw * g_main_args.m_lath;
         for (int i = 0; i < steps; i++)
@@ -1531,7 +1535,9 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
             // initial corrections before denoising
             switch (sampler) {
             case DDIM:
-                // DDIM sampler implementation in SD.cpp needs latents prescaling
+            case TCD:
+            case TCD_A:
+                // DDIM and TCD samplers implementation in SD.cpp needs latents prescaling
                 // https://github.com/leejet/stable-diffusion.cpp/blob/10c6501bd05a697e014f1bee3a84e5664290c489/denoiser.hpp#L1071L1085
                 if (i == 0) {
                     for (int c = 0; c < 4; c++)
@@ -2623,6 +2629,75 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                 }
                 break;
             } // ddim
+
+            case TCD_A: // Trajectory Consistency Distillation
+                eta = 0.5f; // random
+            case TCD:
+            // adapted from https://github.com/leejet/stable-diffusion.cpp,
+            // simplified, alphas are derived from sigmas and therefore are not smooth
+            {
+                //long double
+                //double
+                float
+                const si = sigma[i],
+                      si1 = sigma_reshaper_sharp(sigma[i + 1], i),
+                      // sigma with scaled value == following1, smooth values (relative to eta),
+                      si4 = si1 * (1 - eta), // might not work with non-exponential / linear schedulers
+                      // sigma with scaled index == following2, discrete values (relative to eta)
+                      si3 = sigma[((steps - i - 1) * eta) + i + 1],
+                      // mixing sigmas to smoothen alpha_s
+                      si2 = sqrt(sqrt(si3 * (sigma[i + 1] ? si3 * (si1 / sigma[i + 1]) : si3)) *
+                                 sqrt(si4 * sqrt(si3 * si4))),
+                      alpha_n = 1 / (si1 * si1 + 1),
+                      alpha_s = 1 / (si2 * si2 + 1),
+#if       ORIGINAL_SAMPLER_ALGORITHMS
+                      alpha   = 1 / (si  * si  + 1),
+                      beta    = 1 - alpha,
+                      beta_s  = 1 - alpha_s;
+                for (int c = 0; c < 4; c++)
+                {
+                    float* x_ptr = x_mat.channel(c);
+                    const float* x_ptr_end = x_ptr + latent_length;
+                    float* d_ptr = denoised.channel(c);
+                    for (; x_ptr < x_ptr_end; x_ptr++)
+                    {
+                        const auto model_output = (*x_ptr - *d_ptr++) / si;
+                        const auto pred_original_sample = *x_ptr - sqrt(beta) / sqrt(alpha) * model_output;
+                        *x_ptr = sqrt(alpha_s) * pred_original_sample + sqrt(beta_s) * model_output;
+                    }
+                }
+#else  // ORIGINAL_SAMPLER_ALGORITHMS
+                      am = si2 / si * sqrt(alpha_s),
+                      bm = sqrt(alpha_s) - am; // (1 - si2 / si) * sqrt(alpha_s)
+                for (int c = 0; c < 4; c++)
+                {
+                    float* x_ptr = x_mat.channel(c);
+                    const float* x_ptr_end = x_ptr + latent_length;
+                    float* d_ptr = denoised.channel(c);
+                    for (; x_ptr < x_ptr_end; x_ptr++)
+                    {
+                        *x_ptr = *x_ptr * am + *d_ptr++ * bm;
+                    }
+                }
+#endif // ORIGINAL_SAMPLER_ALGORITHMS
+                if (eta > 0 && i < (steps - 1)) {
+                    std::srand(seed++);
+                    ncnn::Mat randn = randn_4_w_h(rand() % 1000, g_main_args.m_latw, g_main_args.m_lath);
+                    const auto a = sqrt(alpha_n / alpha_s),
+                    // alpha_s can be smaller than alpha_n because of sigma_reshaper() or different noise scheduler,
+                    // therefore trimming negative differences
+                    autozero = si * 0, b = sqrt(std::max(autozero, 1 - alpha_n / alpha_s));
+                    for (int c = 0; c < 4; c++)
+                    {
+                        float* x_ptr = x_mat.channel(c);
+                        const float* x_ptr_end = x_ptr + latent_length;
+                        float* r_ptr = randn.channel(c);
+                        for (; x_ptr < x_ptr_end; x_ptr++)
+                            *x_ptr = a * *x_ptr + b * *r_ptr++;
+                    }
+                }
+                break;
+            } // tcd / tcd_a
 
             case LCM: // Latent consistency models
             // adapted from https://github.com/leejet/stable-diffusion.cpp
