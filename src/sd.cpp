@@ -84,6 +84,7 @@ enum sampler_type {
     DDPM,
     DDPM_A,
     DDIM,
+    DDIM_A,
     TCD,
     TCD_A,
     LCM,
@@ -106,6 +107,7 @@ const std::string sampler_name[NUM_OF_SAMPLERS] = {
     "ddpm",
     "ddpm_a",
     "ddim",
+    "ddim_a",
     "tcd",
     "tcd_a",
     "lcm",
@@ -1535,6 +1537,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
             // initial corrections before denoising
             switch (sampler) {
             case DDIM:
+            case DDIM_A:
             case TCD:
             case TCD_A:
                 // DDIM and TCD samplers implementation in SD.cpp needs latents prescaling
@@ -2629,6 +2632,70 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                 }
                 break;
             } // ddim
+
+            case DDIM_A: // Denoising Diffusion Implicit Models
+            // adapted from https://github.com/leejet/stable-diffusion.cpp,
+            {
+                eta = 1.f; // randomness
+                //long double
+                //double
+                float
+                const si1 = sigma_reshaper_sharp(sigma[i + 1], i),
+                    alpha_prod_t      = 1 / (sigma[i] * sigma[i] + 1),
+                    alpha_prod_t_prev = 1 / (si1 * si1 + 1),
+                    beta_prod_t       = 1 - alpha_prod_t,
+                    beta_prod_t_prev  = 1 - alpha_prod_t_prev,
+                    variance = (beta_prod_t_prev / beta_prod_t) * (1 - alpha_prod_t / alpha_prod_t_prev),
+                    autozero = variance * 0,
+                    std_dev_t = eta * sqrt(std::max(autozero, variance));
+#if       ORIGINAL_SAMPLER_ALGORITHMS
+                for (int c = 0; c < 4; c++)
+                {
+                    float* x_ptr = x_mat.channel(c);
+                    const float* x_ptr_end = x_ptr + latent_length;
+                    float* d_ptr = denoised.channel(c);
+                    for (; x_ptr < x_ptr_end; x_ptr++)
+                    {
+                        const auto model_output = (autozero + *x_ptr - *d_ptr++) / sigma[i],
+                        pred_original_sample = (*x_ptr * sqrt(alpha_prod_t)
+                            - model_output * sqrt(beta_prod_t)) / sqrt(alpha_prod_t),
+                        pred_sample_direction = model_output
+                            * sqrt(1 - alpha_prod_t_prev - variance * eta * eta);
+                        *x_ptr = sqrt(alpha_prod_t_prev) * pred_original_sample 
+                            + pred_sample_direction;
+                    }
+                }
+#else  // ORIGINAL_SAMPLER_ALGORITHMS
+                const auto k0 = si1 / sigma[i],
+                    k1 = sqrt(std::max(autozero, 1 + (eta + k0 * eta) * (k0 * eta - eta))) * k0,
+                    a = k1 * sqrt(alpha_prod_t_prev),
+                    b = sqrt(alpha_prod_t_prev) - a;
+                for (int c = 0; c < 4; c++)
+                {
+                    float* x_ptr = x_mat.channel(c);
+                    const float* x_ptr_end = x_ptr + latent_length;
+                    float* d_ptr = denoised.channel(c);
+                    for (; x_ptr < x_ptr_end; x_ptr++)
+                    {
+                        *x_ptr = *x_ptr * a + *d_ptr++ * b;
+                    }
+                }
+#endif // ORIGINAL_SAMPLER_ALGORITHMS
+                if (eta > 0) {
+                    std::srand(seed++);
+                    ncnn::Mat randn = randn_4_w_h(rand() % 1000, g_main_args.m_latw, g_main_args.m_lath);
+                    for (int c = 0; c < 4; c++)
+                    {
+                        float* x_ptr = x_mat.channel(c);
+                        const float* x_ptr_end = x_ptr + latent_length;
+                        float* d_ptr = denoised.channel(c);
+                        float* r_ptr = randn.channel(c);
+                        for (; x_ptr < x_ptr_end; x_ptr++)
+                            *x_ptr += *r_ptr++ * std_dev_t;
+                    }
+                }
+                break;
+            } // ddim_a
 
             case TCD_A: // Trajectory Consistency Distillation
                 eta = 0.5f; // random
