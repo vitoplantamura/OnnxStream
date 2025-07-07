@@ -77,6 +77,8 @@ enum sampler_type {
     DPMPP2MV2,
     DPMPP2S,
     DPMPP2S_A,
+    DPMPP3MSDE,
+    DPMPP3MSDE_A,
     IPNDM,
     IPNDM_V,
     IPNDM_VO,
@@ -100,6 +102,8 @@ const std::string sampler_name[NUM_OF_SAMPLERS] = {
     "dpm++2mv2",
     "dpm++2s",
     "dpm++2s_a",
+    "dpm++3msde",
+    "dpm++3msde_a",
     "ipndm",
     "ipndm_v",
     "ipndm_vo",
@@ -1519,14 +1523,14 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
         std::vector<ncnn::Mat> sampler_history_buffer;
         if (sampler == IPNDM || sampler == IPNDM_V || sampler == IPNDM_VO) // iPNDM, 4 elements
             for (int k = 0; k < 4; k++) sampler_history_buffer.push_back(ncnn::Mat(x_mat.w, x_mat.h, x_mat.c));
-        else if (sampler == TAYLOR3) { // Taylor3, 1 buffer + 2 history elements, initialized to x
+        else if (sampler == TAYLOR3 || sampler == DPMPP3MSDE || sampler == DPMPP3MSDE_A) { // Taylor3 / DPM++ (3M) SDE, 1 buffer + 2 history elements, initialized to x
             sampler_history_buffer.push_back(ncnn::Mat(x_mat.w, x_mat.h, x_mat.c));
             sampler_history_buffer.push_back(ncnn::Mat(x_mat.w, x_mat.h, x_mat.c, x_mat.v.data()));
             sampler_history_buffer.push_back(ncnn::Mat(x_mat.w, x_mat.h, x_mat.c, x_mat.v.data()));
         }
         float sampler_history_dt; // for Taylor3
 
-        float eta = .0f; // for DDPM / DDIM / TCD, randomness
+        float eta = .0f; // for DDPM / DDIM / TCD / DPM++3M SDE, randomness
 
         const unsigned int /*long*/ latent_length = g_main_args.m_latw * g_main_args.m_lath;
         for (int i = 0; i < steps; i++)
@@ -1572,6 +1576,8 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
             case DPMPP2MV2:
             case DPMPP2S:
             case DPMPP2S_A:
+            case DPMPP3MSDE:
+            case DPMPP3MSDE_A:
                 // https://github.com/huggingface/diffusers/pull/5541
                 // DPM++ samplers have underflows and should be replaced with Euler
                 // at last step for SDXL (Turbo)
@@ -1916,7 +1922,6 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                 break;
             } // dpm++2s_a
 
-
             case DPMPP2M: // DPM++ (2M)
             // adapted from https://github.com/leejet/stable-diffusion.cpp
             {
@@ -2000,6 +2005,139 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
 #endif // ORIGINAL_SAMPLER_ALGORITHMS
                 break;
             } // dpm++2m
+
+            // DPM++ 3M SDE, needs more than 100 steps, otherwise it produces significant noise
+            case DPMPP3MSDE_A:
+                if (!g_main_args.m_turbo)  // SD / SDXL accept high noise
+                    eta = 1.0f;
+                else            // Turbo model does not seem to work well with SDE + high noise,
+                    eta = 0.5f; // images are smudgy
+            case DPMPP3MSDE:
+            // adapted from https://github.com/crowsonkb/k-diffusion
+            {
+                // shifting 2 history elements
+                if (i) for (int k = 2; k; k--) sampler_history_buffer[k] = sampler_history_buffer[k - 1];
+
+#if       ORIGINAL_SAMPLER_ALGORITHMS
+                // corrections for Turbo model, "no op" for SD / SDXL
+                float si1 =              sigma_reshaper(sigma[i + 1], i),
+                    si0 = (i == 0) ? 1 : sigma_reshaper(sigma[i],     i - 1),
+                    sm1 = (i <= 1) ? 1 : sigma_reshaper(sigma[i - 1], i - 2);
+                // it seems that single correction is not enough
+                si1 = (si1 +                 sigma_reshaper(si1, i)     ) / 2;
+                si0 = (si0 + ((i == 0) ? 1 : sigma_reshaper(si0, i - 1))) / 2;
+                sm1 = (sm1 + ((i <= 1) ? 1 : sigma_reshaper(sm1, i - 2))) / 2;
+
+                for (int c = 0; c < 4; c++)
+                {
+                    float* x_ptr = x_mat.channel(c); const float* x_ptr_end = x_ptr + latent_length;
+                    float* d_ptr = denoised.channel(c);
+                    float *b0_ptr = sampler_history_buffer[0].channel(c),
+                          *b1_ptr = sampler_history_buffer[1].channel(c),
+                          *b2_ptr = sampler_history_buffer[2].channel(c);
+                    for (; x_ptr < x_ptr_end; x_ptr++)
+                    {
+                        const float d = *d_ptr; *b0_ptr = d; // put to history
+                        if (!si1) {
+                            *x_ptr = d; // last step = pure denoising
+                        } else if (i > 1) {
+                            const float h = log(sigma[i])     - log(si1),
+                                h_1       = log(sigma[i - 1]) - log(si0),
+                                h_2       = log(sigma[i - 2]) - log(sm1),
+                                h_eta = h * (eta + 1);
+                            *x_ptr = exp(-h_eta) * *x_ptr - (exp(-h_eta) - 1) * d;
+                            const float r = h_1 / h,
+                                r2 = h_2 / h,
+                                d1_0 = (d - *b1_ptr) / r,
+                                d1_1 = (*b1_ptr - *b2_ptr) / r2,
+                                d1 = d1_0 + (d1_0 - d1_1) * r / (r + r2),
+                                d2 = (d1_0 - d1_1) / (r + r2),
+                                phi_2 = (exp(-h_eta) - 1) / h_eta + 1,
+                                phi_3 = phi_2 / h_eta - 0.5f;
+                            *x_ptr += phi_2 * d1 - phi_3 * d2;
+                        } else if (i) {
+                            const float h = log(sigma[i])     - log(si1),
+                                h_1       = log(sigma[i - 1]) - log(si0),
+                                h_eta = h * (eta + 1);
+                            *x_ptr = exp(-h_eta) * *x_ptr - (exp(-h_eta) - 1) * d;
+                            const float r = h_1 / h,
+                                phi_2 = (exp(-h_eta) - 1) / h_eta + 1,
+                                d1 = (d - *b1_ptr) / r;
+                            *x_ptr += phi_2 * d1;
+                        } else {
+                            const float h = log(sigma[i]) - log(si1),
+                                h_eta = h * (eta + 1);
+                            *x_ptr = exp(-h_eta) * *x_ptr - (exp(-h_eta) - 1) * d;
+                        }
+                        d_ptr++; b0_ptr++; b1_ptr++; b2_ptr++;
+                    }
+                }
+#else  // ORIGINAL_SAMPLER_ALGORITHMS
+                //long double
+                //double
+                float
+                si1 = sigma_reshaper(sigma[i + 1], i), si0, sm1, k1, k2, k3, k4;
+                si1 = (si1 + sigma_reshaper(si1, i)) / 2;
+
+                if (si1) {
+                    k1 = pow(si1 / sigma[i], eta + 1); // exp(-h_eta) in k-diffusion
+                    k2 = 1 - k1;
+                    if (i) {
+                        si0 = sigma_reshaper(sigma[i], i - 1);
+                        si0 = (si0 + ((i == 0) ? 1 : sigma_reshaper(si0, i - 1))) / 2;
+                        const auto h  = si1 ? log(sigma[i]     / si1) : 1,
+                                   h1 = si0 ? log(sigma[i - 1] / si0) : 1,
+                                   r = 1 / (eta + h / h); // 1 / (eta + 1)
+                        if (i == 1) {
+                            k2 = (k2 * r * eta + h) / h1;
+                            k3 = 1 - k1 - k2;
+                        } else {
+                            sm1 = sigma_reshaper(sigma[i - 1], i - 2);
+                            sm1 = (sm1 + ((i <= 1) ? 1 : sigma_reshaper(sm1, i - 2))) / 2;
+                            const auto h2 = sm1 ? log(sigma[i - 2] / sm1) : 1,
+                                       h3 = h1 + h2;
+                            k3 = (k2 * r * (h3 - r) + h * (r - h3 - 0.5f * h)) / h1 / h2; // using k2 = 1 - k1
+                            k2 = (h - k2 * r) / h3 * (2 + h2 / h1 - r / h1) + k2 + h / h3 * (0.5f * h / h1);
+                            k4 = 1 - k1 - k2 - k3;
+                        }
+                    }
+                }
+
+                for (int c = 0; c < 4; c++)
+                {
+                    float* x_ptr = x_mat.channel(c); const float* x_ptr_end = x_ptr + latent_length;
+                    float* d_ptr = denoised.channel(c);
+                    float *b0_ptr = sampler_history_buffer[0].channel(c),
+                          *b1_ptr = sampler_history_buffer[1].channel(c),
+                          *b2_ptr = sampler_history_buffer[2].channel(c);
+                    for (; x_ptr < x_ptr_end; x_ptr++)
+                    {
+                        const float d = *d_ptr++; *b0_ptr++ = d; // put to history
+                        if (!si1) {
+                            *x_ptr = d; // last step = pure denoising
+                        } else switch (i) {
+                        case 0:  *x_ptr = k1 * *x_ptr + k2 * d; break;
+                        case 1:  *x_ptr = k1 * *x_ptr + k2 * d + k3 * *b1_ptr++; break;
+                        default: *x_ptr = k1 * *x_ptr + k2 * d + k3 * *b1_ptr++ + k4 * *b2_ptr++;
+                        }
+                    }
+                }
+#endif // ORIGINAL_SAMPLER_ALGORITHMS
+                if (eta && si1) {
+                    std::srand(seed++);
+                    ncnn::Mat randn = randn_4_w_h(rand() % 1000, g_main_args.m_latw, g_main_args.m_lath);
+                    const auto autozero = si1 * 0,
+                        variance = si1 * sqrt(std::max(autozero, 1 - pow(si1 / sigma[i], 2 * eta)));
+                    for (int c = 0; c < 4; c++)
+                    {
+                        float* x_ptr = x_mat.channel(c); const float* x_ptr_end = x_ptr + latent_length;
+                        float* r_ptr = randn.channel(c);
+                        for (; x_ptr < x_ptr_end; x_ptr++)
+                            *x_ptr += *r_ptr++ * variance;
+                    }
+                }
+                break;
+            } // dpm++3msde
 
             case DPMPP2MV2: // DPM++ (2M) v2
             // adapted from https://github.com/leejet/stable-diffusion.cpp
@@ -2698,7 +2836,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
             } // ddim_a
 
             case TCD_A: // Trajectory Consistency Distillation
-                eta = 0.5f; // random
+                eta = 0.5f; // randomness, 1.0 also works
             case TCD:
             // adapted from https://github.com/leejet/stable-diffusion.cpp,
             // simplified, alphas are derived from sigmas and therefore are not smooth
