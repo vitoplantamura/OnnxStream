@@ -89,6 +89,7 @@ enum sampler_type {
     DDIM_A,
     TCD,
     TCD_A,
+    LMS,
     LCM,
     NUM_OF_SAMPLERS // always last
 };
@@ -114,6 +115,7 @@ const std::string sampler_name[NUM_OF_SAMPLERS] = {
     "ddim_a",
     "tcd",
     "tcd_a",
+    "lms",
     "lcm",
 };
 
@@ -1521,7 +1523,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
 
         // reserving memory for history elements
         std::vector<ncnn::Mat> sampler_history_buffer;
-        if (sampler == IPNDM || sampler == IPNDM_V || sampler == IPNDM_VO) // iPNDM, 4 elements
+        if (sampler == IPNDM || sampler == IPNDM_V || sampler == IPNDM_VO || sampler == LMS) // iPNDM / LMS, 4 elements
             for (int k = 0; k < 4; k++) sampler_history_buffer.push_back(ncnn::Mat(x_mat.w, x_mat.h, x_mat.c));
         else if (sampler == TAYLOR3 || sampler == DPMPP3MSDE || sampler == DPMPP3MSDE_A) { // Taylor3 / DPM++ (3M) SDE, 1 buffer + 2 history elements, initialized to x
             sampler_history_buffer.push_back(ncnn::Mat(x_mat.w, x_mat.h, x_mat.c));
@@ -1529,6 +1531,8 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
             sampler_history_buffer.push_back(ncnn::Mat(x_mat.w, x_mat.h, x_mat.c, x_mat.v.data()));
         }
         float sampler_history_dt; // for Taylor3
+
+        float lms_coeff[4]; // for LMS
 
         float eta = .0f; // for DDPM / DDIM / TCD / DPM++3M SDE, randomness
 
@@ -2903,6 +2907,147 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                 }
                 break;
             } // tcd / tcd_a
+
+            case LMS: // Linear Multi-Step
+            // adapted from https://github.com/crowsonkb/k-diffusion
+            // integrator is adapted from https://github.com/Windsander/ADI-Stable-Diffusion
+            {
+#if       ORIGINAL_SAMPLER_ALGORITHMS
+                auto linear_multistep_coeff = [=](const int order, const int m, const int j) -> const float {
+                    auto fn = [=](float tau) -> float {
+                        float prod = 1.f;
+                        for (int k = 0; k < order; k++)
+                            if (j != k) prod *= (tau - sigma[m - k]) / (sigma[m - j] - sigma[m - k]);
+                        return prod;
+                    };
+                    auto simpson_integral = [=](float a, float b) -> float {
+                        constexpr int n = 3072;
+                        float h = (b - a) / n;
+                        float sum = fn(a) + fn(b);
+                        for (int i = 1; i < n; i += 2) {
+                            sum += 4 * fn(a + i * h);
+                        }
+                        for (int i = 2; i < n - 1; i += 2) {
+                            sum += 2 * fn(a + i * h);
+                        }
+                        return sum * h / 3.0f;
+                    };
+                    auto simpson38_integral = [=](float a, float b) -> float {
+                        constexpr int n = 3072;
+                        float h = (b - a) / n;
+                        float sum = 0;
+                        for (int i = 0; i < n - 1; i += 3) {
+                            sum += fn(a + i * h) 
+                             + 3 * fn(a + i * h + h) 
+                             + 3 * fn(a + i * h + 2 * h) 
+                             +     fn(a + i * h + 3 * h);
+                        }
+                        return sum / 8.0f * h * 3.0f;
+                    };
+                    auto boole_integral = [=](float a, float b) -> float {
+                        constexpr int n = 3072;
+                        float h = (b - a) / n;
+                        float sum = 0;
+                        for (int i = 0; i < n - 1; i += 4) {
+                            sum += 7 * fn(a + i * h) 
+                                + 32 * fn(a + i * h + h) 
+                                + 12 * fn(a + i * h + 2 * h) 
+                                + 32 * fn(a + i * h + 3 * h) 
+                                 + 7 * fn(a + i * h + 4 * h)
+                                 ;
+                        }
+                        return sum / 22.5f * h;
+                    };
+                    auto trapezoidal_integral = [=](float a, float b) -> float {
+                        constexpr int n = 3072;
+                        float h = (b - a) / n;
+                        float sum = (fn(a) + fn(b)) * .5f;
+                        for (int j = 1; j < n; j++) {
+                            sum += fn(a + j * h);
+                        }
+                        return sum * h;
+                    };
+                    auto midpoint_integral = [=](float a, float b) -> float {
+                        constexpr int n = 3072;
+                        float dx = (b - a) / n, sum = 0;
+                        for (int j = 0; j < n; j++) {
+                            sum += fn(a + (j + 0.5f) * dx);
+                        }
+                        return sum * dx;
+                    };
+                    float s  = simpson_integral    (sigma[m], sigma_reshaper(sigma[m + 1], m));
+                    float b  = boole_integral      (sigma[m], sigma_reshaper(sigma[m + 1], m));
+                    float t  = trapezoidal_integral(sigma[m], sigma_reshaper(sigma[m + 1], m));
+                    float m1 = midpoint_integral   (sigma[m], sigma_reshaper(sigma[m + 1], m));
+                    float s3 = simpson38_integral  (sigma[m], sigma_reshaper(sigma[m + 1], m));
+                    // using mix of several integrals
+                    return (s + b + t + m1 + s3) / 5;
+                };
+#else  // ORIGINAL_SAMPLER_ALGORITHMS
+                auto linear_multistep_coeff = [=](const int order, const int m, const int j) -> const float {
+                    // using Riemann middle integral with 1kk samples
+                    constexpr int n = 1048576;
+                    const float a = sigma[m], dx = (sigma_reshaper(sigma[m + 1], m) - a) / n, s = sigma[m - j];
+                    float sum = 0.f;
+                    for (int h = 0; h < n; h++) {
+                        const float b = a + (h + 0.5f) * dx;
+                        float prod = 1.f;
+                        for (int k = 0; k < j; k++) {
+                            const float t = sigma[m - k];
+                            prod *= (b - t) / (s - t);
+                        }
+                        for (int k = j + 1; k < order; k++) {
+                            const float t = sigma[m - k];
+                            prod *= (b - t) / (s - t);
+                        }
+                        sum += prod;
+                    }
+                    return sum * dx;
+                };
+#endif // ORIGINAL_SAMPLER_ALGORITHMS
+
+                // shifting 3 history elements
+                if (i) for (int k = 3; k; k--) sampler_history_buffer[k] = sampler_history_buffer[k - 1];
+
+                // computing coefficients
+                for (int c = 0; c < std::min(i + 1, 4); c++)
+                    lms_coeff[c] =  linear_multistep_coeff(std::min(i + 1, 4), i, c);
+
+                for (int c = 0; c < 4; c++)
+                {
+                    float* x_ptr = x_mat.channel(c);
+                    const float* x_ptr_end = x_ptr + latent_length;
+                    float* d_ptr = denoised.channel(c);
+                    float *b0_ptr = sampler_history_buffer[0].channel(c),
+                          *b1_ptr = sampler_history_buffer[1].channel(c),
+                          *b2_ptr = sampler_history_buffer[2].channel(c),
+                          *b3_ptr = sampler_history_buffer[3].channel(c);
+                    for (; x_ptr < x_ptr_end; x_ptr++)
+                    {
+                        float d = (*x_ptr - *d_ptr++) / sigma[i]; *b0_ptr++ = d; // put to history
+                        switch (i) {
+                        case 0: // first step, using derivative only
+                            *x_ptr += d * lms_coeff[0];
+                            break;
+                        case 1: // second, using one history point
+                            *x_ptr += d         * lms_coeff[0]
+                                    + *b1_ptr++ * lms_coeff[1];
+                            break;
+                        case 2: // third, using two history points
+                            *x_ptr += d         * lms_coeff[0]
+                                    + *b1_ptr++ * lms_coeff[1]
+                                    + *b2_ptr++ * lms_coeff[2];
+                            break;
+                        default: // fourth+, using three history points
+                            *x_ptr += d         * lms_coeff[0]
+                                    + *b1_ptr++ * lms_coeff[1]
+                                    + *b2_ptr++ * lms_coeff[2]
+                                    + *b3_ptr++ * lms_coeff[3];
+                        }
+                    }
+                }
+                break;
+            } // lms
 
             case LCM: // Latent consistency models
             // adapted from https://github.com/leejet/stable-diffusion.cpp
