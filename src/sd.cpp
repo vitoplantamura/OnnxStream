@@ -1382,7 +1382,11 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
         if (g_main_args.m_rpi_lowmem)
             model.set_weights_provider(DiskNoCacheWeightsProvider());
         else if (g_main_args.m_ram)
+        {
             model.set_weights_provider(RamWeightsProvider<DiskPrefetchWeightsProvider>(DiskPrefetchWeightsProvider()));
+            model.m_use_ops_cache = true;
+            model.m_use_next_op_cache = true;
+        }
 
         if (!sdxl_params)
         {
@@ -2497,6 +2501,7 @@ int main(int argc, char** argv)
         else if (arg == "--ram")
         {
             g_main_args.m_ram = true;
+            g_main_args.m_tiled = false;
         }
         else if (arg == "--seed")
         {
@@ -2575,7 +2580,7 @@ int main(int argc, char** argv)
             printf("--decoder-calibrate (ONLY SD 1.5) Calibrates the quantized version of the VAE decoder.\n");
             printf("--not-tiled         (ONLY SDXL 1.0 and TURBO) Don't use the tiled VAE decoder.\n");
             printf("--res               (ONLY TURBO) Sets the output PNG file resolution. Default is \"512x512\".\n");
-            printf("--ram               Uses the RAM WeightsProvider (Experimental).\n");
+            printf("--ram               Loads the entire UNET model into RAM for faster inference. Sets --not-tiled.\n");
             printf("--download          A[uto] / F[orce] / N[ever] (re)download current model.\n");
             printf("--curl-parallel     Sets the number of parallel downloads with CURL. Default is 16.\n");
             printf("--rpi               A[utodetect] / F[orce] / D[isable] to configure the models to run on a Raspberry Pi.\n");

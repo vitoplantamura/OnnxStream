@@ -355,7 +355,7 @@ These are the command line options of the Stable Diffusion example:
 --decoder-calibrate (ONLY SD 1.5) Calibrates the quantized version of the VAE decoder.
 --not-tiled         (ONLY SDXL 1.0 and TURBO) Don't use the tiled VAE decoder.
 --res               (ONLY TURBO) Sets the output PNG file resolution. Default is "512x512".
---ram               Uses the RAM WeightsProvider (Experimental).
+--ram               Loads the entire UNET model into RAM for faster inference. Sets --not-tiled.
 --download          A[uto] / F[orce] / N[ever] (re)download current model.
 --curl-parallel     Sets the number of parallel downloads with CURL. Default is 16.
 --rpi               A[uto] / F[orce] / N[ot] configure the models to run on a Raspberry Pi.
