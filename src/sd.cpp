@@ -1514,7 +1514,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
         auto sigma_reshaper_sharp = [=](const float si1, const int i) -> const float {
             const float pre_res = sigma_reshaper(si1, i);
             const float smoothness = 3 / (steps - 2.5f);
-            return si1 + ((pre_res == si1) ? 0 : smoothness / abs(smoothness) * pow(abs(smoothness), 1.f / 3) * (pre_res - si1));
+            return si1 + ((pre_res == si1) ? 0 : smoothness / std::abs(smoothness) * std::pow(std::abs(smoothness), 1.f / 3) * (pre_res - si1));
         };
 
         sampler_type sampler = g_main_args.m_sampler;
@@ -1557,13 +1557,13 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                         const float* x_ptr_end = x_ptr + latent_length;
                         for (; x_ptr < x_ptr_end; x_ptr++)
                         {
-                            *x_ptr *= sqrt(sigma[i] * sigma[i] + 1) / sigma[i];
+                            *x_ptr *= std::sqrt(sigma[i] * sigma[i] + 1) / sigma[i];
                         }
                     }
                 } else {
-                    float scale = sqrt(sigma[i] * sigma[i] + 1);
+                    float scale = std::sqrt(sigma[i] * sigma[i] + 1);
                     if (g_main_args.m_turbo)                      // soften correction for Turbo model
-                        scale = pow(scale, 0.9925f - 2.5f / steps / steps); // to avoid oversharpening
+                        scale = std::pow(scale, 0.9925f - 2.5f / steps / steps); // to avoid oversharpening
                     for (int c = 0; c < 4; c++)
                     {
                         float* x_ptr = x_mat.channel(c);
@@ -1755,7 +1755,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                     x_mat = ncnn::Mat(denoised.w, denoised.h, denoised.c, denoised.v.data());
                 } else {
                     float a = si1 / sigma[i];
-                    float b = sqrt(a);
+                    float b = std::sqrt(a);
                     for (int c = 0; c < 4; c++)
                     {
                         float* x_ptr = x_mat.channel(c);
@@ -1813,8 +1813,8 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                     }
                 } else {
                     // DPM-Solver++(2S)
-                    float t      = -log(sigma[i]);
-                    float t_next = -log(sigma_down);
+                    float t      = -std::log(sigma[i]);
+                    float t_next = -std::log(sigma_down);
                     float h      = t_next - t;
                     float s      = t + 0.5f * h;
                     for (int c = 0; c < 4; c++)
@@ -1826,7 +1826,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                         for (; x_ptr < x_ptr_end; x_ptr++)
                         {
                             // First half-step
-                            *x2_ptr = exp(-s) / exp(-t) * *x_ptr - (exp(-h * 0.5f) - 1.f) * *d_ptr;
+                            *x2_ptr = std::exp(-s) / std::exp(-t) * *x_ptr - (std::exp(-h * 0.5f) - 1.f) * *d_ptr;
                             d_ptr++;
                             x2_ptr++;
                         }
@@ -1840,7 +1840,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                         for (; x_ptr < x_ptr_end; x_ptr++)
                         {
                             // Second half-step
-                            *x_ptr = (exp(-t_next) / exp(-t)) * *x_ptr - (exp(-h) - 1) * *d_ptr;
+                            *x_ptr = (std::exp(-t_next) / std::exp(-t)) * *x_ptr - (std::exp(-h) - 1) * *d_ptr;
                             d_ptr++;
                         }
                     }
@@ -1875,7 +1875,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                 } else {
                     // DPM-Solver++(2S)
                     float a = sigma_down / sigma[i];
-                    float b = sqrt(a);
+                    float b = std::sqrt(a);
                     for (int c = 0; c < 4; c++)
                     {
                         float* x_ptr = x_mat.channel(c);
@@ -1934,7 +1934,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                 if (!i || !si1) {
                     if (!i) old_denoised = ncnn::Mat(x_mat.w, x_mat.h, x_mat.c, x_mat.v.data());
                     float a = si1 / sigma[i];
-                    float b = exp(log(si1) - log(sigma[i])) - 1.f;
+                    float b = std::exp(std::log(si1) - std::log(sigma[i])) - 1.f;
                     for (int c = 0; c < 4; c++)
                     {
                         float* x_ptr = x_mat.channel(c);
@@ -1948,12 +1948,12 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                         }
                     }
                 } else {
-                    float t       = -log(sigma[i]);
-                    float t_next  = -log(si1);
+                    float t       = -std::log(sigma[i]);
+                    float t_next  = -std::log(si1);
                     float h       = t_next - t;
                     float a       = si1 / sigma[i];
-                    float b       = exp(-h) - 1.f;
-                    float h_last  = t + log(sigma[i - 1]);
+                    float b       = std::exp(-h) - 1.f;
+                    float h_last  = t + std::log(sigma[i - 1]);
                     float r       = h_last / h;
                     for (int c = 0; c < 4; c++)
                     {
@@ -1990,7 +1990,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                     }
                 } else {
                     float b = sigma_mul - 1.f;
-                    float r = .5f * log(sigma_mul) / log(sigma[i] / sigma[i - 1]) * b;
+                    float r = .5f * std::log(sigma_mul) / std::log(sigma[i] / sigma[i - 1]) * b;
                     b = -(b + r);
 
                     for (int c = 0; c < 4; c++)
@@ -2045,33 +2045,33 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                         if (!si1) {
                             *x_ptr = d; // last step = pure denoising
                         } else if (i > 1) {
-                            const float h = log(sigma[i])     - log(si1),
-                                h_1       = log(sigma[i - 1]) - log(si0),
-                                h_2       = log(sigma[i - 2]) - log(sm1),
+                            const float h = std::log(sigma[i])     - std::log(si1),
+                                h_1       = std::log(sigma[i - 1]) - std::log(si0),
+                                h_2       = std::log(sigma[i - 2]) - std::log(sm1),
                                 h_eta = h * (eta + 1);
-                            *x_ptr = exp(-h_eta) * *x_ptr - (exp(-h_eta) - 1) * d;
+                            *x_ptr = std::exp(-h_eta) * *x_ptr - (std::exp(-h_eta) - 1) * d;
                             const float r = h_1 / h,
                                 r2 = h_2 / h,
                                 d1_0 = (d - *b1_ptr) / r,
                                 d1_1 = (*b1_ptr - *b2_ptr) / r2,
                                 d1 = d1_0 + (d1_0 - d1_1) * r / (r + r2),
                                 d2 = (d1_0 - d1_1) / (r + r2),
-                                phi_2 = (exp(-h_eta) - 1) / h_eta + 1,
+                                phi_2 = (std::exp(-h_eta) - 1) / h_eta + 1,
                                 phi_3 = phi_2 / h_eta - 0.5f;
                             *x_ptr += phi_2 * d1 - phi_3 * d2;
                         } else if (i) {
-                            const float h = log(sigma[i])     - log(si1),
-                                h_1       = log(sigma[i - 1]) - log(si0),
+                            const float h = std::log(sigma[i])     - std::log(si1),
+                                h_1       = std::log(sigma[i - 1]) - std::log(si0),
                                 h_eta = h * (eta + 1);
-                            *x_ptr = exp(-h_eta) * *x_ptr - (exp(-h_eta) - 1) * d;
+                            *x_ptr = std::exp(-h_eta) * *x_ptr - (std::exp(-h_eta) - 1) * d;
                             const float r = h_1 / h,
-                                phi_2 = (exp(-h_eta) - 1) / h_eta + 1,
+                                phi_2 = (std::exp(-h_eta) - 1) / h_eta + 1,
                                 d1 = (d - *b1_ptr) / r;
                             *x_ptr += phi_2 * d1;
                         } else {
-                            const float h = log(sigma[i]) - log(si1),
+                            const float h = std::log(sigma[i]) - std::log(si1),
                                 h_eta = h * (eta + 1);
-                            *x_ptr = exp(-h_eta) * *x_ptr - (exp(-h_eta) - 1) * d;
+                            *x_ptr = std::exp(-h_eta) * *x_ptr - (std::exp(-h_eta) - 1) * d;
                         }
                         d_ptr++; b0_ptr++; b1_ptr++; b2_ptr++;
                     }
@@ -2084,13 +2084,13 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                 si1 = (si1 + sigma_reshaper(si1, i)) / 2;
 
                 if (si1) {
-                    k1 = pow(si1 / sigma[i], eta + 1); // exp(-h_eta) in k-diffusion
+                    k1 = std::pow(si1 / sigma[i], eta + 1); // exp(-h_eta) in k-diffusion
                     k2 = 1 - k1;
                     if (i) {
                         si0 = sigma_reshaper(sigma[i], i - 1);
                         si0 = (si0 + ((i == 0) ? 1 : sigma_reshaper(si0, i - 1))) / 2;
-                        const auto h  = si1 ? log(sigma[i]     / si1) : 1,
-                                   h1 = si0 ? log(sigma[i - 1] / si0) : 1,
+                        const auto h  = si1 ? std::log(sigma[i]     / si1) : 1,
+                                   h1 = si0 ? std::log(sigma[i - 1] / si0) : 1,
                                    r = 1 / (eta + h / h); // 1 / (eta + 1)
                         if (i == 1) {
                             k2 = (k2 * r * eta + h) / h1;
@@ -2098,7 +2098,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                         } else {
                             sm1 = sigma_reshaper(sigma[i - 1], i - 2);
                             sm1 = (sm1 + ((i <= 1) ? 1 : sigma_reshaper(sm1, i - 2))) / 2;
-                            const auto h2 = sm1 ? log(sigma[i - 2] / sm1) : 1,
+                            const auto h2 = sm1 ? std::log(sigma[i - 2] / sm1) : 1,
                                        h3 = h1 + h2;
                             k3 = (k2 * r * (h3 - r) + h * (r - h3 - 0.5f * h)) / h1 / h2; // using k2 = 1 - k1
                             k2 = (h - k2 * r) / h3 * (2 + h2 / h1 - r / h1) + k2 + h / h3 * (0.5f * h / h1);
@@ -2131,7 +2131,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                     std::srand(seed++);
                     ncnn::Mat randn = randn_4_w_h(rand() % 1000, g_main_args.m_latw, g_main_args.m_lath);
                     const auto autozero = si1 * 0,
-                        variance = si1 * sqrt(std::max(autozero, 1 - pow(si1 / sigma[i], 2 * eta)));
+                        variance = si1 * std::sqrt(std::max(autozero, 1 - std::pow(si1 / sigma[i], 2 * eta)));
                     for (int c = 0; c < 4; c++)
                     {
                         float* x_ptr = x_mat.channel(c); const float* x_ptr_end = x_ptr + latent_length;
@@ -2151,7 +2151,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                 if (!i || !si1) {
                     if (!i) old_denoised = ncnn::Mat(x_mat.w, x_mat.h, x_mat.c, x_mat.v.data());
                     float a = si1 / sigma[i];
-                    float b = exp(log(si1) - log(sigma[i])) - 1.f;
+                    float b = std::exp(std::log(si1) - std::log(sigma[i])) - 1.f;
                     for (int c = 0; c < 4; c++)
                     {
                         float* x_ptr = x_mat.channel(c);
@@ -2165,16 +2165,16 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                         }
                     }
                 } else {
-                    float t       = -log(sigma[i]);
-                    float t_next  = -log(si1);
+                    float t       = -std::log(sigma[i]);
+                    float t_next  = -std::log(si1);
                     float h       = t_next - t;
                     float a       = si1 / sigma[i];
-                    float h_last  = t + log(sigma[i - 1]);
+                    float h_last  = t + std::log(sigma[i - 1]);
                     float h_min   = std::min(h_last, h);
                     float h_max   = std::max(h_last, h);
                     float r       = h_max / h_min;
                     float h_d    = (h_max + h_min) / 2.f;
-                    float b      = exp(-h_d) - 1.f;
+                    float b      = std::exp(-h_d) - 1.f;
                     for (int c = 0; c < 4; c++)
                     {
                         float* x_ptr = x_mat.channel(c);
@@ -2258,7 +2258,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                     }
                 } else {
                     // DPM-Solver-2
-                    float sigma_mid = exp(0.5f * (log(sigma[i]) + log(si1)));
+                    float sigma_mid = std::exp(0.5f * (std::log(sigma[i]) + std::log(si1)));
                     float dt_1      = sigma_mid - sigma[i];
                     float dt_2      = si1 - sigma[i];
                     for (int c = 0; c < 4; c++)
@@ -2713,10 +2713,10 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
             {
                 float s2 = sigma[i] * sigma[i];
                 float sn2 = sigma[i + 1] * sigma[i + 1];
-                float scale_back = sqrt(s2 + 1.0f);
-                float d = sqrt(sn2 + 1.0f);
+                float scale_back = std::sqrt(s2 + 1.0f);
+                float d = std::sqrt(sn2 + 1.0f);
                 float variance = (eta <= 0) ? 0.0f :
-                                 (eta * sqrt(s2 - sn2) / d * sigma[i + 1] / sigma[i]);
+                                 (eta * std::sqrt(s2 - sn2) / d * sigma[i + 1] / sigma[i]);
                 float a = sn2 / s2 * scale_back / d;
                 float b = (s2 - sn2) / d / s2;
 
@@ -2760,8 +2760,8 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                 //long double
                 const sn2 = si1 * si1,
                       alpha_prod_t_prev = 1 / (sn2 + 1),
-                      a = sqrt(1 - alpha_prod_t_prev) / sigma[i],
-                      b = sqrt(alpha_prod_t_prev) - a;
+                      a = std::sqrt(1 - alpha_prod_t_prev) / sigma[i],
+                      b = std::sqrt(alpha_prod_t_prev) - a;
                 for (int c = 0; c < 4; c++)
                 {
                     float* x_ptr = x_mat.channel(c);
@@ -2789,7 +2789,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                     beta_prod_t_prev  = 1 - alpha_prod_t_prev,
                     variance = (beta_prod_t_prev / beta_prod_t) * (1 - alpha_prod_t / alpha_prod_t_prev),
                     autozero = variance * 0,
-                    std_dev_t = eta * sqrt(std::max(autozero, variance));
+                    std_dev_t = eta * std::sqrt(std::max(autozero, variance));
 #if       ORIGINAL_SAMPLER_ALGORITHMS
                 for (int c = 0; c < 4; c++)
                 {
@@ -2799,19 +2799,19 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                     for (; x_ptr < x_ptr_end; x_ptr++)
                     {
                         const auto model_output = (autozero + *x_ptr - *d_ptr++) / sigma[i],
-                        pred_original_sample = (*x_ptr * sqrt(alpha_prod_t)
-                            - model_output * sqrt(beta_prod_t)) / sqrt(alpha_prod_t),
+                        pred_original_sample = (*x_ptr * std::sqrt(alpha_prod_t)
+                            - model_output * std::sqrt(beta_prod_t)) / std::sqrt(alpha_prod_t),
                         pred_sample_direction = model_output
-                            * sqrt(1 - alpha_prod_t_prev - variance * eta * eta);
-                        *x_ptr = sqrt(alpha_prod_t_prev) * pred_original_sample 
+                            * std::sqrt(1 - alpha_prod_t_prev - variance * eta * eta);
+                        *x_ptr = std::sqrt(alpha_prod_t_prev) * pred_original_sample 
                             + pred_sample_direction;
                     }
                 }
 #else  // ORIGINAL_SAMPLER_ALGORITHMS
                 const auto k0 = si1 / sigma[i],
-                    k1 = sqrt(std::max(autozero, 1 + (eta + k0 * eta) * (k0 * eta - eta))) * k0,
-                    a = k1 * sqrt(alpha_prod_t_prev),
-                    b = sqrt(alpha_prod_t_prev) - a;
+                    k1 = std::sqrt(std::max(autozero, 1 + (eta + k0 * eta) * (k0 * eta - eta))) * k0,
+                    a = k1 * std::sqrt(alpha_prod_t_prev),
+                    b = std::sqrt(alpha_prod_t_prev) - a;
                 for (int c = 0; c < 4; c++)
                 {
                     float* x_ptr = x_mat.channel(c);
@@ -2855,8 +2855,8 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                       // sigma with scaled index == following2, discrete values (relative to eta)
                       si3 = sigma[((steps - i - 1) * eta) + i + 1],
                       // mixing sigmas to smoothen alpha_s
-                      si2 = sqrt(sqrt(si3 * (sigma[i + 1] ? si3 * (si1 / sigma[i + 1]) : si3)) *
-                                 sqrt(si4 * sqrt(si3 * si4))),
+                      si2 = std::sqrt(std::sqrt(si3 * (sigma[i + 1] ? si3 * (si1 / sigma[i + 1]) : si3)) *
+                                 std::sqrt(si4 * std::sqrt(si3 * si4))),
                       alpha_n = 1 / (si1 * si1 + 1),
                       alpha_s = 1 / (si2 * si2 + 1),
 #if       ORIGINAL_SAMPLER_ALGORITHMS
@@ -2871,13 +2871,13 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                     for (; x_ptr < x_ptr_end; x_ptr++)
                     {
                         const auto model_output = (*x_ptr - *d_ptr++) / si;
-                        const auto pred_original_sample = *x_ptr - sqrt(beta) / sqrt(alpha) * model_output;
-                        *x_ptr = sqrt(alpha_s) * pred_original_sample + sqrt(beta_s) * model_output;
+                        const auto pred_original_sample = *x_ptr - std::sqrt(beta) / std::sqrt(alpha) * model_output;
+                        *x_ptr = std::sqrt(alpha_s) * pred_original_sample + std::sqrt(beta_s) * model_output;
                     }
                 }
 #else  // ORIGINAL_SAMPLER_ALGORITHMS
-                      am = si2 / si * sqrt(alpha_s),
-                      bm = sqrt(alpha_s) - am; // (1 - si2 / si) * sqrt(alpha_s)
+                      am = si2 / si * std::sqrt(alpha_s),
+                      bm = std::sqrt(alpha_s) - am; // (1 - si2 / si) * sqrt(alpha_s)
                 for (int c = 0; c < 4; c++)
                 {
                     float* x_ptr = x_mat.channel(c);
@@ -2892,10 +2892,10 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                 if (eta > 0 && i < (steps - 1)) {
                     std::srand(seed++);
                     ncnn::Mat randn = randn_4_w_h(rand() % 1000, g_main_args.m_latw, g_main_args.m_lath);
-                    const auto a = sqrt(alpha_n / alpha_s),
+                    const auto a = std::sqrt(alpha_n / alpha_s),
                     // alpha_s can be smaller than alpha_n because of sigma_reshaper() or different noise scheduler,
                     // therefore trimming negative differences
-                    autozero = si * 0, b = sqrt(std::max(autozero, 1 - alpha_n / alpha_s));
+                    autozero = si * 0, b = std::sqrt(std::max(autozero, 1 - alpha_n / alpha_s));
                     for (int c = 0; c < 4; c++)
                     {
                         float* x_ptr = x_mat.channel(c);
