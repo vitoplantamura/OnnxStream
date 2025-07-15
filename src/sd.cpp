@@ -2921,7 +2921,8 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                         return prod;
                     };
                     auto simpson_integral = [=](float a, float b) -> float {
-                        constexpr int n = 3072;
+                        // Simpson integral
+                        constexpr int n = 122880; // 1 x 2 x 3 x 4 x 5 x 1024
                         float h = (b - a) / n;
                         float sum = fn(a) + fn(b);
                         for (int i = 1; i < n; i += 2) {
@@ -2933,7 +2934,8 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                         return sum * h / 3.0f;
                     };
                     auto simpson38_integral = [=](float a, float b) -> float {
-                        constexpr int n = 3072;
+                        // Simpson 3/8 integral
+                        constexpr int n = 122880;
                         float h = (b - a) / n;
                         float sum = 0;
                         for (int i = 0; i < n - 1; i += 3) {
@@ -2945,7 +2947,8 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                         return sum / 8.0f * h * 3.0f;
                     };
                     auto boole_integral = [=](float a, float b) -> float {
-                        constexpr int n = 3072;
+                        // Boole integral
+                        constexpr int n = 122880;
                         float h = (b - a) / n;
                         float sum = 0;
                         for (int i = 0; i < n - 1; i += 4) {
@@ -2953,13 +2956,60 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                                 + 32 * fn(a + i * h + h) 
                                 + 12 * fn(a + i * h + 2 * h) 
                                 + 32 * fn(a + i * h + 3 * h) 
-                                 + 7 * fn(a + i * h + 4 * h)
-                                 ;
+                                +  7 * fn(a + i * h + 4 * h);
                         }
                         return sum / 22.5f * h;
                     };
+                    auto gauss_integral = [=](float a, float b) -> float {
+                        // Gaussian 5 point integral, seems to have bias because of rounding errors
+                        const float p[5] = { -std::sqrt((70.f - std::sqrt(1120.f)) / 126.f),
+                                             -std::sqrt((70.f + std::sqrt(1120.f)) / 126.f),
+                                              0,
+                                             +std::sqrt((70.f - std::sqrt(1120.f)) / 126.f),
+                                             +std::sqrt((70.f + std::sqrt(1120.f)) / 126.f) };
+                        float w[5] = { 0 };
+                        for (int i = 0; i < 5; i++) {
+                            for (int j = 0; j < 5; j++) for (int k = 0; k < 5; k++) if (k != i && j != i && k != j) w[i] += p[j] * p[k];
+                            float temp = 4.f; for (int k = 0; k < 5; k++) if (k != i) temp *= p[k];
+                            w[i] = w[i] * (2.f / 3.f) + temp + 0.8f;
+                            for (int k = 0; k < 5; k++) if (k != i) w[i] /= (p[i] - p[k]);
+                        }
+                        constexpr int n = 122880;
+                        const float h = (b - a) / n,  dx = (5 * h) / 2;
+                        float sum = 0;
+                        for (int j = 0; j < n - 1; j += 4) {
+                            float s = a + h * (j + 2.5f);
+                            sum += w[0] * fn(dx * p[0] + s)
+                                +  w[1] * fn(dx * p[1] + s + h)
+                                +  w[2] * fn(dx * p[2] + s + h * 2)
+                                +  w[3] * fn(dx * p[3] + s + h * 3)
+                                +  w[4] * fn(dx * p[4] + s + h * 4);
+                        }
+                        return sum * h;
+                    };
+                    auto gauss3_integral = [=](float a, float b) -> float {
+                        // Gaussian 3 point integral
+                        const float p[3] = { -std::sqrt(3.f / 5.f),
+                                              0,
+                                             +std::sqrt(3.f / 5.f) };
+                        const float w[3] = { 5.f / 9.f,
+                                             8.f / 9.f,
+                                             5.f / 9.f };
+
+                        constexpr int n = 122880;
+                        const float h = (b - a) / n,  dx = (3 * h) / 2;
+                        float sum = 0;
+                        for (int j = 0; j < n - 1; j += 2) {
+                            float s = a + h * (j + 1.5f);
+                            sum += w[0] * fn(dx * p[0] + s)
+                                +  w[1] * fn(dx * p[1] + s + h)
+                                +  w[2] * fn(dx * p[2] + s + h * 2);
+                        }
+                        return sum * h;
+                    };
                     auto trapezoidal_integral = [=](float a, float b) -> float {
-                        constexpr int n = 3072;
+                        // Trapezoidal integral
+                        constexpr int n = 122880;
                         float h = (b - a) / n;
                         float sum = (fn(a) + fn(b)) * .5f;
                         for (int j = 1; j < n; j++) {
@@ -2968,20 +3018,24 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                         return sum * h;
                     };
                     auto midpoint_integral = [=](float a, float b) -> float {
-                        constexpr int n = 3072;
+                        // Rectangle (Riemann) midpoint integral
+                        constexpr int n = 122880;
                         float dx = (b - a) / n, sum = 0;
                         for (int j = 0; j < n; j++) {
                             sum += fn(a + (j + 0.5f) * dx);
                         }
                         return sum * dx;
                     };
-                    float s  = simpson_integral    (sigma[m], sigma_reshaper(sigma[m + 1], m));
-                    float b  = boole_integral      (sigma[m], sigma_reshaper(sigma[m + 1], m));
-                    float t  = trapezoidal_integral(sigma[m], sigma_reshaper(sigma[m + 1], m));
-                    float m1 = midpoint_integral   (sigma[m], sigma_reshaper(sigma[m + 1], m));
-                    float s3 = simpson38_integral  (sigma[m], sigma_reshaper(sigma[m + 1], m));
+                    const float s0 = sigma[m], s1 = sigma_reshaper(sigma[m + 1], m),
+                                s  = simpson_integral    (s0, s1),
+                                b  = boole_integral      (s0, s1),
+                                t  = trapezoidal_integral(s0, s1),
+                                m1 = midpoint_integral   (s0, s1),
+                                s3 = simpson38_integral  (s0, s1),
+                                g  = gauss_integral      (s0, s1),
+                                g3 = gauss3_integral     (s0, s1);
                     // using mix of several integrals
-                    return (s + b + t + m1 + s3) / 5;
+                    return (s + b + t + m1 + s3 + g + g3) / 7;
                 };
 #else  // ORIGINAL_SAMPLER_ALGORITHMS
                 auto linear_multistep_coeff = [=](const int order, const int m, const int j) -> const float {
