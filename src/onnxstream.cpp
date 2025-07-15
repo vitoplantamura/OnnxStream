@@ -503,7 +503,7 @@ public:
             throw std::runtime_error("failed to initialize XNNPACK");
     }
 
-    ~XnnPack()
+    ~XnnPack() noexcept(false)
     {
         for (auto& entry : m_ops_cache)
         {
