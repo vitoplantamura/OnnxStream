@@ -2918,16 +2918,16 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
             {
 #if       ORIGINAL_SAMPLER_ALGORITHMS
                 auto linear_multistep_coeff = [=](const int order, const int m, const int j) -> const float {
-                    auto fn = [=](float tau) -> float {
+                    auto fn = [=](const float tau) -> const float {
                         float prod = 1.f;
                         for (int k = 0; k < order; k++)
                             if (j != k) prod *= (tau - sigma[m - k]) / (sigma[m - j] - sigma[m - k]);
                         return prod;
                     };
-                    auto simpson_integral = [=](float a, float b) -> float {
+                    constexpr int n = 15360; // 1 x 2 x 3 x 4 x 5 x 128
+                    auto simpson_integral = [=](const float a, const float b) -> const float {
                         // Simpson integral
-                        constexpr int n = 122880; // 1 x 2 x 3 x 4 x 5 x 1024
-                        float h = (b - a) / n;
+                        const float h = (b - a) / n;
                         float sum = fn(a) + fn(b);
                         for (int i = 1; i < n; i += 2) {
                             sum += 4 * fn(a + i * h);
@@ -2937,94 +2937,81 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                         }
                         return sum * h / 3.0f;
                     };
-                    auto simpson38_integral = [=](float a, float b) -> float {
+                    auto simpson38_integral = [=](const float a, const float b) -> const float {
                         // Simpson 3/8 integral
-                        constexpr int n = 122880;
-                        float h = (b - a) / n;
-                        float sum = 0;
+                        const float h = (b - a) / n;
+                        float sum = 0.f;
                         for (int i = 0; i < n - 1; i += 3) {
-                            sum += fn(a + i * h) 
-                             + 3 * fn(a + i * h + h) 
-                             + 3 * fn(a + i * h + 2 * h) 
-                             +     fn(a + i * h + 3 * h);
+                            const float s = a + h * i;
+                            sum +=  fn(s) 
+                             + 3 * (fn(s + h) + fn(s + 2 * h))
+                             +      fn(s + 3 * h);
                         }
                         return sum / 8.0f * h * 3.0f;
                     };
-                    auto boole_integral = [=](float a, float b) -> float {
+                    auto boole_integral = [=](const float a, const float b) -> const float {
                         // Boole integral
-                        constexpr int n = 122880;
-                        float h = (b - a) / n;
-                        float sum = 0;
+                        const float h = (b - a) / n;
+                        float sum = 0.f;
                         for (int i = 0; i < n - 1; i += 4) {
-                            sum += 7 * fn(a + i * h) 
-                                + 32 * fn(a + i * h + h) 
-                                + 12 * fn(a + i * h + 2 * h) 
-                                + 32 * fn(a + i * h + 3 * h) 
-                                +  7 * fn(a + i * h + 4 * h);
+                            const float s = a + h * i;
+                            sum += 7 * fn(s) 
+                                + 32 * fn(s + h) 
+                                + 12 * fn(s + 2 * h) 
+                                + 32 * fn(s + 3 * h) 
+                                +  7 * fn(s + 4 * h);
                         }
                         return sum / 22.5f * h;
                     };
-                    auto gauss_integral = [=](float a, float b) -> float {
+                    auto gauss_integral = [=](const float a, const float b) -> const float {
                         // Gaussian 5 point integral, seems to have bias because of rounding errors
-                        const float p[5] = { -std::sqrt((70.f - std::sqrt(1120.f)) / 126.f),
+                        const float p[5] = { +std::sqrt((70.f + std::sqrt(1120.f)) / 126.f), // +-high
                                              -std::sqrt((70.f + std::sqrt(1120.f)) / 126.f),
-                                              0,
-                                             +std::sqrt((70.f - std::sqrt(1120.f)) / 126.f),
-                                             +std::sqrt((70.f + std::sqrt(1120.f)) / 126.f) };
+                                             +std::sqrt((70.f - std::sqrt(1120.f)) / 126.f), // +-low
+                                             -std::sqrt((70.f - std::sqrt(1120.f)) / 126.f),
+                                              0.f};
                         float w[5] = { 0 };
                         for (int i = 0; i < 5; i++) {
                             for (int j = 0; j < 5; j++) for (int k = 0; k < 5; k++) if (k != i && j != i && k != j) w[i] += p[j] * p[k];
                             float temp = 4.f; for (int k = 0; k < 5; k++) if (k != i) temp *= p[k];
-                            w[i] = w[i] * (2.f / 3.f) + temp + 0.8f;
+                            w[i] = w[i] * 2.f / 3.f + temp + 0.8f;
                             for (int k = 0; k < 5; k++) if (k != i) w[i] /= (p[i] - p[k]);
                         }
-                        constexpr int n = 122880;
                         const float h = (b - a) / n,  dx = (5 * h) / 2;
-                        float sum = 0;
+                        float sum = 0.f;
                         for (int j = 0; j < n - 1; j += 4) {
-                            float s = a + h * (j + 2.5f);
-                            sum += w[0] * fn(dx * p[0] + s)
-                                +  w[1] * fn(dx * p[1] + s + h)
-                                +  w[2] * fn(dx * p[2] + s + h * 2)
-                                +  w[3] * fn(dx * p[3] + s + h * 3)
-                                +  w[4] * fn(dx * p[4] + s + h * 4);
+                            const float s = a + h * (j + 2.5f);
+                            sum += w[0] * (fn(dx * p[0] + s)         + fn( - dx * p[1] + s + h))
+                                +  w[2] * (fn(dx * p[2] + s + h * 2) + fn( - dx * p[3] + s + h * 3))
+                                +  w[4] *  fn(s + h * 4);
                         }
                         return sum * h;
                     };
-                    auto gauss3_integral = [=](float a, float b) -> float {
+                    auto gauss3_integral = [=](const float a, const float b) -> const float {
                         // Gaussian 3 point integral
-                        const float p[3] = { -std::sqrt(3.f / 5.f),
-                                              0,
-                                             +std::sqrt(3.f / 5.f) };
-                        const float w[3] = { 5.f / 9.f,
-                                             8.f / 9.f,
-                                             5.f / 9.f };
-
-                        constexpr int n = 122880;
-                        const float h = (b - a) / n,  dx = (3 * h) / 2;
-                        float sum = 0;
+                        const float p0 = -std::sqrt(3.f / 5.f), p1 =  std::sqrt(3.f / 5.f),
+                                    w0 = 5.f / 9.f, w1 = 8.f / 9.f,
+                                    h = (b - a) / n,  dx = (3 * h) / 2;
+                        float sum = 0.f;
                         for (int j = 0; j < n - 1; j += 2) {
-                            float s = a + h * (j + 1.5f);
-                            sum += w[0] * fn(dx * p[0] + s)
-                                +  w[1] * fn(dx * p[1] + s + h)
-                                +  w[2] * fn(dx * p[2] + s + h * 2);
+                            const float s = a + h * (j + 1.5f);
+                            sum += w0 * (fn(dx * p0 + s) + fn(dx * p1 + s + h * 2)) + w1 * fn(s + h);
                         }
                         return sum * h;
                     };
-                    auto trapezoidal_integral = [=](float a, float b) -> float {
+                    auto trapezoidal_integral = [=](const float a, const float b) -> const float {
                         // Trapezoidal integral
-                        constexpr int n = 122880;
-                        float h = (b - a) / n;
+                        const float h = (b - a) / n;
                         float sum = (fn(a) + fn(b)) * .5f;
                         for (int j = 1; j < n; j++) {
                             sum += fn(a + j * h);
                         }
                         return sum * h;
                     };
-                    auto midpoint_integral = [=](float a, float b) -> float {
+                    auto midpoint_integral = [=](const float a, const float b) -> const float {
                         // Rectangle (Riemann) midpoint integral
-                        constexpr int n = 122880;
-                        float dx = (b - a) / n, sum = 0;
+                        const float dx = (b - a) / n;
+                        float sum = 0.f;
                         for (int j = 0; j < n; j++) {
                             sum += fn(a + (j + 0.5f) * dx);
                         }
@@ -3039,12 +3026,13 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                                 g  = gauss_integral      (s0, s1),
                                 g3 = gauss3_integral     (s0, s1);
                     // using mix of several integrals
-                    return (s + b + t + m1 + s3 + g + g3) / 7;
+                    return (((double)s + b + t + m1 + s3 - g) / 2 + g3) / 3;
+                    //return (b + s3) / 2; // needs 120k divisions
                 };
 #else  // ORIGINAL_SAMPLER_ALGORITHMS
                 auto linear_multistep_coeff = [=](const int order, const int m, const int j) -> const float {
-                    // using Riemann middle integral with 1kk samples
-                    constexpr int n = 1048576;
+                    // using Riemann middle integral with 128k samples
+                    constexpr int n = 131072;
                     const float a = sigma[m], dx = (sigma_reshaper(sigma[m + 1], m) - a) / n, s = sigma[m - j];
                     float sum = 0.f;
                     for (int h = 0; h < n; h++) {
