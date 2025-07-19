@@ -503,7 +503,7 @@ public:
             throw std::runtime_error("failed to initialize XNNPACK");
     }
 
-    ~XnnPack()
+    ~XnnPack() noexcept(false)
     {
         for (auto& entry : m_ops_cache)
         {
@@ -2474,6 +2474,9 @@ std::optional<Operation> Model::next_op_impl()
 
     op.m_name = std::move(first[0]);
     op.m_type = std::move(first[1]);
+
+    if (!op.m_name.size())
+        op.m_name = "onnxstream_fallback_name_" + std::to_string(m_pos);
 
     if (vec[1].find("input:") != 0)
         throw std::invalid_argument("Model::next_op: invalid format of model line.");
