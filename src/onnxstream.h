@@ -177,8 +177,6 @@ public:
 
     TensorDataLayout m_layout = TensorDataLayout::unspecified;
 
-    std::shared_ptr<Tensor> m_next_part; // todo: remove
-
     float m_scale = 0;
     uint8_t m_zero_point = 0;
 
@@ -949,8 +947,6 @@ public:
     bool m_use_fp16_arithmetic = false;
     bool m_use_uint8_qdq = false;
     bool m_use_uint8_arithmetic = false;
-    bool m_do_multipart_quantization = false;
-    size_t m_multipart_threshold = -1;
     bool m_fuse_ops_in_attention = false;
     size_t m_attention_fused_ops_parts = 2;
     std::vector<std::string> m_extra_outputs;
@@ -998,7 +994,7 @@ private:
     std::vector<Operation> m_next_op_cache;
     bool m_next_op_cache_ready = false;
 
-    Tensor& get_tensor_data(Tensor& tensor, bool make_copy = false, bool requires_float = false, TensorDataLayout required_layout = TensorDataLayout::unspecified, bool accepts_multipart = false);
+    Tensor& get_tensor_data(Tensor& tensor, bool make_copy = false, bool requires_float = false, TensorDataLayout required_layout = TensorDataLayout::unspecified);
 
     static bool compare_shapes(const std::vector<size_t>& shape_1, const std::vector<size_t>& shape_2, int except = -1);
     bool check_output_shape(const std::vector<size_t>& src, std::vector<size_t>& dst);
@@ -1011,10 +1007,6 @@ private:
     std::map<std::string, int> m_intermediate_refs, m_intermediate_refs_copy;
 
     std::vector<Operation> m_ops_queue;
-
-    Tensor& get_multipart_input(Tensor& t, size_t i, TensorDataType base_type);
-    void push_multipart_tensor(Tensor& output, bool is_multipart);
-    size_t get_multipart_dimension(Tensor& t);
 
     static bool get_start_and_end(size_t& start, size_t& end, const size_t i, const size_t size, const size_t threads_count);
 

@@ -2626,7 +2626,7 @@ Tensor Model::parse_tensor_string(std::string& str)
     return t;
 }
 
-Tensor& Model::get_tensor_data(Tensor& t, bool make_copy /*= false*/, bool requires_float /*= false*/, TensorDataLayout required_layout /*= TensorDataLayout::unspecified*/, bool accepts_multipart /*= false*/)
+Tensor& Model::get_tensor_data(Tensor& t, bool make_copy /*= false*/, bool requires_float /*= false*/, TensorDataLayout required_layout /*= TensorDataLayout::unspecified*/)
 {
     if (m_use_fp16_arithmetic && m_requires_upcast && m_ops_queue.size() && m_requires_upcast(m_ops_queue[0].m_type, m_ops_queue[0].m_name))
         requires_float = true;
@@ -2769,9 +2769,6 @@ Tensor& Model::get_tensor_data(Tensor& t, bool make_copy /*= false*/, bool requi
         }
         else
         {
-            if (tensor_ptr->m_next_part)
-                throw std::runtime_error("Model::get_tensor_data: multipart tensors cannot have multiple references (not implemented).");
-
             if (!make_copy)
             {
                 t.m_data = tensor_ptr->m_data;
@@ -2808,9 +2805,6 @@ Tensor& Model::get_tensor_data(Tensor& t, bool make_copy /*= false*/, bool requi
             }
         }
     }
-
-    if (t.m_next_part && !accepts_multipart)
-        throw std::invalid_argument("Model::get_tensor_data: multipart tensor but accepts_multipart == false (" + (!m_ops_queue.size() ? std::string("?") : m_ops_queue[0].m_type) + ").");
 
     if (load)
     {
@@ -2980,25 +2974,7 @@ void Model::push_tensor(Tensor&& t, bool force_quantization /*= false*/)
         }
     }
 
-    {
-        bool pushed = false;
-
-        for (Tensor& first : m_data)
-            if (first.m_name == t.m_name)
-            {
-                Tensor* last = &first;
-                while (last->m_next_part)
-                    last = last->m_next_part.get();
-
-                last->m_next_part = std::make_unique<Tensor>(std::move(t));
-
-                pushed = true;
-                break;
-            }
-
-        if (!pushed)
-            m_data.push_back(std::move(t));
-    }
+    m_data.push_back(std::move(t));
 }
 
 bool Model::compare_shapes(const std::vector<size_t>& shape_1, const std::vector<size_t>& shape_2, int except /*= -1*/)
@@ -3033,53 +3009,6 @@ bool Model::check_output_shape(const std::vector<size_t>& src, std::vector<size_
             }
 
     return true;
-}
-
-Tensor& Model::get_multipart_input(Tensor& t, size_t i, TensorDataType base_type)
-{
-    if (!t.m_next_part)
-    {
-        return t;
-    }
-
-    int count = i;
-    Tensor* curr = &t;
-    Tensor* prev = curr;
-    while (count > 0 && curr->m_next_part)
-    {
-        if (prev->m_type != TensorDataType::none) prev->reset_data();
-        prev = curr;
-        curr = curr->m_next_part.get();
-        count--;
-    }
-    if (count)
-        throw std::invalid_argument("Model::get_multipart_input: wrong number of tensors in multipart tensor.");
-
-    if (curr->m_type == TensorDataType::uint8)
-        dequantize(*curr, base_type);
-
-    return *curr;
-}
-
-void Model::push_multipart_tensor(Tensor& output, bool is_multipart)
-{
-    Tensor copy = output.get_copy_without_data();
-    push_tensor(std::move(output), is_multipart && m_do_multipart_quantization /* force_quantization */);
-    output = std::move(copy);
-}
-
-size_t Model::get_multipart_dimension(Tensor& t)
-{
-    size_t n = 1;
-
-    Tensor* ptr = t.m_next_part.get();
-    while (ptr)
-    {
-        ptr = ptr->m_next_part.get();
-        n++;
-    }
-
-    return n;
 }
 
 bool Model::get_start_and_end(size_t& start, size_t& end, const size_t i, const size_t size, const size_t threads_count)
@@ -3847,107 +3776,95 @@ void Model::run()
             if (op.m_input.size() != 2) throw std::invalid_argument(op.m_type + ": wrong number of inputs.");
             if (op.m_output.size() != 1) throw std::invalid_argument(op.m_type + ": wrong number of outputs.");
 
-            auto& input_0_base = get_tensor_data(op.m_input[0], false /* make_copy */, false /* requires_float */, TensorDataLayout::unspecified /* required_layout */, true /* accepts_multipart */);
+            auto& input_0 = get_tensor_data(op.m_input[0], false /* make_copy */, false /* requires_float */, TensorDataLayout::unspecified /* required_layout */);
             auto& input_1 = get_tensor_data(op.m_input[1]);
             auto& output = op.m_output[0];
 
-            if (input_0_base.m_next_part)
-                output.m_shape[0] = 1;
-
-            TensorDataType base_type = input_0_base.m_type;
-
-            size_t n = get_multipart_dimension(input_0_base);
-
-            for (size_t i = 0; i < n; i++)
+            if (input_0.m_type == TensorDataType::float32)
             {
-                Tensor& input_0 = get_multipart_input(input_0_base, i, base_type);
+                if (input_0.m_type != TensorDataType::float32) throw std::invalid_argument(op.m_type + ": wrong data type of input 0.");
+                if (input_1.m_type != TensorDataType::float32) throw std::invalid_argument(op.m_type + ": wrong data type of input 1.");
 
-                if (input_0.m_type == TensorDataType::float32)
-                {
-                    if (input_0.m_type != TensorDataType::float32) throw std::invalid_argument(op.m_type + ": wrong data type of input 0.");
-                    if (input_1.m_type != TensorDataType::float32) throw std::invalid_argument(op.m_type + ": wrong data type of input 1.");
+                auto& input_0_data = input_0.get_vector<float>();
+                auto& input_1_data = input_1.get_vector<float>();
 
-                    auto& input_0_data = input_0.get_vector<float>();
-                    auto& input_1_data = input_1.get_vector<float>();
+                auto result = m_xnnpack->multiply(input_0.m_shape, input_0_data.data(), input_1.m_shape, input_1_data.data());
 
-                    auto result = m_xnnpack->multiply(input_0.m_shape, input_0_data.data(), input_1.m_shape, input_1_data.data());
+                if (!check_output_shape(result.first, output.m_shape))
+                    throw std::invalid_argument(op.m_type + ": unexpected shape of output.");
 
-                    if (!check_output_shape(result.first, output.m_shape))
-                        throw std::invalid_argument(op.m_type + ": unexpected shape of output.");
-
-                    output.set_vector(std::move(result.second));
-                }
-                else if (input_0.m_type == TensorDataType::int64)
-                {
-                    if (input_0.m_type != TensorDataType::int64) throw std::invalid_argument(op.m_type + ": wrong data type of input 0.");
-                    if (input_1.m_type != TensorDataType::int64) throw std::invalid_argument(op.m_type + ": wrong data type of input 1.");
-
-                    auto& input_0_data = input_0.get_vector<int64_t>();
-                    auto& input_1_data = input_1.get_vector<int64_t>();
-
-                    auto input_0_data_fp32 = int64_to_float(input_0_data);
-                    auto input_1_data_fp32 = int64_to_float(input_1_data);
-
-                    auto result = m_xnnpack->multiply(input_0.m_shape, input_0_data_fp32.data(), input_1.m_shape, input_1_data_fp32.data());
-
-                    if (input_0.m_shape.size() == 0 && input_1.m_shape.size() == 0)
-                        result.first.clear();
-
-                    if (!check_output_shape(result.first, output.m_shape))
-                        throw std::invalid_argument(op.m_type + ": unexpected shape of output.");
-
-                    auto result_i64 = float_to_int64(result.second);
-                    output.set_vector(std::move(result_i64));
-                }
-                else if (input_0.m_type == TensorDataType::float16)
-                {
-                    if (input_0.m_type != TensorDataType::float16) throw std::invalid_argument(op.m_type + ": wrong data type of input 0.");
-                    if (input_1.m_type != TensorDataType::float16) throw std::invalid_argument(op.m_type + ": wrong data type of input 1.");
-
-                    auto& input_0_data = input_0.get_vector<uint16_t>();
-                    auto& input_1_data = input_1.get_vector<uint16_t>();
-
-                    auto result = m_xnnpack->multiply(input_0.m_shape, input_0_data.data(), input_1.m_shape, input_1_data.data());
-
-                    if (!check_output_shape(result.first, output.m_shape))
-                        throw std::invalid_argument(op.m_type + ": unexpected shape of output.");
-
-                    output.set_vector(std::move(result.second));
-                }
-                else
-                {
-                    if (input_0.m_type != TensorDataType::uint8) throw std::invalid_argument(op.m_type + ": wrong data type of input 0.");
-                    if (input_1.m_type != TensorDataType::uint8) throw std::invalid_argument(op.m_type + ": wrong data type of input 1.");
-
-                    auto& input_0_data = input_0.get_vector<uint8_t>();
-                    auto& input_1_data = input_1.get_vector<uint8_t>();
-
-                    XnnPack::Qu8MulData qu8_data;
-
-                    if (!m_range_data.count(op.m_name)) throw std::invalid_argument(op.m_type + ": range data not found.");
-
-                    auto s = range_to_scale(m_range_data[op.m_name]);
-
-                    qu8_data.input1_zero_point = input_0.m_zero_point;
-                    qu8_data.input1_scale = input_0.m_scale;
-                    qu8_data.input2_zero_point = input_1.m_zero_point;
-                    qu8_data.input2_scale = input_1.m_scale;
-                    qu8_data.output_zero_point = s.second;
-                    qu8_data.output_scale = s.first;
-
-                    auto result = m_xnnpack->multiply<uint8_t>(input_0.m_shape, input_0_data.data(), input_1.m_shape, input_1_data.data(), nullptr, &qu8_data);
-
-                    if (!check_output_shape(result.first, output.m_shape))
-                        throw std::invalid_argument(op.m_type + ": unexpected shape of output.");
-
-                    output.set_vector(std::move(result.second));
-
-                    output.m_scale = s.first;
-                    output.m_zero_point = s.second;
-                }
-
-                push_multipart_tensor(output, n > 1 /* is_multipart */);
+                output.set_vector(std::move(result.second));
             }
+            else if (input_0.m_type == TensorDataType::int64)
+            {
+                if (input_0.m_type != TensorDataType::int64) throw std::invalid_argument(op.m_type + ": wrong data type of input 0.");
+                if (input_1.m_type != TensorDataType::int64) throw std::invalid_argument(op.m_type + ": wrong data type of input 1.");
+
+                auto& input_0_data = input_0.get_vector<int64_t>();
+                auto& input_1_data = input_1.get_vector<int64_t>();
+
+                auto input_0_data_fp32 = int64_to_float(input_0_data);
+                auto input_1_data_fp32 = int64_to_float(input_1_data);
+
+                auto result = m_xnnpack->multiply(input_0.m_shape, input_0_data_fp32.data(), input_1.m_shape, input_1_data_fp32.data());
+
+                if (input_0.m_shape.size() == 0 && input_1.m_shape.size() == 0)
+                    result.first.clear();
+
+                if (!check_output_shape(result.first, output.m_shape))
+                    throw std::invalid_argument(op.m_type + ": unexpected shape of output.");
+
+                auto result_i64 = float_to_int64(result.second);
+                output.set_vector(std::move(result_i64));
+            }
+            else if (input_0.m_type == TensorDataType::float16)
+            {
+                if (input_0.m_type != TensorDataType::float16) throw std::invalid_argument(op.m_type + ": wrong data type of input 0.");
+                if (input_1.m_type != TensorDataType::float16) throw std::invalid_argument(op.m_type + ": wrong data type of input 1.");
+
+                auto& input_0_data = input_0.get_vector<uint16_t>();
+                auto& input_1_data = input_1.get_vector<uint16_t>();
+
+                auto result = m_xnnpack->multiply(input_0.m_shape, input_0_data.data(), input_1.m_shape, input_1_data.data());
+
+                if (!check_output_shape(result.first, output.m_shape))
+                    throw std::invalid_argument(op.m_type + ": unexpected shape of output.");
+
+                output.set_vector(std::move(result.second));
+            }
+            else
+            {
+                if (input_0.m_type != TensorDataType::uint8) throw std::invalid_argument(op.m_type + ": wrong data type of input 0.");
+                if (input_1.m_type != TensorDataType::uint8) throw std::invalid_argument(op.m_type + ": wrong data type of input 1.");
+
+                auto& input_0_data = input_0.get_vector<uint8_t>();
+                auto& input_1_data = input_1.get_vector<uint8_t>();
+
+                XnnPack::Qu8MulData qu8_data;
+
+                if (!m_range_data.count(op.m_name)) throw std::invalid_argument(op.m_type + ": range data not found.");
+
+                auto s = range_to_scale(m_range_data[op.m_name]);
+
+                qu8_data.input1_zero_point = input_0.m_zero_point;
+                qu8_data.input1_scale = input_0.m_scale;
+                qu8_data.input2_zero_point = input_1.m_zero_point;
+                qu8_data.input2_scale = input_1.m_scale;
+                qu8_data.output_zero_point = s.second;
+                qu8_data.output_scale = s.first;
+
+                auto result = m_xnnpack->multiply<uint8_t>(input_0.m_shape, input_0_data.data(), input_1.m_shape, input_1_data.data(), nullptr, &qu8_data);
+
+                if (!check_output_shape(result.first, output.m_shape))
+                    throw std::invalid_argument(op.m_type + ": unexpected shape of output.");
+
+                output.set_vector(std::move(result.second));
+
+                output.m_scale = s.first;
+                output.m_zero_point = s.second;
+            }
+
+            push_tensor(std::move(output));
         }
         else if (
             op.m_type == "Cos" ||
@@ -5617,7 +5534,7 @@ void Model::run()
             if (op.m_input.size() != 2) throw std::invalid_argument(op.m_type + ": wrong number of inputs.");
             if (op.m_output.size() != 1) throw std::invalid_argument(op.m_type + ": wrong number of outputs.");
 
-            auto& input_0 = get_tensor_data(op.m_input[0], false /* make_copy */, false /* requires_float */, TensorDataLayout::unspecified /* required_layout */, true /* accepts_multipart */);
+            auto& input_0 = get_tensor_data(op.m_input[0], false /* make_copy */, false /* requires_float */, TensorDataLayout::unspecified /* required_layout */);
             auto& input_1 = get_tensor_data(op.m_input[1]);
             auto& output = op.m_output[0];
 
@@ -5654,14 +5571,6 @@ void Model::run()
 
             size_t n = input_0.m_shape[0];
 
-            bool is_multipart_input = input_0.m_next_part.get() != nullptr;
-
-            if (is_multipart_input)
-            {
-                if (n != 1) throw std::invalid_argument(op.m_type + ": invalid shape of multipart input.");
-                n = get_multipart_dimension(input_0);
-            }
-
             if (input_1.m_shape.size() == 2)
                 input_1.m_shape.insert(input_1.m_shape.begin(), n);
 
@@ -5684,16 +5593,6 @@ void Model::run()
             for (auto& s : output_shape)
                 output_num_els *= s;
 
-            bool is_multipart_output = false;
-
-            if (m_multipart_threshold != -1 && output_num_els >= m_multipart_threshold && n > 1)
-            {
-                output_shape[0] = 1;
-                output.m_shape[0] = 1;
-                output_num_els /= n;
-                is_multipart_output = true;
-            }
-
             if (cache_key.size() && n != 1)
                 throw std::invalid_argument(op.m_type + ": cache_key != '' and n != 1.");
 
@@ -5702,100 +5601,71 @@ void Model::run()
             void* output_ptr = nullptr;
             size_t sizeof_element = 0;
 
-            TensorDataType base_type = input_0.m_type;
+            if (input_0.m_type == TensorDataType::float32)
+            {
+                sizeof_element = sizeof(float);
+
+                if (input_1.m_type != TensorDataType::float32) throw std::invalid_argument(op.m_type + ": wrong data type of input 1.");
+                auto& input_1_data = input_1.get_vector<float>();
+                input_1_ptr = input_1_data.data();
+
+                if (input_0.m_type != TensorDataType::float32) throw std::invalid_argument(op.m_type + ": wrong data type of input 0.");
+                auto& input_0_data = input_0.get_vector<float>();
+                input_0_ptr = input_0_data.data();
+
+                tensor_vector<float> temp = create_tensor_vector<float>(output_num_els);
+                output.set_vector(std::move(temp));
+                output_ptr = output.get_vector<float>().data();
+            }
+            else if (input_0.m_type == TensorDataType::float16)
+            {
+                sizeof_element = sizeof(uint16_t);
+
+                if (input_1.m_type != TensorDataType::float16) throw std::invalid_argument(op.m_type + ": wrong data type of input 1.");
+                auto& input_1_data = input_1.get_vector<uint16_t>();
+                input_1_ptr = input_1_data.data();
+
+                if (input_0.m_type != TensorDataType::float16) throw std::invalid_argument(op.m_type + ": wrong data type of input 0.");
+                auto& input_0_data = input_0.get_vector<uint16_t>();
+                input_0_ptr = input_0_data.data();
+
+                tensor_vector<uint16_t> temp = create_tensor_vector<uint16_t>(output_num_els);
+                output.set_vector(std::move(temp));
+                output_ptr = output.get_vector<uint16_t>().data();
+            }
+            else
+            {
+                sizeof_element = sizeof(uint8_t);
+
+                if (input_1.m_type != TensorDataType::uint8) throw std::invalid_argument(op.m_type + ": wrong data type of input 1.");
+                auto& input_1_data = input_1.get_vector<uint8_t>();
+                input_1_ptr = input_1_data.data();
+
+                if (input_0.m_type != TensorDataType::uint8) throw std::invalid_argument(op.m_type + ": wrong data type of input 0.");
+                auto& input_0_data = input_0.get_vector<uint8_t>();
+                input_0_ptr = input_0_data.data();
+
+                {
+                    tensor_vector<uint8_t> temp = create_tensor_vector<uint8_t>(output_num_els);
+                    output.set_vector(std::move(temp));
+                    output_ptr = output.get_vector<uint8_t>().data();
+
+                    if (!m_range_data.count(op.m_name)) throw std::invalid_argument(op.m_type + ": range data not found.");
+
+                    auto s = range_to_scale(m_range_data[op.m_name]);
+                    output.m_scale = s.first;
+                    output.m_zero_point = s.second;
+                }
+            }
 
             for (size_t i = 0; i < n; i++)
             {
-                Tensor& input_0_curr = get_multipart_input(input_0, i, base_type);
-
-                if (input_0_curr.m_type == TensorDataType::float32)
-                {
-                    sizeof_element = sizeof(float);
-
-                    if (i == 0)
-                    {
-                        if (input_1.m_type != TensorDataType::float32) throw std::invalid_argument(op.m_type + ": wrong data type of input 1.");
-                        auto& input_1_data = input_1.get_vector<float>();
-                        input_1_ptr = input_1_data.data();
-                    }
-
-                    if (is_multipart_input || i == 0)
-                    {
-                        if (input_0_curr.m_type != TensorDataType::float32) throw std::invalid_argument(op.m_type + ": wrong data type of input 0.");
-                        auto& input_0_data = input_0_curr.get_vector<float>();
-                        input_0_ptr = input_0_data.data();
-                    }
-
-                    if (is_multipart_output || i == 0)
-                    {
-                        tensor_vector<float> temp = create_tensor_vector<float>(output_num_els);
-                        output.set_vector(std::move(temp));
-                        output_ptr = output.get_vector<float>().data();
-                    }
-                }
-                else if (input_0_curr.m_type == TensorDataType::float16)
-                {
-                    sizeof_element = sizeof(uint16_t);
-
-                    if (i == 0)
-                    {
-                        if (input_1.m_type != TensorDataType::float16) throw std::invalid_argument(op.m_type + ": wrong data type of input 1.");
-                        auto& input_1_data = input_1.get_vector<uint16_t>();
-                        input_1_ptr = input_1_data.data();
-                    }
-
-                    if (is_multipart_input || i == 0)
-                    {
-                        if (input_0_curr.m_type != TensorDataType::float16) throw std::invalid_argument(op.m_type + ": wrong data type of input 0.");
-                        auto& input_0_data = input_0_curr.get_vector<uint16_t>();
-                        input_0_ptr = input_0_data.data();
-                    }
-
-                    if (is_multipart_output || i == 0)
-                    {
-                        tensor_vector<uint16_t> temp = create_tensor_vector<uint16_t>(output_num_els);
-                        output.set_vector(std::move(temp));
-                        output_ptr = output.get_vector<uint16_t>().data();
-                    }
-                }
-                else
-                {
-                    sizeof_element = sizeof(uint8_t);
-
-                    if (i == 0)
-                    {
-                        if (input_1.m_type != TensorDataType::uint8) throw std::invalid_argument(op.m_type + ": wrong data type of input 1.");
-                        auto& input_1_data = input_1.get_vector<uint8_t>();
-                        input_1_ptr = input_1_data.data();
-                    }
-
-                    if (is_multipart_input || i == 0)
-                    {
-                        if (input_0_curr.m_type != TensorDataType::uint8) throw std::invalid_argument(op.m_type + ": wrong data type of input 0.");
-                        auto& input_0_data = input_0_curr.get_vector<uint8_t>();
-                        input_0_ptr = input_0_data.data();
-                    }
-
-                    if (is_multipart_output || i == 0)
-                    {
-                        tensor_vector<uint8_t> temp = create_tensor_vector<uint8_t>(output_num_els);
-                        output.set_vector(std::move(temp));
-                        output_ptr = output.get_vector<uint8_t>().data();
-
-                        if (!m_range_data.count(op.m_name)) throw std::invalid_argument(op.m_type + ": range data not found.");
-
-                        auto s = range_to_scale(m_range_data[op.m_name]);
-                        output.m_scale = s.first;
-                        output.m_zero_point = s.second;
-                    }
-                }
-
                 std::vector<size_t> result_first;
 
                 if (sizeof_element == sizeof(float))
                 {
                     auto result = m_xnnpack->matrix_multiply<float, float>(
-                        { input_0_curr.m_shape[1], input_0_curr.m_shape[2] },
+                        { input_0.m_shape[1], input_0.m_shape[2] },
                         (float*)input_0_ptr,
                         { input_1.m_shape[1], input_1.m_shape[2] },
                         (float*)input_1_ptr,
@@ -5808,7 +5678,7 @@ void Model::run()
                 else if (sizeof_element == sizeof(uint16_t))
                 {
                     auto result = m_xnnpack->matrix_multiply<uint16_t, uint16_t>(
-                        { input_0_curr.m_shape[1], input_0_curr.m_shape[2] },
+                        { input_0.m_shape[1], input_0.m_shape[2] },
                         (uint16_t*)input_0_ptr,
                         { input_1.m_shape[1], input_1.m_shape[2] },
                         (uint16_t*)input_1_ptr,
@@ -5822,15 +5692,15 @@ void Model::run()
                 {
                     XnnPack::Qu8MatMulData qu8_data;
 
-                    qu8_data.input_zero_point = input_0_curr.m_zero_point;
-                    qu8_data.input_scale = input_0_curr.m_scale;
+                    qu8_data.input_zero_point = input_0.m_zero_point;
+                    qu8_data.input_scale = input_0.m_scale;
                     qu8_data.kernel_zero_point = input_1.m_zero_point;
                     qu8_data.kernel_scale = input_1.m_scale;
                     qu8_data.output_zero_point = output.m_zero_point;
                     qu8_data.output_scale = output.m_scale;
 
                     auto result = m_xnnpack->matrix_multiply<uint8_t, int32_t>(
-                        { input_0_curr.m_shape[1], input_0_curr.m_shape[2] },
+                        { input_0.m_shape[1], input_0.m_shape[2] },
                         (uint8_t*)input_0_ptr,
                         { input_1.m_shape[1], input_1.m_shape[2] },
                         (uint8_t*)input_1_ptr,
@@ -5844,19 +5714,12 @@ void Model::run()
                 if (result_first.size() != 2)
                     throw std::invalid_argument(op.m_type + ": unexpected shape of output of matrix_multiply_fp32.");
 
-                input_0_ptr = (uint8_t*)input_0_ptr + input_0_curr.m_shape[1] * input_0_curr.m_shape[2] * sizeof_element;
+                input_0_ptr = (uint8_t*)input_0_ptr + input_0.m_shape[1] * input_0.m_shape[2] * sizeof_element;
                 input_1_ptr = (uint8_t*)input_1_ptr + input_1.m_shape[1] * input_1.m_shape[2] * sizeof_element;
                 output_ptr = (uint8_t*)output_ptr + result_first[0] * result_first[1] * sizeof_element;
 
-                if (!is_multipart_output)
-                {
-                    if (i == n - 1)
-                        push_tensor(std::move(output));
-                }
-                else
-                {
-                    push_multipart_tensor(output, true /* is_multipart */);
-                }
+                if (i == n - 1)
+                    push_tensor(std::move(output));
             }
         }
         else if (op.m_type == "Softmax")
@@ -5864,11 +5727,8 @@ void Model::run()
             if (op.m_input.size() != 1) throw std::invalid_argument(op.m_type + ": wrong number of inputs.");
             if (op.m_output.size() != 1) throw std::invalid_argument(op.m_type + ": wrong number of outputs.");
 
-            auto& input_base = get_tensor_data(op.m_input[0], false /* make_copy */, false /* requires_float */, TensorDataLayout::unspecified /* required_layout */, true /* accepts_multipart */);
+            auto& input = get_tensor_data(op.m_input[0], false /* make_copy */, false /* requires_float */, TensorDataLayout::unspecified /* required_layout */);
             auto& output = op.m_output[0];
-
-            if (input_base.m_next_part)
-                output.m_shape[0] = 1;
 
             int axis = -1;
 
@@ -5879,134 +5739,125 @@ void Model::run()
                     throw std::invalid_argument(op.m_type + ": unrecognized attribute: " + a.first + ".");
 
             if (axis < 0)
-                axis = (int)input_base.m_shape.size() + axis;
-            if (axis < 0 || axis >= input_base.m_shape.size())
+                axis = (int)input.m_shape.size() + axis;
+            if (axis < 0 || axis >= input.m_shape.size())
                 throw std::invalid_argument(op.m_type + ": invalid axis attribute.");
 
             std::vector<size_t> transpose_in, transpose_out;
 
-            if (axis != input_base.m_shape.size() - 1)
+            if (axis != input.m_shape.size() - 1)
             {
-                for (size_t i = 0; i < input_base.m_shape.size(); i++)
+                for (size_t i = 0; i < input.m_shape.size(); i++)
                     if (i != axis)
                         transpose_in.push_back(i);
                 transpose_in.push_back(axis);
 
-                for (size_t i = 0; i < input_base.m_shape.size() - 1; i++)
+                for (size_t i = 0; i < input.m_shape.size() - 1; i++)
                 {
                     if (i == axis)
-                        transpose_out.push_back(input_base.m_shape.size() - 1);
+                        transpose_out.push_back(input.m_shape.size() - 1);
                     transpose_out.push_back(i);
                 }
             }
 
-            TensorDataType base_type = input_base.m_type;
-
-            size_t n = get_multipart_dimension(input_base);
-
-            for (size_t i = 0; i < n; i++)
+            if (input.m_type == TensorDataType::float32)
             {
-                Tensor& input = get_multipart_input(input_base, i, base_type);
+                if (input.m_type != TensorDataType::float32) throw std::invalid_argument(op.m_type + ": wrong data type of input.");
 
-                if (input.m_type == TensorDataType::float32)
+                auto& input_vec = input.get_vector<float>();
+                float* input_data = input_vec.data();
+                std::vector<size_t>* input_shape = &input.m_shape;
+
+                std::pair<std::vector<size_t>, tensor_vector<float>> aux;
+
+                if (transpose_in.size())
                 {
-                    if (input.m_type != TensorDataType::float32) throw std::invalid_argument(op.m_type + ": wrong data type of input.");
-
-                    auto& input_vec = input.get_vector<float>();
-                    float* input_data = input_vec.data();
-                    std::vector<size_t>* input_shape = &input.m_shape;
-
-                    std::pair<std::vector<size_t>, tensor_vector<float>> aux;
-
-                    if (transpose_in.size())
-                    {
-                        aux = m_xnnpack->transpose<float>(*input_shape, input_vec, transpose_in);
-                        input_data = aux.second.data();
-                        input_shape = &aux.first;
-                    }
-
-                    auto result = m_xnnpack->softmax<float>(*input_shape, input_data, nullptr /* output_data_override */, nullptr /* qu8_data */, 0 /* channels_override */);
-
-                    if (transpose_out.size())
-                    {
-                        aux = m_xnnpack->transpose<float>(result.first, result.second, transpose_out);
-                        result = std::move(aux);
-                    }
-
-                    if (!check_output_shape(result.first, output.m_shape))
-                        throw std::invalid_argument(op.m_type + ": unexpected shape of output.");
-
-                    output.set_vector(std::move(result.second));
-                }
-                else if (input.m_type == TensorDataType::float16)
-                {
-                    if (input.m_type != TensorDataType::float16) throw std::invalid_argument(op.m_type + ": wrong data type of input.");
-
-                    auto& input_vec = input.get_vector<uint16_t>();
-                    uint16_t* input_data = input_vec.data();
-                    std::vector<size_t>* input_shape = &input.m_shape;
-
-                    std::pair<std::vector<size_t>, tensor_vector<uint16_t>> aux;
-
-                    if (transpose_in.size())
-                    {
-                        aux = m_xnnpack->transpose<uint16_t>(*input_shape, input_vec, transpose_in);
-                        input_data = aux.second.data();
-                        input_shape = &aux.first;
-                    }
-
-                    auto result = m_xnnpack->softmax<uint16_t>(*input_shape, input_data, nullptr /* output_data_override */, nullptr /* qu8_data */, 0 /* channels_override */);
-
-                    if (transpose_out.size())
-                    {
-                        aux = m_xnnpack->transpose<uint16_t>(result.first, result.second, transpose_out);
-                        result = std::move(aux);
-                    }
-
-                    if (!check_output_shape(result.first, output.m_shape))
-                        throw std::invalid_argument(op.m_type + ": unexpected shape of output.");
-
-                    output.set_vector(std::move(result.second));
-                }
-                else
-                {
-                    if (input.m_type != TensorDataType::uint8) throw std::invalid_argument(op.m_type + ": wrong data type of input.");
-
-                    auto& input_vec = input.get_vector<uint8_t>();
-                    uint8_t* input_data = input_vec.data();
-                    std::vector<size_t>* input_shape = &input.m_shape;
-
-                    XnnPack::Qu8SoftmaxData qu8_data;
-
-                    qu8_data.input_scale = input.m_scale;
-                    qu8_data.output_zero_point = output.m_zero_point = 0;
-                    qu8_data.output_scale = output.m_scale = 0x1.0p-8f;
-
-                    std::pair<std::vector<size_t>, tensor_vector<uint8_t>> aux;
-
-                    if (transpose_in.size())
-                    {
-                        aux = m_xnnpack->transpose<uint8_t>(*input_shape, input_vec, transpose_in);
-                        input_data = aux.second.data();
-                        input_shape = &aux.first;
-                    }
-
-                    auto result = m_xnnpack->softmax<uint8_t>(*input_shape, input_data, nullptr /* output_data_override */, &qu8_data /* qu8_data */, 0 /* channels_override */);
-
-                    if (transpose_out.size())
-                    {
-                        aux = m_xnnpack->transpose<uint8_t>(result.first, result.second, transpose_out);
-                        result = std::move(aux);
-                    }
-
-                    if (!check_output_shape(result.first, output.m_shape))
-                        throw std::invalid_argument(op.m_type + ": unexpected shape of output.");
-
-                    output.set_vector(std::move(result.second));
+                    aux = m_xnnpack->transpose<float>(*input_shape, input_vec, transpose_in);
+                    input_data = aux.second.data();
+                    input_shape = &aux.first;
                 }
 
-                push_multipart_tensor(output, n > 1 /* is_multipart */);
+                auto result = m_xnnpack->softmax<float>(*input_shape, input_data, nullptr /* output_data_override */, nullptr /* qu8_data */, 0 /* channels_override */);
+
+                if (transpose_out.size())
+                {
+                    aux = m_xnnpack->transpose<float>(result.first, result.second, transpose_out);
+                    result = std::move(aux);
+                }
+
+                if (!check_output_shape(result.first, output.m_shape))
+                    throw std::invalid_argument(op.m_type + ": unexpected shape of output.");
+
+                output.set_vector(std::move(result.second));
             }
+            else if (input.m_type == TensorDataType::float16)
+            {
+                if (input.m_type != TensorDataType::float16) throw std::invalid_argument(op.m_type + ": wrong data type of input.");
+
+                auto& input_vec = input.get_vector<uint16_t>();
+                uint16_t* input_data = input_vec.data();
+                std::vector<size_t>* input_shape = &input.m_shape;
+
+                std::pair<std::vector<size_t>, tensor_vector<uint16_t>> aux;
+
+                if (transpose_in.size())
+                {
+                    aux = m_xnnpack->transpose<uint16_t>(*input_shape, input_vec, transpose_in);
+                    input_data = aux.second.data();
+                    input_shape = &aux.first;
+                }
+
+                auto result = m_xnnpack->softmax<uint16_t>(*input_shape, input_data, nullptr /* output_data_override */, nullptr /* qu8_data */, 0 /* channels_override */);
+
+                if (transpose_out.size())
+                {
+                    aux = m_xnnpack->transpose<uint16_t>(result.first, result.second, transpose_out);
+                    result = std::move(aux);
+                }
+
+                if (!check_output_shape(result.first, output.m_shape))
+                    throw std::invalid_argument(op.m_type + ": unexpected shape of output.");
+
+                output.set_vector(std::move(result.second));
+            }
+            else
+            {
+                if (input.m_type != TensorDataType::uint8) throw std::invalid_argument(op.m_type + ": wrong data type of input.");
+
+                auto& input_vec = input.get_vector<uint8_t>();
+                uint8_t* input_data = input_vec.data();
+                std::vector<size_t>* input_shape = &input.m_shape;
+
+                XnnPack::Qu8SoftmaxData qu8_data;
+
+                qu8_data.input_scale = input.m_scale;
+                qu8_data.output_zero_point = output.m_zero_point = 0;
+                qu8_data.output_scale = output.m_scale = 0x1.0p-8f;
+
+                std::pair<std::vector<size_t>, tensor_vector<uint8_t>> aux;
+
+                if (transpose_in.size())
+                {
+                    aux = m_xnnpack->transpose<uint8_t>(*input_shape, input_vec, transpose_in);
+                    input_data = aux.second.data();
+                    input_shape = &aux.first;
+                }
+
+                auto result = m_xnnpack->softmax<uint8_t>(*input_shape, input_data, nullptr /* output_data_override */, &qu8_data /* qu8_data */, 0 /* channels_override */);
+
+                if (transpose_out.size())
+                {
+                    aux = m_xnnpack->transpose<uint8_t>(result.first, result.second, transpose_out);
+                    result = std::move(aux);
+                }
+
+                if (!check_output_shape(result.first, output.m_shape))
+                    throw std::invalid_argument(op.m_type + ": unexpected shape of output.");
+
+                output.set_vector(std::move(result.second));
+            }
+
+            push_tensor(std::move(output));
         }
         else if (op.m_type == "Split")
         {
@@ -8190,9 +8041,6 @@ void Model::run()
             m_xnnpack->m_cublas_ops.ensure_is_ready(t.get_vector<float>().data());
             break;
         }
-
-        if (t.m_next_part)
-            throw std::invalid_argument("Model::run: multipart tensors are intended to be used internally.");
 
         if (m_outputs_convert_set.size() && !m_outputs_convert_set.contains(t.m_name))
             continue;
