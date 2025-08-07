@@ -40,6 +40,8 @@
 #include <cstring>
 #include <filesystem>
 #include <regex>
+#include <coroutine>
+#include <stdexcept>
 
 #ifdef __ANDROID__
 #include <sys/resource.h>
@@ -77,6 +79,7 @@ struct MainArgs
     std::string m_prompt = "a photo of an astronaut riding a horse on mars";
     std::string m_neg_prompt = "ugly, blurry";
     std::string m_steps = "10";
+    std::string m_num = "1";
     std::string m_seed = std::to_string(std::time(0) % 1024 * 1024);
     std::string m_save_latents = "";
     std::string m_path_safe = ""; // if empty, comment is not stored
@@ -969,7 +972,150 @@ inline static void sdxl_preview(ncnn::Mat& sample, const std::string& filename, 
     save_image(buffer.data(), width, height, 0, filename, appendix);
 }
 
-inline static ncnn::Mat decoder_solver(ncnn::Mat& sample)
+template <typename T>
+struct SDCoroTask { // https://www.jeremyong.com/cpp/2021/01/04/cpp20-coroutines-a-minimal-async-framework/
+    struct promise_type {
+        std::coroutine_handle<> precursor;
+        T data;
+        SDCoroTask get_return_object() noexcept {
+            return { std::coroutine_handle<promise_type>::from_promise(*this) };
+        }
+        std::suspend_never initial_suspend() const noexcept { return {}; }
+        void unhandled_exception() {
+            try
+            {
+                std::rethrow_exception(std::current_exception()); // todo: propagate it instead!
+            }
+            catch (const std::exception& e)
+            {
+                printf("=== ERROR === %s\n", e.what());
+            }
+            std::terminate();
+        }
+        auto final_suspend() const noexcept {
+            struct awaiter {
+                bool await_ready() const noexcept { return false; }
+                void await_resume() const noexcept {}
+                std::coroutine_handle<> await_suspend(std::coroutine_handle<promise_type> h) noexcept {
+                    auto precursor = h.promise().precursor;
+                    if (precursor) {
+                        return precursor;
+                    }
+                    return std::noop_coroutine();
+                }
+            };
+            return awaiter{};
+        }
+        void return_value(T value) noexcept { data = std::move(value); }
+    };
+    bool await_ready() const noexcept { return handle.done(); }
+    T await_resume() const noexcept { return std::move(handle.promise().data); }
+    void await_suspend(std::coroutine_handle<> coroutine) const noexcept { handle.promise().precursor = coroutine; }
+    std::coroutine_handle<promise_type> handle;
+};
+
+class SDCoroState
+{
+public:
+
+    std::vector<std::coroutine_handle<>> chs;
+
+    Model model;
+    size_t batch_size = 1;
+    size_t batch_index = 0;
+    std::vector<Tensor> data;
+
+    SDCoroState() : model(n_threads)
+    {
+        try
+        {
+            auto num = std::stoi(g_main_args.m_num);
+            if (num >= 1)
+                batch_size = (size_t)num;
+        }
+        catch (const std::exception& e)
+        { }
+    }
+
+public:
+
+    template <typename T, typename F>
+    std::vector<T> run(F&& fn)
+    {
+        std::vector<T> fn_output;
+        {
+            std::vector<SDCoroTask<T>> rets;
+            for (batch_index = 0; batch_index < batch_size; batch_index++)
+                rets.push_back(fn());
+
+            while (true)
+            {
+                if (chs.size() == batch_size)
+                {
+                    model.run();
+
+                    data = std::move(model.m_data);
+
+                    std::vector<std::coroutine_handle<>> chs_ = std::move(chs);
+                    for (batch_index = 0; batch_index < chs_.size(); batch_index++)
+                        chs_[batch_index]();
+                }
+                else if (chs.size() == 0)
+                {
+                    for (auto& ret : rets)
+                        fn_output.push_back(std::move(ret.handle.promise().data));
+                    break;
+                }
+                else
+                {
+                    throw std::invalid_argument("invalid chs.size().");
+                }
+            }
+        }
+
+        return fn_output;
+    }
+
+    Tensor& get_result(size_t index = 0)
+    {
+        if (index >= data.size())
+            throw std::invalid_argument("invalid index wrt data.");
+
+        Tensor& t = data[index];
+
+        if (batch_index == 0)
+            return t;
+        else if (t.m_batch != nullptr && batch_index - 1 < t.m_batch->size())
+            return (*t.m_batch)[batch_index - 1];
+        else
+            throw std::invalid_argument("invalid size of m_batch.");
+    }
+};
+
+auto batched_model_run(SDCoroState& state)
+{
+    struct awaitable
+    {
+        SDCoroState* p_state;
+        bool await_ready() { return false; }
+        void await_suspend(std::coroutine_handle<> h) { p_state->chs.push_back(h); }
+        void await_resume() {}
+    };
+    return awaitable{ &state };
+}
+
+static std::string append_number_to_filename(const std::string& file_path, size_t number) {
+
+    std::filesystem::path p(file_path);
+    std::filesystem::path parent_path = p.parent_path();
+    std::string filename_stem = p.stem().string();
+    std::string extension = p.extension().string();
+    std::string new_filename_part = filename_stem + "_" + std::to_string(number) + extension;
+    std::filesystem::path result_path = parent_path / new_filename_part;
+    return result_path.string();
+}
+
+static SDCoroTask<ncnn::Mat> decoder_solver(ncnn::Mat& sample, SDCoroState& coro_state)
 {
 #if USE_NCNN
     ncnn::Net net;
@@ -1001,26 +1147,29 @@ inline static ncnn::Mat decoder_solver(ncnn::Mat& sample)
 
 #if USE_ONNXSTREAM
             {
-                Model model(n_threads);
+                Model& model = coro_state.model;
 
-                model.m_ops_printf = g_main_args.m_ops_printf;
-                
-                model.set_weights_provider(DiskNoCacheWeightsProvider());
+                if (coro_state.batch_index == 0)
+                {
+                    model.m_ops_printf = g_main_args.m_ops_printf;
 
-                model.read_range_data((g_main_args.m_path_with_slash + "vae_decoder_qu8/range_data.txt").c_str());
-                
-                if (!g_main_args.m_rpi_lowmem)
-                    model.m_use_fp16_arithmetic = true;
-                else if (!g_main_args.m_decoder_calibrate)
-                    model.m_use_uint8_arithmetic = true;
+                    model.set_weights_provider(DiskNoCacheWeightsProvider());
 
-                if (g_main_args.m_decoder_calibrate)
-                    model.m_range_data_calibrate = true;
+                    model.read_range_data((g_main_args.m_path_with_slash + "vae_decoder_qu8/range_data.txt").c_str());
 
-                model.read_file((g_main_args.m_path_with_slash + "vae_decoder_" + (model.m_use_fp16_arithmetic ? "fp16" : "qu8") + "/model.txt").c_str());
+                    if (!g_main_args.m_rpi_lowmem)
+                        model.m_use_fp16_arithmetic = true;
+                    else if (!g_main_args.m_decoder_calibrate)
+                        model.m_use_uint8_arithmetic = true;
 
-                if (g_main_args.m_rpi)
-                    model.m_use_fp16_arithmetic = false;
+                    if (g_main_args.m_decoder_calibrate)
+                        model.m_range_data_calibrate = true;
+
+                    model.read_file((g_main_args.m_path_with_slash + "vae_decoder_" + (model.m_use_fp16_arithmetic ? "fp16" : "qu8") + "/model.txt").c_str());
+
+                    if (g_main_args.m_rpi)
+                        model.m_use_fp16_arithmetic = false;
+                }
 
                 tensor_vector<float> sample_v((float*)sample, (float*)sample + sample.total());
 
@@ -1030,17 +1179,15 @@ inline static ncnn::Mat decoder_solver(ncnn::Mat& sample)
                 t.set_vector(std::move(sample_v));
                 model.push_tensor(std::move(t));
 
-                model.run();
+                co_await batched_model_run(coro_state);
 
                 if (g_main_args.m_decoder_calibrate)
                     model.write_range_data((g_main_args.m_path_with_slash + "vae_decoder_qu8/range_data.txt").c_str());
 
                 ncnn::Mat res(512, 512, 3);
-                memcpy((float*)res, model.m_data[0].get_vector<float>().data(), res.total() * sizeof(float));
+                memcpy((float*)res, coro_state.get_result().get_vector<float>().data(), res.total() * sizeof(float));
 
-                print_max_dist(res, x_samples_ddim);
-
-                x_samples_ddim = res;
+                x_samples_ddim = std::move(res);
             }
 #endif
         }
@@ -1049,17 +1196,17 @@ inline static ncnn::Mat decoder_solver(ncnn::Mat& sample)
         constexpr float _norm_[3] = { 127.5f, 127.5f, 127.5f };
         x_samples_ddim.substract_mean_normalize(_mean_, _norm_);
     }
-    return x_samples_ddim;
+    co_return x_samples_ddim;
 }
 
-inline static ncnn::Mat sd_tiled_decoder(ncnn::Mat& sample)
+static SDCoroTask<ncnn::Mat> sd_tiled_decoder(ncnn::Mat& sample, SDCoroState& coro_state)
 {
 // same 32x32 => 256x256 as sdxl_decoder(), but for fixed 512x512 size
     constexpr float factor[4] = { 5.48998f, 5.48998f, 5.48998f, 5.48998f }; // SD 1.5
     sample.substract_mean_normalize(0, factor);
     ncnn::Mat res = ncnn::Mat(512, 512, 3);
 
-    auto slice_and_inf = [&sample](int sx, int sy) -> tensor_vector<float>
+    auto slice_and_inf = [&sample, &coro_state](int sx, int sy) -> SDCoroTask<tensor_vector<float>>
     {
         if (sx > 32 || sy > 32)
             throw std::invalid_argument("slice_and_inf: invalid sx and/or sy.");
@@ -1075,9 +1222,13 @@ inline static ncnn::Mat sd_tiled_decoder(ncnn::Mat& sample)
             src += 64 * 64;
         }
 
-        Model model(n_threads);
-        model.m_ops_printf = g_main_args.m_ops_printf;
-        model.read_file((g_main_args.m_path_with_slash + "vae_decoder_fp16_l32/model.txt").c_str());
+        Model& model = coro_state.model;
+
+        if (model.is_model_empty())
+        {
+            model.m_ops_printf = g_main_args.m_ops_printf;
+            model.read_file((g_main_args.m_path_with_slash + "vae_decoder_fp16_l32/model.txt").c_str());
+        }
 
         Tensor t;
         t.m_name = "latent_5F_sample"; // as SDXL
@@ -1085,8 +1236,9 @@ inline static ncnn::Mat sd_tiled_decoder(ncnn::Mat& sample)
         t.set_vector(std::move(v));
         model.push_tensor(std::move(t));
 
-        model.run();
-        return std::move(model.m_data[0].get_vector<float>());
+        co_await batched_model_run(coro_state);
+
+        co_return std::move(coro_state.get_result().get_vector<float>());
     };
 
     auto blend = [&res](const tensor_vector<float>& v, int dx, int dy)
@@ -1123,7 +1275,7 @@ inline static ncnn::Mat sd_tiled_decoder(ncnn::Mat& sample)
         for (int x = 0; x < 64; x += 24)
         {
             if (x > 32) x = 32;
-            blend(slice_and_inf(x, y), x * 8, y * 8);
+            blend(co_await slice_and_inf(x, y), x * 8, y * 8);
             if (x == 32)
                 break;
         }
@@ -1134,7 +1286,25 @@ inline static ncnn::Mat sd_tiled_decoder(ncnn::Mat& sample)
     constexpr float _mean_[3] = { -1.0f, -1.0f, -1.0f };
     constexpr float _norm_[3] = { 127.5f, 127.5f, 127.5f };
     res.substract_mean_normalize(_mean_, _norm_);
-    return res;
+    co_return res;
+}
+
+static ncnn::Mat decoder_solver(ncnn::Mat& sample)
+{
+    SDCoroState coro_state;
+    coro_state.batch_size = 1;
+    auto ret = coro_state.run<ncnn::Mat>([&]() {
+        return decoder_solver(sample, coro_state); });
+    return std::move(ret[0]);
+}
+
+static ncnn::Mat sd_tiled_decoder(ncnn::Mat& sample)
+{
+    SDCoroState coro_state;
+    coro_state.batch_size = 1;
+    auto ret = coro_state.run<ncnn::Mat>([&]() {
+        return sd_tiled_decoder(sample, coro_state); });
+    return std::move(ret[0]);
 }
 
 static inline ncnn::Mat randn_4_w_h(int seed, int w, int h)
@@ -1168,7 +1338,7 @@ public:
     tensor_vector<float> m_pooled_prompt_embeds_neg;
 };
 
-static inline ncnn::Mat CFGDenoiser_CompVisDenoiser(ncnn::Net& net, float const* log_sigmas, ncnn::Mat& input, float sigma, const ncnn::Mat& cond, const ncnn::Mat& uncond, SDXLParams* sdxl_params, Model& model)
+static SDCoroTask<ncnn::Mat> CFGDenoiser_CompVisDenoiser(ncnn::Net& net, float const* log_sigmas, ncnn::Mat& input, float sigma, const ncnn::Mat& cond, const ncnn::Mat& uncond, SDXLParams* sdxl_params, SDCoroState& coro_state)
 {
     // get_scalings
     float c_out = -1.0 * sigma;
@@ -1204,7 +1374,7 @@ static inline ncnn::Mat CFGDenoiser_CompVisDenoiser(ncnn::Net& net, float const*
     ncnn::Mat c_out_mat(1);
     c_out_mat[0] = c_out;
 
-    auto run_inference = [&net, &input, &t_mat, &c_in_mat, &c_out_mat, &sdxl_params, &cond, &uncond, &model](ncnn::Mat& output, const ncnn::Mat& cond_mat) {
+    auto run_inference = [&net, &input, &t_mat, &c_in_mat, &c_out_mat, &sdxl_params, &cond, &uncond, &coro_state](const ncnn::Mat& cond_mat) -> SDCoroTask<ncnn::Mat> {
 
 #if USE_NCNN
         ncnn::Extractor ex = net.create_extractor();
@@ -1219,6 +1389,8 @@ static inline ncnn::Mat CFGDenoiser_CompVisDenoiser(ncnn::Net& net, float const*
 
 #if USE_ONNXSTREAM
         {
+            Model& model = coro_state.model;
+
             if (!sdxl_params)
             {
                 tensor_vector<float> t_v({ t_mat[0] });
@@ -1288,11 +1460,10 @@ static inline ncnn::Mat CFGDenoiser_CompVisDenoiser(ncnn::Net& net, float const*
                 model.push_tensor(std::move(t5));
             }
 
-            model.run();
+            co_await batched_model_run(coro_state);
 
-            tensor_vector<float> output_vec = std::move(model.m_data[0].get_vector<float>());
-
-            model.m_data.clear();
+            tensor_vector<float> output_vec;
+            output_vec = std::move(coro_state.get_result().get_vector<float>());
 
             float m = c_out_mat[0];
             float* pf = input;
@@ -1302,20 +1473,18 @@ static inline ncnn::Mat CFGDenoiser_CompVisDenoiser(ncnn::Net& net, float const*
             ncnn::Mat res(g_main_args.m_latw, g_main_args.m_lath, 1, 4);
             memcpy((float*)res, output_vec.data(), res.total() * sizeof(float));
 
-            print_max_dist(res, output);
-
-            output = res;
+            co_return res;
         }
 #endif
     };
 
-    ncnn::Mat denoised_cond;
-    run_inference(denoised_cond, cond);
+    ncnn::Mat denoised_cond = co_await run_inference(cond);
     if (g_main_args.m_turbo)
-        return denoised_cond;
+    {
+        co_return denoised_cond;
+    }
 
-    ncnn::Mat denoised_uncond;
-    run_inference(denoised_uncond, uncond);
+    ncnn::Mat denoised_uncond = co_await run_inference(uncond);
 
     for (int c = 0; c < 4; c++)
     {
@@ -1330,13 +1499,21 @@ static inline ncnn::Mat CFGDenoiser_CompVisDenoiser(ncnn::Net& net, float const*
         }
     }
 
-    return denoised_uncond;
+    co_return denoised_uncond;
 }
 
-void sdxl_decoder(ncnn::Mat& sample, const std::string& output_path, bool tiled, const std::string& output_appendix);
+SDCoroTask<int> sdxl_decoder(ncnn::Mat& sample, std::string output_path, bool tiled, std::string output_appendix, SDCoroState& coro_state);
 
-inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c, const ncnn::Mat& uc,
-                                         const std::string& output_path, SDXLParams* sdxl_params = nullptr)
+void sdxl_decoder(ncnn::Mat& sample, std::string output_path, bool tiled, std::string output_appendix)
+{
+    SDCoroState coro_state;
+    coro_state.batch_size = 1;
+    coro_state.run<int>([&]() {
+        return sdxl_decoder(sample, output_path, tiled, output_appendix, coro_state); });
+}
+
+static SDCoroTask<ncnn::Mat> diffusion_solver(int seed, int step, ncnn::Mat c, ncnn::Mat uc,
+                                         std::string output_path, SDXLParams* sdxl_params, SDCoroState& coro_state) // WARNING: c, uc, output_path passed by value, see the lambda that starts the coroutine!
 {
     ncnn::Net net;
 #if USE_NCNN
@@ -1377,79 +1554,89 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
     // sample_euler_ancestral
     {
 #if USE_ONNXSTREAM
-        Model model(n_threads);
+        auto& model = coro_state.model;
 
-        if (g_main_args.m_rpi_lowmem)
-            model.set_weights_provider(DiskNoCacheWeightsProvider());
-        else if (g_main_args.m_ram)
+        if (coro_state.batch_index == 0)
         {
-            model.set_weights_provider(RamWeightsProvider<DiskPrefetchWeightsProvider>(DiskPrefetchWeightsProvider()));
-            model.m_use_ops_cache = true;
-            model.m_use_next_op_cache = true;
-        }
-
-        if (!sdxl_params)
-        {
-            model.m_ops_printf = g_main_args.m_ops_printf;
-
-            model.m_use_fp16_arithmetic = true;
-            model.m_fuse_ops_in_attention = true;
-
-            if (g_main_args.m_rpi)
+            if (g_main_args.m_rpi_lowmem)
+                model.set_weights_provider(DiskNoCacheWeightsProvider());
+            else if (g_main_args.m_ram)
             {
-                model.m_use_fp16_arithmetic = false;
-                model.m_attention_fused_ops_parts = 16;
+                model.set_weights_provider(RamWeightsProvider<DiskPrefetchWeightsProvider>(DiskPrefetchWeightsProvider()));
+                model.m_use_ops_cache = true;
+                model.m_use_next_op_cache = true;
             }
 
-            model.read_file((g_main_args.m_path_with_slash + UNET_MODEL("unet_fp16/model.txt", "anime_fp16/model.txt")).c_str());
-        }
-        else
-        {
-            model.m_ops_printf = g_main_args.m_ops_printf;
-
-            model.m_use_fp16_arithmetic = true;
-            model.m_fuse_ops_in_attention = true;
-
-            if (g_main_args.m_rpi)
+            if (!sdxl_params)
             {
-                model.m_use_fp16_arithmetic = false;
-                model.m_attention_fused_ops_parts = 16;
+                model.m_ops_printf = g_main_args.m_ops_printf;
 
-                if (g_main_args.m_rpi_lowmem && !g_main_args.m_turbo)
+                model.m_use_fp16_arithmetic = true;
+                model.m_fuse_ops_in_attention = true;
+
+                if (g_main_args.m_rpi)
                 {
-                    model.m_force_fp16_storage = true;
-                    model.m_force_uint8_storage_set =
-                    { "_2F_unet_2F_conv_5F_in_2F_Conv_5F_output_5F_0",
-                    "_2F_unet_2F_down_5F_blocks_2E_0_2F_resnets_2E_0_2F_Add_5F_1_5F_output_5F_0",
-                    "_2F_unet_2F_down_5F_blocks_2E_1_2F_attentions_2E_0_2F_Add_5F_output_5F_0",
-                    "_2F_unet_2F_down_5F_blocks_2E_0_2F_resnets_2E_1_2F_Add_5F_1_5F_output_5F_0",
-                    "_2F_unet_2F_down_5F_blocks_2E_0_2F_downsamplers_2E_0_2F_conv_2F_Conv_5F_output_5F_0",
-                    "_2F_unet_2F_down_5F_blocks_2E_1_2F_attentions_2E_1_2F_Add_5F_output_5F_0",
-                    "_2F_unet_2F_down_5F_blocks_2E_1_2F_downsamplers_2E_0_2F_conv_2F_Conv_5F_output_5F_0",
-                    "_2F_unet_2F_down_5F_blocks_2E_2_2F_attentions_2E_0_2F_Add_5F_output_5F_0",
-                    "_2F_unet_2F_up_5F_blocks_2E_0_2F_Concat_5F_output_5F_0" };
+                    model.m_use_fp16_arithmetic = false;
+                    model.m_attention_fused_ops_parts = 16;
                 }
-            }
 
-            if (g_main_args.m_turbo)
-            {
-                model.m_support_dynamic_shapes = true;
-                model.read_file((g_main_args.m_path_with_slash + "sdxl_unet_anyshape_fp16/model.txt").c_str());
+                model.read_file((g_main_args.m_path_with_slash + UNET_MODEL("unet_fp16/model.txt", "anime_fp16/model.txt")).c_str());
             }
             else
             {
-                model.read_file((g_main_args.m_path_with_slash + "sdxl_unet_fp16/model.txt").c_str());
+                model.m_ops_printf = g_main_args.m_ops_printf;
+
+                model.m_use_fp16_arithmetic = true;
+                model.m_fuse_ops_in_attention = true;
+
+                if (g_main_args.m_rpi)
+                {
+                    model.m_use_fp16_arithmetic = false;
+                    model.m_attention_fused_ops_parts = 16;
+
+                    if (g_main_args.m_rpi_lowmem && !g_main_args.m_turbo)
+                    {
+                        model.m_force_fp16_storage = true;
+                        model.m_force_uint8_storage_set =
+                        { "_2F_unet_2F_conv_5F_in_2F_Conv_5F_output_5F_0",
+                        "_2F_unet_2F_down_5F_blocks_2E_0_2F_resnets_2E_0_2F_Add_5F_1_5F_output_5F_0",
+                        "_2F_unet_2F_down_5F_blocks_2E_1_2F_attentions_2E_0_2F_Add_5F_output_5F_0",
+                        "_2F_unet_2F_down_5F_blocks_2E_0_2F_resnets_2E_1_2F_Add_5F_1_5F_output_5F_0",
+                        "_2F_unet_2F_down_5F_blocks_2E_0_2F_downsamplers_2E_0_2F_conv_2F_Conv_5F_output_5F_0",
+                        "_2F_unet_2F_down_5F_blocks_2E_1_2F_attentions_2E_1_2F_Add_5F_output_5F_0",
+                        "_2F_unet_2F_down_5F_blocks_2E_1_2F_downsamplers_2E_0_2F_conv_2F_Conv_5F_output_5F_0",
+                        "_2F_unet_2F_down_5F_blocks_2E_2_2F_attentions_2E_0_2F_Add_5F_output_5F_0",
+                        "_2F_unet_2F_up_5F_blocks_2E_0_2F_Concat_5F_output_5F_0" };
+                    }
+                }
+
+                if (g_main_args.m_turbo)
+                {
+                    model.m_support_dynamic_shapes = true;
+                    model.read_file((g_main_args.m_path_with_slash + "sdxl_unet_anyshape_fp16/model.txt").c_str());
+                }
+                else
+                {
+                    model.read_file((g_main_args.m_path_with_slash + "sdxl_unet_fp16/model.txt").c_str());
+                }
             }
         }
 #endif
 
         for (int i = 0; i < static_cast<int>(sigma.size()) - 1; i++)
         {
-            std::cout << "step:" << i << "\t\t";
-            double t1 = ncnn::get_current_time();
-            ncnn::Mat denoised = CFGDenoiser_CompVisDenoiser(net, log_sigmas, x_mat, sigma[i], c, uc, sdxl_params, model);
-            double t2 = ncnn::get_current_time();
-            SHOW_LONG_TIME_MS( t2 - t1 )
+            double t1, t2;
+            if (coro_state.batch_index == 0)
+            {
+                std::cout << "step:" << i << "\t\t";
+                t1 = ncnn::get_current_time();
+            }
+            ncnn::Mat denoised = co_await CFGDenoiser_CompVisDenoiser(net, log_sigmas, x_mat, sigma[i], c, uc, sdxl_params, coro_state);
+            if (coro_state.batch_index == 0)
+            {
+                t2 = ncnn::get_current_time();
+                SHOW_LONG_TIME_MS(t2 - t1)
+            }
             float sigma_up = std::min(sigma[i + 1], std::sqrt(sigma[i + 1] * sigma[i + 1] * (sigma[i] * sigma[i] - sigma[i + 1] * sigma[i + 1]) / (sigma[i] * sigma[i])));
             float sigma_down = std::sqrt(sigma[i + 1] * sigma[i + 1] - sigma_up * sigma_up);
             std::srand(seed++);
@@ -1470,41 +1657,44 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                 }
             }
 
-            if(g_main_args.m_preview_im) {       // directly decode latent in low resolution
-                std::cout << "---> preview:\t\t";
-                double t1 = ncnn::get_current_time();
-                const std::string im_appendix = "_preview_" + std::to_string(i);
-                if(!sdxl_params) {
-                    sd_preview(x_mat, output_path, im_appendix);
-                } else {
-                    sdxl_preview(x_mat, output_path, im_appendix);
-                }
-                double t2 = ncnn::get_current_time();
-                SHOW_LONG_TIME_MS( t2 - t1 )
-            }
-            if(g_main_args.m_decode_im                            // pass through decoder
-               && i < static_cast<int>(sigma.size()) - 2) {       // if step is not last
-                std::cout << "---> decode:\t\t";
-                double t1 = ncnn::get_current_time();
-                ncnn::Mat sample = ncnn::Mat(x_mat.w, x_mat.h, x_mat.c, x_mat.v.data());
-                const std::string im_appendix = "_" + std::to_string(i);
-                if(!sdxl_params) {
-                    ncnn::Mat x_samples_ddim;
-                    if (g_main_args.m_use_sd15_tiled_decoder)
-                        x_samples_ddim = sd_tiled_decoder(sample);
-                    else
-                        x_samples_ddim = decoder_solver(sample);
-                    {
-                        std::vector<std::uint8_t> buffer;
-                        buffer.resize( 512 * 512 * 3 );
-                        x_samples_ddim.to_pixels(buffer.data(), ncnn::Mat::PIXEL_RGB);
-                        save_image(buffer.data(), 512, 512, 0, output_path, im_appendix);
+            if (coro_state.batch_index == 0)
+            {
+                if(g_main_args.m_preview_im) {       // directly decode latent in low resolution
+                    std::cout << "---> preview:\t\t";
+                    double t1 = ncnn::get_current_time();
+                    const std::string im_appendix = "_preview_" + std::to_string(i);
+                    if(!sdxl_params) {
+                        sd_preview(x_mat, output_path, im_appendix);
+                    } else {
+                        sdxl_preview(x_mat, output_path, im_appendix);
                     }
-                } else {
-                    sdxl_decoder(sample, output_path, /* tiled */ g_main_args.m_tiled, im_appendix);
+                    double t2 = ncnn::get_current_time();
+                    SHOW_LONG_TIME_MS( t2 - t1 )
                 }
-                double t2 = ncnn::get_current_time();
-                SHOW_LONG_TIME_MS( t2 - t1 )
+                if(g_main_args.m_decode_im                            // pass through decoder
+                   && i < static_cast<int>(sigma.size()) - 2) {       // if step is not last
+                    std::cout << "---> decode:\t\t";
+                    double t1 = ncnn::get_current_time();
+                    ncnn::Mat sample = ncnn::Mat(x_mat.w, x_mat.h, x_mat.c, x_mat.v.data());
+                    const std::string im_appendix = "_" + std::to_string(i);
+                    if(!sdxl_params) {
+                        ncnn::Mat x_samples_ddim;
+                        if (g_main_args.m_use_sd15_tiled_decoder)
+                            x_samples_ddim = sd_tiled_decoder(sample);
+                        else
+                            x_samples_ddim = decoder_solver(sample);
+                        {
+                            std::vector<std::uint8_t> buffer;
+                            buffer.resize( 512 * 512 * 3 );
+                            x_samples_ddim.to_pixels(buffer.data(), ncnn::Mat::PIXEL_RGB);
+                            save_image(buffer.data(), 512, 512, 0, output_path, im_appendix);
+                        }
+                    } else {
+                        sdxl_decoder(sample, output_path, /* tiled */ g_main_args.m_tiled, im_appendix);
+                    }
+                    double t2 = ncnn::get_current_time();
+                    SHOW_LONG_TIME_MS( t2 - t1 )
+                }
             }
         }
     }
@@ -1514,7 +1704,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
     __x.clone_from(x_mat);
     return __x;
 #else
-    return x_mat;
+    co_return x_mat;
 #endif
 }
 
@@ -2051,34 +2241,48 @@ inline void stable_diffusion(std::string positive_prompt = std::string{}, const 
     std::cout << "----------------[prompt]------------------" << std::endl;
     auto [cond, uncond] = prompt_solver(positive_prompt, negative_prompt);
     std::cout << "----------------[diffusion]---------------" << std::endl;
-    ncnn::Mat sample = diffusion_solver(seed, step, cond, uncond, output_path);
+    std::vector<ncnn::Mat> samples;
+    {
+        SDCoroState coro_state;
+        samples = coro_state.run<ncnn::Mat>([&]() {
+            std::string fn = coro_state.batch_size == 1 ? output_path : ::append_number_to_filename(output_path, coro_state.batch_index);
+            return diffusion_solver(seed + coro_state.batch_index, step, cond, uncond, fn, nullptr, coro_state); });
+    }
     std::cout << "----------------[decode]------------------" << std::endl;
 
     if (g_main_args.m_save_latents.size())
     {
-        ::write_file(g_main_args.m_save_latents.c_str(), tensor_vector<float>((float*)sample, (float*)sample + sample.total()));
+        ::write_file(g_main_args.m_save_latents.c_str(), tensor_vector<float>((float*)samples[0], (float*)samples[0] + samples[0].total()));
     }
 
-    ncnn::Mat x_samples_ddim;
-    if (g_main_args.m_use_sd15_tiled_decoder)
-        x_samples_ddim = sd_tiled_decoder(sample);
-    else
-        x_samples_ddim = decoder_solver(sample);
+    std::vector<ncnn::Mat> x_samples_ddim;
+    {
+        SDCoroState coro_state;
+        x_samples_ddim = coro_state.run<ncnn::Mat>([&]() {
+            auto& sample = samples[coro_state.batch_index];
+            if (g_main_args.m_use_sd15_tiled_decoder)
+                return sd_tiled_decoder(sample, coro_state);
+            else
+                return decoder_solver(sample, coro_state);
+        });
+    }
 
     //std::cout << "----------------[4x]--------------------" << std::endl;
     //x_samples_ddim = esr4x(x_samples_ddim);
     std::cout << "----------------[save]--------------------" << std::endl;
+    for (size_t i = 0; i < x_samples_ddim.size(); i++)
     {
         std::vector<std::uint8_t> buffer;
         buffer.resize( 512 * 512 * 3 );
         //buffer.resize(4 * 512 * 4 * 512 * 3);
-        x_samples_ddim.to_pixels(buffer.data(), ncnn::Mat::PIXEL_RGB);
-        save_image(buffer.data(), 512, 512, 0, output_path);
+        x_samples_ddim[i].to_pixels(buffer.data(), ncnn::Mat::PIXEL_RGB);
+        std::string fn = x_samples_ddim.size() == 1 ? output_path : ::append_number_to_filename(output_path, i);
+        save_image(buffer.data(), 512, 512, 0, fn);
     }
     std::cout << "----------------[close]-------------------" << std::endl;
 }
 
-void sdxl_decoder(ncnn::Mat& sample, const std::string& output_path, bool tiled, const std::string& output_appendix = "")
+SDCoroTask<int> sdxl_decoder(ncnn::Mat& sample, std::string output_path, bool tiled, std::string output_appendix, SDCoroState& coro_state) // WARNING: output_path, output_appendix passed by value, see the lambda that starts the coroutine!
 {
     constexpr float factor_sd[4] = { 5.48998f, 5.48998f, 5.48998f, 5.48998f };
     constexpr float factor_sdxl[4] = { 7.67754f, 7.67754f, 7.67754f, 7.67754f };
@@ -2090,18 +2294,21 @@ void sdxl_decoder(ncnn::Mat& sample, const std::string& output_path, bool tiled,
 
     if (!tiled)
     {
-        Model model(n_threads);
+        Model& model = coro_state.model;
 
-        model.m_ops_printf = g_main_args.m_ops_printf;
+        if (coro_state.batch_index == 0)
+        {
+            model.m_ops_printf = g_main_args.m_ops_printf;
 
-        if (g_main_args.m_turbo)
-        {
-            model.m_support_dynamic_shapes = true;
-            model.read_file((g_main_args.m_path_with_slash + "sdxl_vae_decoder_anyshape_fp16/model.txt").c_str());
-        }
-        else
-        {
-            model.read_file((g_main_args.m_path_with_slash + "sdxl_vae_decoder_fp16/model.txt").c_str());
+            if (g_main_args.m_turbo)
+            {
+                model.m_support_dynamic_shapes = true;
+                model.read_file((g_main_args.m_path_with_slash + "sdxl_vae_decoder_anyshape_fp16/model.txt").c_str());
+            }
+            else
+            {
+                model.read_file((g_main_args.m_path_with_slash + "sdxl_vae_decoder_fp16/model.txt").c_str());
+            }
         }
 
         tensor_vector<float> sample_v((float*)sample, (float*)sample + sample.total());
@@ -2112,13 +2319,13 @@ void sdxl_decoder(ncnn::Mat& sample, const std::string& output_path, bool tiled,
         t.set_vector(std::move(sample_v));
         model.push_tensor(std::move(t));
 
-        model.run();
+        co_await batched_model_run(coro_state);
 
-        memcpy((float*)res, model.m_data[0].get_vector<float>().data(), res.total() * sizeof(float));
+        memcpy((float*)res, coro_state.get_result().get_vector<float>().data(), res.total() * sizeof(float));
     }
     else
     {
-        auto slice_and_inf = [&sample](int sx, int sy) -> tensor_vector<float>
+        auto slice_and_inf = [&sample, &coro_state](int sx, int sy) -> SDCoroTask<tensor_vector<float>>
         {
             if (sx + 32 > g_main_args.m_latw || sy + 32 > g_main_args.m_lath)
                 throw std::invalid_argument("slice_and_inf: invalid sx and/or sy.");
@@ -2137,18 +2344,21 @@ void sdxl_decoder(ncnn::Mat& sample, const std::string& output_path, bool tiled,
                 src += g_main_args.m_latw * g_main_args.m_lath;
             }
 
-            Model model(n_threads);
+            Model& model = coro_state.model;
 
-            model.m_ops_printf = g_main_args.m_ops_printf;
+            if (model.is_model_empty())
+            {
+                model.m_ops_printf = g_main_args.m_ops_printf;
 
-            if (g_main_args.m_turbo)
-            {
-                model.m_support_dynamic_shapes = true;
-                model.read_file((g_main_args.m_path_with_slash + "sdxl_vae_decoder_anyshape_fp16/model.txt").c_str());
-            }
-            else
-            {
-                model.read_file((g_main_args.m_path_with_slash + "sdxl_vae_decoder_32x32_fp16/model.txt").c_str());
+                if (g_main_args.m_turbo)
+                {
+                    model.m_support_dynamic_shapes = true;
+                    model.read_file((g_main_args.m_path_with_slash + "sdxl_vae_decoder_anyshape_fp16/model.txt").c_str());
+                }
+                else
+                {
+                    model.read_file((g_main_args.m_path_with_slash + "sdxl_vae_decoder_32x32_fp16/model.txt").c_str());
+                }
             }
 
             Tensor t;
@@ -2157,9 +2367,9 @@ void sdxl_decoder(ncnn::Mat& sample, const std::string& output_path, bool tiled,
             t.set_vector(std::move(v));
             model.push_tensor(std::move(t));
 
-            model.run();
+            co_await batched_model_run(coro_state);
 
-            return std::move(model.m_data[0].get_vector<float>());
+            co_return std::move(coro_state.get_result().get_vector<float>());
         };
 
         auto blend = [&res](const tensor_vector<float>& v, int dx, int dy) {
@@ -2207,7 +2417,7 @@ void sdxl_decoder(ncnn::Mat& sample, const std::string& output_path, bool tiled,
                 if (x + 32 > g_main_args.m_latw)
                     x = g_main_args.m_latw - 32;
 
-                blend(slice_and_inf(x, y), x * 8, y * 8);
+                blend(co_await slice_and_inf(x, y), x * 8, y * 8);
 
                 if (x == g_main_args.m_latw - 32)
                     break;
@@ -2228,6 +2438,8 @@ void sdxl_decoder(ncnn::Mat& sample, const std::string& output_path, bool tiled,
         res.to_pixels(buffer.data(), ncnn::Mat::PIXEL_RGB);
         save_image(buffer.data(), g_main_args.m_latw * 8, g_main_args.m_lath * 8, 0, output_path, output_appendix);
     }
+
+    co_return 0;
 }
 
 void stable_diffusion_xl(std::string positive_prompt, const std::string& output_path, int steps, std::string negative_prompt, int seed)
@@ -2375,17 +2587,28 @@ void stable_diffusion_xl(std::string positive_prompt, const std::string& output_
         params.m_prompt_embeds_neg = concat(prompt_embeds_1_neg, prompt_embeds_2_neg);
         params.m_pooled_prompt_embeds_neg = std::move(pooled_prompt_embeds_neg);
     }
-
-    ncnn::Mat sample = diffusion_solver(seed, steps, ncnn::Mat(), ncnn::Mat(), output_path, &params);
+    
+    std::vector<ncnn::Mat> samples;
+    {
+        SDCoroState coro_state;
+        samples = coro_state.run<ncnn::Mat>([&]() {
+            std::string fn = coro_state.batch_size == 1 ? output_path : ::append_number_to_filename(output_path, coro_state.batch_index);
+            return diffusion_solver(seed + coro_state.batch_index, steps, ncnn::Mat(), ncnn::Mat(), fn, &params, coro_state); });
+    }
 
     if (g_main_args.m_save_latents.size())
     {
-        ::write_file(g_main_args.m_save_latents.c_str(), tensor_vector<float>((float*)sample, (float*)sample + sample.total()));
+        ::write_file(g_main_args.m_save_latents.c_str(), tensor_vector<float>((float*)samples[0], (float*)samples[0] + samples[0].total()));
     }
 
     std::cout << "----------------[decode]------------------" << std::endl;
 
-    sdxl_decoder(sample, output_path, /* tiled */ g_main_args.m_tiled);
+    {
+        SDCoroState coro_state;
+        coro_state.run<int>([&]() {
+            std::string fn = coro_state.batch_size == 1 ? output_path : ::append_number_to_filename(output_path, coro_state.batch_index);
+            return sdxl_decoder(samples[coro_state.batch_index], fn, /* tiled */ g_main_args.m_tiled, "", coro_state); });
+    }
 
     std::cout << "----------------[close]-------------------" << std::endl;
 }
@@ -2441,6 +2664,10 @@ int main(int argc, char** argv)
         else if (arg == "--steps")
         {
             str = &g_main_args.m_steps;
+        }
+        else if (arg == "--num")
+        {
+            str = &g_main_args.m_num;
         }
         else if (arg == "--save-latents")
         {
@@ -2574,7 +2801,8 @@ int main(int argc, char** argv)
             printf("--decode-latents    Skips the diffusion, and decodes the specified latents file.\n");
             printf("--prompt            Sets the positive prompt.\n");
             printf("--neg-prompt        Sets the negative prompt.\n");
-            printf("--steps             Sets the number of diffusion steps.\n");
+            printf("--num               Sets the number of images to generate. Default is 1.\n");
+            printf("--steps             Sets the number of diffusion steps. Default is 10.\n");
             printf("--seed              Sets the seed.\n");
             printf("--save-latents      After the diffusion, saves the latents in the specified file.\n");
             printf("--decoder-calibrate (ONLY SD 1.5) Calibrates the quantized version of the VAE decoder.\n");
@@ -2920,7 +3148,7 @@ int main(int argc, char** argv)
                 if(g_main_args.m_preview_im)
                     sdxl_preview(sample, g_main_args.m_output, "_preview");
 
-                sdxl_decoder(sample, g_main_args.m_output, /* tiled */ g_main_args.m_tiled);
+                sdxl_decoder(sample, g_main_args.m_output, /* tiled */ g_main_args.m_tiled, "");
             }
 
             return 0;

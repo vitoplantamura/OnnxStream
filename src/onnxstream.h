@@ -182,6 +182,8 @@ public:
 
     bool m_is_static_weights = false;
 
+    std::shared_ptr<std::vector<Tensor>> m_batch;
+
 public:
 
     template <typename T>
@@ -225,26 +227,25 @@ public:
         m_data = std::make_shared<tensor_vector<T>>(std::move(v));
     }
 
-    Tensor get_copy_without_data()
+    void make_copy_of_data()
     {
-        Tensor ret;
-        ret.m_name = m_name;
-        ret.m_type = m_type;
-        ret.m_shape = m_shape;
-        ret.m_layout = m_layout;
-        ret.m_scale = m_scale;
-        ret.m_zero_point = m_zero_point;
-        return ret;
-    }
-
-    void reset_data()
-    {
-        m_type = TensorDataType::none;
-        m_shape.clear();
-        m_data = decltype(m_data)();
-        m_layout = TensorDataLayout::unspecified;
-        m_scale = 0;
-        m_zero_point = 0;
+        switch (m_type)
+        {
+        case TensorDataType::uint8:
+            set_vector(tensor_vector<uint8_t>(get_vector<uint8_t>()));
+            break;
+        case TensorDataType::float16:
+            set_vector(tensor_vector<uint16_t>(get_vector<uint16_t>()));
+            break;
+        case TensorDataType::float32:
+            set_vector(tensor_vector<float>(get_vector<float>()));
+            break;
+        case TensorDataType::int64:
+            set_vector(tensor_vector<int64_t>(get_vector<int64_t>()));
+            break;
+        default:
+            throw std::invalid_argument("Tensor::make_copy_of_data: invalid type.");
+        }
     }
 };
 
@@ -934,7 +935,7 @@ public:
 
     std::vector<Tensor> m_data;
 
-    void push_tensor(Tensor&& t, bool force_quantization = false);
+    void push_tensor(Tensor&& t);
 
     void init();
     void run();
@@ -964,6 +965,8 @@ public:
 
     bool m_ops_printf = false;
     bool m_ops_times_printf = false;
+
+    bool is_model_empty() { return m_model.size() == 0; }
 
 private:
 
@@ -995,6 +998,18 @@ private:
     bool m_next_op_cache_ready = false;
 
     Tensor& get_tensor_data(Tensor& tensor, bool make_copy = false, bool requires_float = false, TensorDataLayout required_layout = TensorDataLayout::unspecified);
+
+    struct BatchCacheItem
+    {
+        size_t m_index;
+        bool m_unique;
+        bool m_is_batch;
+        std::shared_ptr<std::vector<Tensor>> m_vec;
+    };
+
+    size_t m_batch_size = 1;
+    size_t m_batch_index = 0;
+    std::vector<BatchCacheItem> m_batch_cache;
 
     static bool compare_shapes(const std::vector<size_t>& shape_1, const std::vector<size_t>& shape_2, int except = -1);
     bool check_output_shape(const std::vector<size_t>& src, std::vector<size_t>& dst);

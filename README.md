@@ -349,7 +349,8 @@ These are the command line options of the Stable Diffusion example:
 --decode-latents    Skips the diffusion, and decodes the specified latents file.
 --prompt            Sets the positive prompt.
 --neg-prompt        Sets the negative prompt.
---steps             Sets the number of diffusion steps.
+--num               Sets the number of images to generate. Default is 1.
+--steps             Sets the number of diffusion steps. Default is 10.
 --seed              Sets the seed.
 --save-latents      After the diffusion, saves the latents in the specified file.
 --decoder-calibrate (ONLY SD 1.5) Calibrates the quantized version of the VAE decoder.
