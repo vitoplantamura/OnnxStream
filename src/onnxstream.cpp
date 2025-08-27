@@ -7410,7 +7410,7 @@ void Model::run()
 
                     output.set_vector(std::move(output_data));
                 }
-                else if (to == 9 /* BOOL */ || to == 7 /* INT64 */)
+                else if (to == 9 /* BOOL */ || to == 7 /* INT64 */ || to == 6 /* INT32 */)
                 {
                     tensor_vector<int64_t> output_data = create_tensor_vector<int64_t>(output_num_els);
 
@@ -8164,6 +8164,47 @@ void Model::run()
 
                 output.m_layout = TensorDataLayout::nhwc;
                 output.m_shape = std::move(result_first);
+
+                push_tensor(std::move(output));
+            }
+            else if (op.m_type == "Flatten")
+            {
+                if (op.m_input.size() != 1) throw std::invalid_argument(op.m_type + ": wrong number of inputs.");
+                if (op.m_output.size() != 1) throw std::invalid_argument(op.m_type + ": wrong number of outputs.");
+
+                auto& input = get_tensor_data(op.m_input[0], true /* make_copy */);
+                auto& output = op.m_output[0];
+
+                int axis = 1;
+
+                for (auto& a : op.m_attributes)
+                    if (a.first == "axis")
+                        axis = std::stoi(a.second);
+                    else
+                        throw std::invalid_argument(op.m_type + ": unrecognized attribute: " + a.first + ".");
+
+                if (axis < 0)
+                    axis = (int)input.m_shape.size() + axis;
+                if (axis < 0 || axis >= input.m_shape.size())
+                    throw std::invalid_argument(op.m_type + ": invalid axis attribute.");
+
+                size_t height = 1, width = 1;
+                for (size_t i = 0; i < input.m_shape.size(); i++)
+                    if (i < axis)
+                        height *= input.m_shape[i];
+                    else
+                        width *= input.m_shape[i];
+
+                std::vector<size_t> output_shape = { height, width };
+
+                if (!check_output_shape(output_shape, output.m_shape))
+                    throw std::invalid_argument(op.m_type + ": unexpected shape of output.");
+
+                output.m_type = input.m_type;
+                output.m_data = std::move(input.m_data);
+
+                output.m_scale = input.m_scale;
+                output.m_zero_point = input.m_zero_point;
 
                 push_tensor(std::move(output));
             }

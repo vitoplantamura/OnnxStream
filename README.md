@@ -113,7 +113,7 @@ A comparison between SDXL 1.0 and SDXL Turbo run in OnnxStream with respect to t
 - Static quantization (W8A8 unsigned, asymmetric, percentile)
 - Easy calibration of a quantized model
 - FP16 support (with or without FP16 arithmetic)
-- 40 ONNX operators implemented (the most common)
+- 41 ONNX operators implemented (the most common)
 - Operations executed sequentially but ~~all~~ most operators are multithreaded
 - Single implementation file + header file
 - XNNPACK calls wrapped in the `XnnPack` class (for future replacement)
