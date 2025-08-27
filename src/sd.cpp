@@ -43,7 +43,7 @@
 #include <coroutine>
 #include <stdexcept>
 
-#ifdef __ANDROID__
+#if defined(__ANDROID__) || defined(__linux__)
 #include <sys/resource.h>
 #endif
 
@@ -1610,9 +1610,10 @@ static SDCoroTask<ncnn::Mat> diffusion_solver(int seed, int step, ncnn::Mat c, n
                     }
                 }
 
+                model.m_support_dynamic_shapes = true;
+
                 if (g_main_args.m_turbo)
                 {
-                    model.m_support_dynamic_shapes = true;
                     model.read_file((g_main_args.m_path_with_slash + "sdxl_unet_anyshape_fp16/model.txt").c_str());
                 }
                 else
@@ -2300,9 +2301,10 @@ SDCoroTask<int> sdxl_decoder(ncnn::Mat& sample, std::string output_path, bool ti
         {
             model.m_ops_printf = g_main_args.m_ops_printf;
 
+            model.m_support_dynamic_shapes = true;
+
             if (g_main_args.m_turbo)
             {
-                model.m_support_dynamic_shapes = true;
                 model.read_file((g_main_args.m_path_with_slash + "sdxl_vae_decoder_anyshape_fp16/model.txt").c_str());
             }
             else
@@ -2350,9 +2352,10 @@ SDCoroTask<int> sdxl_decoder(ncnn::Mat& sample, std::string output_path, bool ti
             {
                 model.m_ops_printf = g_main_args.m_ops_printf;
 
+                model.m_support_dynamic_shapes = true;
+
                 if (g_main_args.m_turbo)
                 {
-                    model.m_support_dynamic_shapes = true;
                     model.read_file((g_main_args.m_path_with_slash + "sdxl_vae_decoder_anyshape_fp16/model.txt").c_str());
                 }
                 else
@@ -3216,7 +3219,7 @@ int main(int argc, char** argv)
 
     printf("peak working set size: %f GB\n", static_cast<float>(pwss) / 1024.0f / 1024.0f / 1024.0f);
 
-#elif defined(__ANDROID__)
+#elif defined(__ANDROID__) || defined(__linux__)
 
     struct rusage ru;
     if (!getrusage(RUSAGE_SELF, &ru)) {
