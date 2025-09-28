@@ -1,5 +1,6 @@
 ﻿#### News 📣
 
+- September 28, 2025: Added **[Python](https://github.com/vitoplantamura/OnnxStream/blob/master/src/bindings.py) and [C#](https://github.com/vitoplantamura/OnnxStream/blob/master/src/bindings.cs) bindings** for the library!
 - April 15, 2025: Added WebAssembly demo of **OpenAI's Whisper** [here](https://github.com/vitoplantamura/OnnxStream/tree/master/examples/Whisper_wasm) (running in the browser).
 - September 19, 2024: Added WebAssembly support for the library! Demo of the **YOLOv8** object detection model [here](https://yolo.vitoplantamura.com/) (running in the browser).
 - January 14, 2024: Added LLM chat application (**TinyLlama 1.1B and Mistral 7B**) with initial GPU support! More info [here](https://github.com/vitoplantamura/OnnxStream/blob/master/assets/LLM.md).

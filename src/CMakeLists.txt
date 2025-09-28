@@ -3,6 +3,7 @@ cmake_minimum_required(VERSION 3.10.0)
 option(MAX_SPEED "Enable aggressive speed optimizations" OFF)
 option(OS_LLM "Select the LLM example instead of the SD example" OFF)
 option(OS_CUDA "Enable GPU acceleration with CUDA" OFF)
+option(OS_SHAREDLIB "Create a shared library instead of an executable. CMake XNNPACK with -DCMAKE_POSITION_INDEPENDENT_CODE=ON" OFF)
 option(USE_LIBPNG "Use libpng for saving compressed images" OFF)
 option(USE_LIBJPEGTURBO "Use libjpeg-turbo for saving compressed images" OFF)
 
@@ -13,13 +14,19 @@ endif()
 set(ONNXSTREAM_PROJECT_NAME sd)
 if(OS_LLM)
 	set(ONNXSTREAM_PROJECT_NAME llm)
+elseif(OS_SHAREDLIB)
+	set(ONNXSTREAM_PROJECT_NAME onnxstream)
 endif()
 
 project (${ONNXSTREAM_PROJECT_NAME})
 
 set (CMAKE_CXX_STANDARD 20)
 
-add_executable(${ONNXSTREAM_PROJECT_NAME} ${ONNXSTREAM_PROJECT_NAME}.cpp onnxstream.cpp)
+if(NOT OS_SHAREDLIB)
+	add_executable(${ONNXSTREAM_PROJECT_NAME} ${ONNXSTREAM_PROJECT_NAME}.cpp onnxstream.cpp)
+else()
+	add_library(${ONNXSTREAM_PROJECT_NAME} SHARED exports.cpp onnxstream.cpp)
+endif()
 
 if(UNIX) # includes APPLE and ANDROID (ie Termux)
 

@@ -15,6 +15,7 @@
 #include <set>
 #include <memory>
 #include <algorithm>
+#include <chrono>
 
 namespace onnxstream {
 

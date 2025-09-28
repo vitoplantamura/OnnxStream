@@ -1,14 +1,29 @@
 #ifdef __EMSCRIPTEN__
-#include <emscripten.h>
-#include <emscripten/threading.h>
-#define ONNXSTREAM_EXPORT extern "C" EMSCRIPTEN_KEEPALIVE
+  #include <emscripten.h>
+  #include <emscripten/threading.h>
+  #define ONNXSTREAM_EXPORT extern "C" EMSCRIPTEN_KEEPALIVE
+#elif defined(_WIN32)
+  #define ONNXSTREAM_EXPORT extern "C" __declspec(dllexport)
 #else
-#define ONNXSTREAM_EXPORT
+  #define ONNXSTREAM_EXPORT extern "C"
 #endif
 
 #include "onnxstream.h"
+#include <cstring>
 
 using namespace onnxstream;
+
+static char* pchar_to_buf(const char* pchar)
+{
+	char* buf = (char*)::malloc(::strlen(pchar) + 1);
+	::strcpy(buf, pchar);
+	return buf;
+}
+
+static char* except_to_err(const std::exception& e)
+{
+	return pchar_to_buf(e.what());
+}
 
 class ModelContext
 {
@@ -21,6 +36,7 @@ public:
 
 	Model m_model;
 	std::string m_def;
+	std::string m_wp;
 };
 
 ONNXSTREAM_EXPORT ModelContext* model_new()
@@ -37,7 +53,33 @@ ONNXSTREAM_EXPORT ModelContext* model_new()
 
 	ModelContext* obj = new ModelContext(threads_count);
 
+	obj->m_wp = "ram";
 	obj->m_model.set_weights_provider(RamWeightsProvider<WeightsProvider>());
+
+	return obj;
+}
+
+ONNXSTREAM_EXPORT ModelContext* model_new_2(int threads_count, char* wp_name)
+{
+	ModelContext* obj = new ModelContext(threads_count);
+
+	obj->m_wp = wp_name;
+
+	if (!::strcmp(wp_name, "ram"))
+		obj->m_model.set_weights_provider(RamWeightsProvider<WeightsProvider>());
+	else if (!::strcmp(wp_name, "nocache"))
+		obj->m_model.set_weights_provider(DiskNoCacheWeightsProvider());
+	else if (!::strcmp(wp_name, "prefetch"))
+		obj->m_model.set_weights_provider(DiskPrefetchWeightsProvider());
+	else if (!::strcmp(wp_name, "ram+nocache"))
+		obj->m_model.set_weights_provider(RamWeightsProvider<DiskNoCacheWeightsProvider>(DiskNoCacheWeightsProvider()));
+	else if (!::strcmp(wp_name, "ram+prefetch"))
+		obj->m_model.set_weights_provider(RamWeightsProvider<DiskPrefetchWeightsProvider>(DiskPrefetchWeightsProvider()));
+	else
+	{
+		delete obj;
+		return nullptr;
+	}
 
 	return obj;
 }
@@ -51,6 +93,19 @@ ONNXSTREAM_EXPORT void model_read_string(ModelContext* obj, char* str)
 {
 	obj->m_def = str;
 	obj->m_model.read_string(str);
+}
+
+ONNXSTREAM_EXPORT char* model_read_file(ModelContext* obj, char* fn)
+{
+	try
+	{
+		obj->m_model.read_file(fn);
+		return nullptr;
+	}
+	catch (const std::exception& e)
+	{
+		return except_to_err(e);
+	}
 }
 
 ONNXSTREAM_EXPORT char* model_get_weights_names(ModelContext* obj)
@@ -94,6 +149,9 @@ ONNXSTREAM_EXPORT char* model_get_weights_names(ModelContext* obj)
 
 ONNXSTREAM_EXPORT void* model_add_weights_file(ModelContext* obj, char* type, char* name, unsigned int size)
 {
+	if (obj->m_wp != "ram")
+		return nullptr;
+
 	auto& wp = obj->m_model.get_weights_provider<RamWeightsProvider<WeightsProvider>>();
 
 	if (!::strcmp(type, "uint8"))
@@ -153,7 +211,7 @@ ONNXSTREAM_EXPORT void* model_get_tensor(ModelContext* obj, char* name)
 			t = &tensor;
 			break;
 		}
-	if (!t)
+	if (!t || t->m_type != TensorDataType::float32)
 		return nullptr;
 
 	struct ReturnLayout
@@ -174,6 +232,16 @@ ONNXSTREAM_EXPORT void* model_get_tensor(ModelContext* obj, char* name)
 	return c_ret;
 }
 
+ONNXSTREAM_EXPORT char* model_get_all_tensor_names(ModelContext* obj)
+{
+	std::string ret;
+	for (auto& tensor : obj->m_model.m_data)
+		ret += tensor.m_name + "|";
+	if (ret.size())
+		ret.pop_back();
+	return pchar_to_buf(ret.c_str());
+}
+
 ONNXSTREAM_EXPORT void model_run(ModelContext* obj)
 {
 	try
@@ -184,6 +252,19 @@ ONNXSTREAM_EXPORT void model_run(ModelContext* obj)
 	{
 		printf("=== ERROR === %s\n", e.what());
 		throw;
+	}
+}
+
+ONNXSTREAM_EXPORT char* model_run_2(ModelContext* obj)
+{
+	try
+	{
+		obj->m_model.run();
+		return nullptr;
+	}
+	catch (const std::exception& e)
+	{
+		return except_to_err(e);
 	}
 }
 
@@ -200,7 +281,6 @@ ONNXSTREAM_EXPORT void model_set_option(ModelContext* obj, char* name, unsigned 
 	DEFINE_OPTION_BOOL(use_fp16_arithmetic)
 	DEFINE_OPTION_BOOL(use_uint8_qdq)
 	DEFINE_OPTION_BOOL(use_uint8_arithmetic)
-	DEFINE_OPTION_BOOL(do_multipart_quantization)
 	DEFINE_OPTION_BOOL(fuse_ops_in_attention)
 	DEFINE_OPTION_BOOL(force_fp16_storage)
 	DEFINE_OPTION_BOOL(support_dynamic_shapes)
@@ -218,4 +298,14 @@ ONNXSTREAM_EXPORT void model_set_option(ModelContext* obj, char* name, unsigned 
 		printf("=== ERROR === %s\n", err);
 		throw std::invalid_argument(err);
 	}
+}
+
+ONNXSTREAM_EXPORT void model_add_extra_output(ModelContext* obj, char* name)
+{
+	obj->m_model.m_extra_outputs.emplace_back(name);
+}
+
+ONNXSTREAM_EXPORT void model_free_buffer(void* ptr)
+{
+	::free(ptr);
 }
