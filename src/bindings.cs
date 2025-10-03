@@ -6,11 +6,7 @@ C# bindings for OnnxStream
 1) Build
 --------
 
-In order to build the DLL/so, follow the instructions in the main README for building the Stable Diffusion executable, and:
-
-- If on Linux, when building XNNPACK, add "-DCMAKE_POSITION_INDEPENDENT_CODE=ON" to the first CMake invocation.
-
-- When building the Stable Diffusion application, add "-DOS_SHAREDLIB=ON" to the first CMake invocation.
+To build the DLL/so, follow the instructions in the main README but add "-DOS_SHAREDLIB=ON" to the first CMake invocation.
 
 2) Example
 ----------

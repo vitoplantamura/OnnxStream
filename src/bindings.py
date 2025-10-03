@@ -6,11 +6,7 @@ Python bindings for OnnxStream
 1) Build
 --------
 
-In order to build the DLL/so, follow the instructions in the main README for building the Stable Diffusion executable, and:
-
-- If on Linux, when building XNNPACK, add "-DCMAKE_POSITION_INDEPENDENT_CODE=ON" to the first CMake invocation.
-
-- When building the Stable Diffusion application, add "-DOS_SHAREDLIB=ON" to the first CMake invocation.
+To build the DLL/so, follow the instructions in the main README but add "-DOS_SHAREDLIB=ON" to the first CMake invocation.
 
 2) Example
 ----------
@@ -42,10 +38,15 @@ with Model(library_path="./build/libonnxstream.so", threads_count=0, weights_pro
 
 import ctypes
 import re
-import numpy as np
 import os
 import sys
 from typing import List, Tuple, Union
+from math import prod
+
+try:
+    import numpy
+except ImportError:
+    numpy = None
 
 class OnnxStreamError(Exception):
     pass
@@ -139,13 +140,13 @@ class Model:
         error_ptr = self._lib.model_run_2(self._model_handle)
         self._handle_error(error_ptr)
         
-    def add_tensor(self, name: str, data: np.ndarray):
+    def add_tensor(self, name: str, data: 'numpy.ndarray'):
         shape = data.shape
         els = data.size
 
-        if data.dtype == np.float32:
+        if data.dtype == numpy.float32:
             dtype_str = "float32"
-        elif data.dtype == np.int64:
+        elif data.dtype == numpy.int64:
             dtype_str = "int64"
         else:
             raise OnnxStreamError(f"Unsupported data type: {data.dtype}")
@@ -164,8 +165,53 @@ class Model:
 
         source_ptr = data.ctypes.data
         ctypes.memmove(ptr, source_ptr, data.nbytes)
+
+    def _flatten_list(self, nested_list):
+        flat_list = []
+        for item in nested_list:
+            if isinstance(item, list):
+                flat_list.extend(self._flatten_list(item))
+            else:
+                flat_list.append(item)
+        return flat_list
+
+    def _get_shape(self, nested_list):
+        shape = []
+        val = nested_list
+        while isinstance(val, list):
+            shape.append(len(val))
+            val = val[0] if len(val) > 0 else []
+        return shape
+
+    def add_tensor_as_list(self, name: str, data: list, dtype: str):
+        shape = self._get_shape(data)
+        flat_data = self._flatten_list(data)
         
-    def get_tensor(self, name: str) -> Tuple[np.ndarray, List[int]]:
+        if dtype == "float32":
+            c_type = ctypes.c_float
+            type_size = ctypes.sizeof(c_type)
+        elif dtype == "int64":
+            c_type = ctypes.c_longlong
+            type_size = ctypes.sizeof(c_type)
+        else:
+            raise OnnxStreamError(f"Unsupported data type: {dtype}")
+
+        final_name = self.mangle_name(name) if self.mangle_tensor_names else name
+        
+        shape_array = (ctypes.c_uint * len(shape))(*shape)
+
+        dest_ptr = self._lib.model_add_tensor(
+            self._model_handle,
+            dtype.encode('utf-8'),
+            final_name.encode('utf-8'),
+            len(shape),
+            shape_array
+        )
+
+        c_array = (c_type * len(flat_data))(*flat_data)
+        ctypes.memmove(dest_ptr, ctypes.addressof(c_array), len(flat_data) * type_size)
+
+    def get_tensor(self, name: str) -> Tuple['numpy.ndarray', List[int]]:
         final_name = self.mangle_name(name) if self.mangle_tensor_names else name
         ret_ptr = self._lib.model_get_tensor(self._model_handle, final_name.encode('utf-8'))
 
@@ -181,11 +227,47 @@ class Model:
         shape = [dims_ptr[i] for i in range(dims_num)]
 
         data_ptr = ctypes.cast(ret_struct.data, ctypes.POINTER(ctypes.c_float))
-        data = np.ctypeslib.as_array(data_ptr, shape=(data_num,)).copy()
+        data = numpy.ctypeslib.as_array(data_ptr, shape=(data_num,)).copy()
         
         self._lib.model_free_buffer(ret_ptr)
 
         return data.reshape(shape), shape
+
+    def _reshape_flat_list(self, flat_list, shape):
+        if not shape:
+            return flat_list[0] if flat_list else None
+        if not flat_list:
+            return []
+            
+        if len(shape) == 1:
+            return flat_list
+            
+        elements_per_slice = prod(shape[1:])
+        return [self._reshape_flat_list(flat_list[i:i+elements_per_slice], shape[1:])
+                for i in range(0, len(flat_list), elements_per_slice)]
+
+    def get_tensor_as_list(self, name: str) -> Tuple[list, List[int]]:
+        final_name = self.mangle_name(name) if self.mangle_tensor_names else name
+        ret_ptr = self._lib.model_get_tensor(self._model_handle, final_name.encode('utf-8'))
+
+        if not ret_ptr:
+            return None, None
+
+        ret_struct = ctypes.cast(ret_ptr, ctypes.POINTER(GetTensorReturnLayout)).contents
+
+        data_num = ret_struct.data_num
+        dims_num = ret_struct.dims_num
+
+        dims_ptr = ctypes.cast(ret_struct.dims, ctypes.POINTER(ctypes.c_size_t))
+        shape = [dims_ptr[i] for i in range(dims_num)]
+
+        data_ptr = ctypes.cast(ret_struct.data, ctypes.POINTER(ctypes.c_float))
+        flat_data = [data_ptr[i] for i in range(data_num)]
+        
+        self._lib.model_free_buffer(ret_ptr)
+
+        reshaped_data = self._reshape_flat_list(flat_data, shape)
+        return reshaped_data, shape
 
     def get_all_tensor_names(self) -> List[str]:
         ret_ptr = self._lib.model_get_all_tensor_names(self._model_handle)
