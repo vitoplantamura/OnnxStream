@@ -222,6 +222,7 @@ Some things must be considered when exporting a Pytorch `nn.Module` (in our case
 
 # How to Build the Stable Diffusion example on Linux/Mac/Windows/Termux/FreeBSD
 
+- **Linux (+Termux) only**: you need to install these packages: `build-essential git cmake python3` (for Ubuntu and Termux, the names may be different on other distributions).
 - **Windows only**: start the following command prompt: `Visual Studio Tools` > `x64 Native Tools Command Prompt`.
 - **Mac only**: make sure to install cmake: `brew install cmake`.
 
@@ -281,35 +282,18 @@ index 01e4b9806..4dfff8f6f 100644
 ```
 </details>
 
-First you need to build [XNNPACK](https://github.com/google/XNNPACK).
-
-Since the function prototypes of XnnPack can change at any time, I've included a `git checkout` ​​that ensures correct compilation of OnnxStream with a compatible version of XnnPack at the time of writing:
-
-```
-git clone https://github.com/google/XNNPACK.git
-cd XNNPACK
-git checkout 1c8ee1b68f3a3e0847ec3c53c186c5909fa3fbd3
-mkdir build
-cd build
-cmake -DXNNPACK_BUILD_TESTS=OFF -DXNNPACK_BUILD_BENCHMARKS=OFF ..
-cmake --build . --config Release
-```
-
-Then you can build the Stable Diffusion example.
-
-`<DIRECTORY_WHERE_XNNPACK_WAS_CLONED>` is for example `/home/vito/Desktop/XNNPACK` or `C:\Projects\SD\XNNPACK` (on Windows):
+This will build the Stable Diffusion example ([XNNPACK](https://github.com/google/XNNPACK) will be downloaded automatically):
 
 ```
 git clone https://github.com/vitoplantamura/OnnxStream.git
-cd OnnxStream
-cd src
+cd OnnxStream/src
 mkdir build
 cd build
-cmake -DMAX_SPEED=ON -DOS_LLM=OFF -DOS_CUDA=OFF -DXNNPACK_DIR=<DIRECTORY_WHERE_XNNPACK_WAS_CLONED> ..
+cmake ..
 cmake --build . --config Release
 ```
 
-**Important:** the MAX_SPEED option allows to increase performance by about 10% in Windows, but by more than 50% on the Raspberry Pi. This option consumes much more memory at build time and the produced executable may not work (as was the case with Termux in my tests). So in case of problems, the first attempt to make is to set MAX_SPEED to OFF.
+**Important:** the MAX_SPEED option (which is ON by default but can be turned off with `-DMAX_SPEED=OFF` added to the first invocation of cmake, before the ..) allows to increase performance by about 10% in Windows, but by more than 50% on the Raspberry Pi. This option consumes much more memory at build time and the produced executable may not work (as was the case with Termux in my tests). So in case of problems, the first attempt to make is to set MAX_SPEED to OFF.
 
 Now you can run the Stable Diffusion example.
 

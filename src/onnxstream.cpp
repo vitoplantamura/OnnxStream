@@ -578,65 +578,8 @@ public:
 
         tensor_vector<T> output = create_tensor_vector<T>(batch_size);
 
-#if 1
-
         if (!convert<U, T>(input.data(), output.data(), batch_size, false /* single_threaded */))
             throw std::runtime_error("FP16<->FP32 conversion error.");
-
-#else
-
-        typedef typename std::conditional<std::is_same<T, float>::value, void, float>::type xnn_ptr_type_src;
-        typedef typename std::conditional<std::is_same<T, float>::value, float, void>::type xnn_ptr_type_dst;
-
-        enum xnn_status(*xnn_create_convert_nc_fxx_fxx)(size_t, size_t, size_t, uint32_t, xnn_operator_t*) = nullptr;
-        enum xnn_status(*xnn_reshape_convert_nc_fxx_fxx)(xnn_operator_t, size_t, pthreadpool_t) = nullptr;
-        enum xnn_status(*xnn_setup_convert_nc_fxx_fxx)(xnn_operator_t, const xnn_ptr_type_src*, xnn_ptr_type_dst*) = nullptr;
-
-        if constexpr (std::is_same<T, float>::value)
-        {
-            xnn_create_convert_nc_fxx_fxx = &xnn_create_convert_nc_f16_f32;
-            xnn_reshape_convert_nc_fxx_fxx = &xnn_reshape_convert_nc_f16_f32;
-            xnn_setup_convert_nc_fxx_fxx = &xnn_setup_convert_nc_f16_f32;
-        }
-        else
-        {
-            xnn_create_convert_nc_fxx_fxx = &xnn_create_convert_nc_f32_f16;
-            xnn_reshape_convert_nc_fxx_fxx = &xnn_reshape_convert_nc_f32_f16;
-            xnn_setup_convert_nc_fxx_fxx = &xnn_setup_convert_nc_f32_f16;
-        }
-
-        xnn_operator_t convert_op = nullptr;
-        xnn_status status = xnn_create_convert_nc_fxx_fxx(
-            1 /* channels */, 1 /* input stride */, 1 /* output stride */,
-            0 /* flags */, &convert_op);
-        if (status != xnn_status_success)
-            throw std::runtime_error("failed to create F16->F32 Convert operator");
-
-        scope_guard __sg__([&convert_op]() {
-            xnn_status status = xnn_delete_operator(convert_op);
-            if (status != xnn_status_success)
-                throw std::runtime_error("failed to delete operator");
-            convert_op = nullptr;
-        });
-
-        status = xnn_reshape_convert_nc_fxx_fxx(
-            convert_op /* convert_op */,
-            batch_size /* batch_size */,
-            threadpool /* threadpool */);
-        if (status != xnn_status_success)
-            throw std::runtime_error("failed to reshape Convert operator");
-
-        status = xnn_setup_convert_nc_fxx_fxx(
-            convert_op,
-            input.data(), output.data());
-        if (status != xnn_status_success)
-            throw std::runtime_error("failed to setup F16->F32 Convert operator");
-
-        status = xnn_run_operator(convert_op, threadpool /* thread pool */);
-        if (status != xnn_status_success)
-            throw std::runtime_error("failed to run F16->F32 Convert operator");
-
-#endif
 
         return output;
     }
@@ -755,84 +698,46 @@ public:
 
         tensor_vector<T> output_data = create_tensor_vector<T>(output_data_override ? 0 : output_size);
 
-        typedef
-            typename std::conditional<std::is_same<T, float>::value, float,
-            typename std::conditional<std::is_same<T, uint16_t>::value, void,
-            uint8_t>::type>::type xnn_ptr_type;
-
-        enum xnn_status(*xnn_create_multiply_nd_xxx)(float, float, uint32_t, xnn_operator_t*) = nullptr;
-        enum xnn_status(*xnn_reshape_multiply_nd_xxx)(xnn_operator_t, size_t, const size_t*, size_t, const size_t*, pthreadpool_t) = nullptr;
-        enum xnn_status(*xnn_setup_multiply_nd_xxx)(xnn_operator_t, const xnn_ptr_type*, const xnn_ptr_type*, xnn_ptr_type*) = nullptr;
+        xnn_datatype datatype;
+        xnn_quantization_params input1_quantization{}, input2_quantization{}, output_quantization{};
 
         if constexpr (std::is_same<T, float>::value)
         {
-            xnn_create_multiply_nd_xxx = &xnn_create_multiply_nd_f32;
-            xnn_reshape_multiply_nd_xxx = &xnn_reshape_multiply_nd_f32;
-            xnn_setup_multiply_nd_xxx = &xnn_setup_multiply_nd_f32;
+            datatype = xnn_datatype_fp32;
         }
         else if constexpr (std::is_same<T, uint16_t>::value)
         {
-            xnn_create_multiply_nd_xxx = &xnn_create_multiply_nd_f16;
-            xnn_reshape_multiply_nd_xxx = &xnn_reshape_multiply_nd_f16;
-            xnn_setup_multiply_nd_xxx = &xnn_setup_multiply_nd_f16;
+            datatype = xnn_datatype_fp16;
         }
         else
         {
-            xnn_create_multiply_nd_xxx = nullptr;
-            xnn_reshape_multiply_nd_xxx = &xnn_reshape_multiply_nd_qu8;
-            xnn_setup_multiply_nd_xxx = &xnn_setup_multiply_nd_qu8;
+            datatype = xnn_datatype_quint8;
+
+            input1_quantization.zero_point = qu8_data->input1_zero_point;
+            input1_quantization.scale = qu8_data->input1_scale;
+            input2_quantization.zero_point = qu8_data->input2_zero_point;
+            input2_quantization.scale = qu8_data->input2_scale;
+            output_quantization.zero_point = qu8_data->output_zero_point;
+            output_quantization.scale = qu8_data->output_scale;
         }
 
-        xnn_operator_t multiply_op = nullptr;
-        xnn_status status;
-
-        if constexpr (!std::is_same<T, uint8_t>::value)
-        {
-            status = xnn_create_multiply_nd_xxx(
-                -std::numeric_limits<float>::infinity() /* output min */, std::numeric_limits<float>::infinity() /* output max */,
-                0 /* flags */,
-                &multiply_op);
-        }
-        else
-        {
-            status = xnn_create_multiply_nd_qu8(
-                qu8_data->input1_zero_point,
-                qu8_data->input1_scale,
-                qu8_data->input2_zero_point,
-                qu8_data->input2_scale,
-                qu8_data->output_zero_point,
-                qu8_data->output_scale,
-                0 /* output min */, 255 /* output max */,
-                0 /* flags */,
-                &multiply_op);
-        }
-
-        if (status != xnn_status_success)
-            throw std::runtime_error("failed to create multiply operation");
-
-        scope_guard __sg__([&multiply_op]() {
-            xnn_status status = xnn_delete_operator(multiply_op);
-            if (status != xnn_status_success)
-                throw std::runtime_error("failed to delete operator");
-            multiply_op = nullptr;
-        });
-
-        status = xnn_reshape_multiply_nd_xxx(
-            multiply_op,
-            first_shape.size(), first_shape.data(), second_shape.size(), second_shape.data(),
+        xnn_status status = xnn_run_binary_elementwise_nd(
+            xnn_binary_multiply /* type */,
+            datatype /* datatype */,
+            &input1_quantization /* input1_quantization */,
+            &input2_quantization /* input2_quantization */,
+            &output_quantization /* output_quantization */,
+            0 /* flags */,
+            first_shape.size() /* num_input1_dims */,
+            first_shape.data() /* input1_shape */,
+            second_shape.size() /* num_input2_dims */,
+            second_shape.data() /* input2_shape */,
+            first_data /* input1 */,
+            second_data /* input2 */,
+            output_data_override ? output_data_override : output_data.data() /* output */,
             threadpool /* threadpool */);
         if (status != xnn_status_success)
-            throw std::runtime_error("failed to reshape multiply operation");
-
-        status = xnn_setup_multiply_nd_xxx(
-            multiply_op,
-            first_data /* a */, second_data /* b */, output_data_override ? output_data_override : output_data.data() /* output */);
-        if (status != xnn_status_success)
-            throw std::runtime_error("failed to setup multiply operation");
-
-        status = xnn_run_operator(multiply_op, threadpool /* thread pool */);
-        if (status != xnn_status_success)
-            throw std::runtime_error("failed to run multiply operator");
+            throw std::runtime_error("failed to run binary elementwise operation");
 
         return std::pair<std::vector<size_t>, tensor_vector<T>>(
             std::move(output_shape), std::move(output_data));
@@ -1612,84 +1517,46 @@ public:
 
         tensor_vector<T> output_data = create_tensor_vector<T>(output_size);
 
-        typedef
-            typename std::conditional<std::is_same<T, float>::value, float,
-            typename std::conditional<std::is_same<T, uint16_t>::value, void,
-            uint8_t>::type>::type xnn_ptr_type;
-
-        enum xnn_status(*xnn_create_add_nd_xxx)(float, float, uint32_t, xnn_operator_t*) = nullptr;
-        enum xnn_status(*xnn_reshape_add_nd_xxx)(xnn_operator_t, size_t, const size_t*, size_t, const size_t*, pthreadpool_t) = nullptr;
-        enum xnn_status(*xnn_setup_add_nd_xxx)(xnn_operator_t, const xnn_ptr_type*, const xnn_ptr_type*, xnn_ptr_type*) = nullptr;
+        xnn_datatype datatype;
+        xnn_quantization_params input1_quantization{}, input2_quantization{}, output_quantization{};
 
         if constexpr (std::is_same<T, float>::value)
         {
-            xnn_create_add_nd_xxx = &xnn_create_add_nd_f32;
-            xnn_reshape_add_nd_xxx = &xnn_reshape_add_nd_f32;
-            xnn_setup_add_nd_xxx = &xnn_setup_add_nd_f32;
+            datatype = xnn_datatype_fp32;
         }
         else if constexpr (std::is_same<T, uint16_t>::value)
         {
-            xnn_create_add_nd_xxx = &xnn_create_add_nd_f16;
-            xnn_reshape_add_nd_xxx = &xnn_reshape_add_nd_f16;
-            xnn_setup_add_nd_xxx = &xnn_setup_add_nd_f16;
+            datatype = xnn_datatype_fp16;
         }
         else
         {
-            xnn_create_add_nd_xxx = nullptr;
-            xnn_reshape_add_nd_xxx = &xnn_reshape_add_nd_qu8;
-            xnn_setup_add_nd_xxx = &xnn_setup_add_nd_qu8;
+            datatype = xnn_datatype_quint8;
+
+            input1_quantization.zero_point = qu8_data->input1_zero_point;
+            input1_quantization.scale = qu8_data->input1_scale;
+            input2_quantization.zero_point = qu8_data->input2_zero_point;
+            input2_quantization.scale = qu8_data->input2_scale;
+            output_quantization.zero_point = qu8_data->output_zero_point;
+            output_quantization.scale = qu8_data->output_scale;
         }
 
-        xnn_operator_t add_op = nullptr;
-        xnn_status status;
-
-        if constexpr (!std::is_same<T, uint8_t>::value)
-        {
-            status = xnn_create_add_nd_xxx(
-                -std::numeric_limits<float>::infinity() /* output min */, std::numeric_limits<float>::infinity() /* output max */,
-                0 /* flags */,
-                &add_op);
-        }
-        else
-        {
-            status = xnn_create_add_nd_qu8(
-                qu8_data->input1_zero_point,
-                qu8_data->input1_scale,
-                qu8_data->input2_zero_point,
-                qu8_data->input2_scale,
-                qu8_data->output_zero_point,
-                qu8_data->output_scale,
-                0 /* output min */, 255 /* output max */,
-                0 /* flags */,
-                &add_op);
-        }
-
-        if (status != xnn_status_success)
-            throw std::runtime_error("failed to create add operation");
-
-        scope_guard __sg__([&add_op]() {
-            xnn_status status = xnn_delete_operator(add_op);
-            if (status != xnn_status_success)
-                throw std::runtime_error("failed to delete operator");
-            add_op = nullptr;
-        });
-
-        status = xnn_reshape_add_nd_xxx(
-            add_op,
-            first_shape.size(), first_shape.data(), second_shape.size(), second_shape.data(),
+        xnn_status status = xnn_run_binary_elementwise_nd(
+            xnn_binary_add /* type */,
+            datatype /* datatype */,
+            &input1_quantization /* input1_quantization */,
+            &input2_quantization /* input2_quantization */,
+            &output_quantization /* output_quantization */,
+            0 /* flags */,
+            first_shape.size() /* num_input1_dims */,
+            first_shape.data() /* input1_shape */,
+            second_shape.size() /* num_input2_dims */,
+            second_shape.data() /* input2_shape */,
+            first_data.data() /* input1 */,
+            second_data.data() /* input2 */,
+            output_data.data() /* output */,
             threadpool /* threadpool */);
         if (status != xnn_status_success)
-            throw std::runtime_error("failed to reshape add operation");
-
-        status = xnn_setup_add_nd_xxx(
-            add_op,
-            first_data.data() /* a */, second_data.data() /* b */, output_data.data() /* output */);
-        if (status != xnn_status_success)
-            throw std::runtime_error("failed to setup add operation");
-
-        status = xnn_run_operator(add_op, threadpool /* thread pool */);
-        if (status != xnn_status_success)
-            throw std::runtime_error("failed to run add operator");
+            throw std::runtime_error("failed to run binary elementwise operation");
 
         return std::pair<std::vector<size_t>, tensor_vector<T>>(
             std::move(output_shape), std::move(output_data));
@@ -1726,64 +1593,33 @@ public:
 
         tensor_vector<T> output_data = create_tensor_vector<T>(el_count_output);
 
-        enum xnn_status(*xnn_create_transpose_nd_xxx)(uint32_t, xnn_operator_t*) = nullptr;
-        enum xnn_status(*xnn_reshape_transpose_nd_xxx)(xnn_operator_t, size_t, const size_t*, const size_t*, pthreadpool_t) = nullptr;
-        enum xnn_status(*xnn_setup_transpose_nd_xxx)(xnn_operator_t, const void*, void*) = nullptr;
+        enum xnn_status(*xnn_run_transpose_nd_xxx)(const void*, void*, size_t, const size_t*, const size_t*, uint32_t, pthreadpool_t) = nullptr;
 
         if constexpr (std::is_same<T, float>::value)
         {
-            xnn_create_transpose_nd_xxx = &xnn_create_transpose_nd_x32;
-            xnn_reshape_transpose_nd_xxx = &xnn_reshape_transpose_nd_x32;
-            xnn_setup_transpose_nd_xxx = &xnn_setup_transpose_nd_x32;
+            xnn_run_transpose_nd_xxx = &xnn_run_transpose_nd_x32;
         }
         else if constexpr (std::is_same<T, uint16_t>::value)
         {
-            xnn_create_transpose_nd_xxx = &xnn_create_transpose_nd_x16;
-            xnn_reshape_transpose_nd_xxx = &xnn_reshape_transpose_nd_x16;
-            xnn_setup_transpose_nd_xxx = &xnn_setup_transpose_nd_x16;
+            xnn_run_transpose_nd_xxx = &xnn_run_transpose_nd_x16;
         }
         else if constexpr (std::is_same<T, uint8_t>::value)
         {
-            xnn_create_transpose_nd_xxx = &xnn_create_transpose_nd_x8;
-            xnn_reshape_transpose_nd_xxx = &xnn_reshape_transpose_nd_x8;
-            xnn_setup_transpose_nd_xxx = &xnn_setup_transpose_nd_x8;
+            xnn_run_transpose_nd_xxx = &xnn_run_transpose_nd_x8;
         }
         else
             throw std::runtime_error("XnnPack::transpose: invalid type.");
 
-        xnn_operator_t transpose_op = nullptr;
-        xnn_status status = xnn_create_transpose_nd_xxx(
-            0 /* flags */,
-            &transpose_op);
-        if (status != xnn_status_success)
-            throw std::runtime_error("failed to create transpose operation");
-
-        scope_guard __sg__([&transpose_op]() {
-            xnn_status status = xnn_delete_operator(transpose_op);
-            if (status != xnn_status_success)
-                throw std::runtime_error("failed to delete operator");
-            transpose_op = nullptr;
-        });
-
-        status = xnn_reshape_transpose_nd_xxx(
-            transpose_op,
+        xnn_status status = xnn_run_transpose_nd_xxx(
+            input_data.data() /* input */,
+            output_data.data() /* output */,
             perm.size() /* num_dims */,
-            input_shape.data() /* shape */,
-            perm.data() /* perm */,
+            input_shape.data() /* input_shape */,
+            perm.data() /* output_perm */,
+            0 /* flags */,
             threadpool /* threadpool */);
         if (status != xnn_status_success)
-            throw std::runtime_error("failed to reshape transpose operation");
-
-        status = xnn_setup_transpose_nd_xxx(
-            transpose_op,
-            input_data.data() /* input */,
-            output_data.data() /* output */);
-        if (status != xnn_status_success)
-            throw std::runtime_error("failed to setup transpose operation");
-
-        status = xnn_run_operator(transpose_op, threadpool /* thread pool */);
-        if (status != xnn_status_success)
-            throw std::runtime_error("failed to run transpose operator");
+            throw std::runtime_error("failed to run transpose operation");
 
         return std::pair<std::vector<size_t>, tensor_vector<T>>(
             std::move(output_shape), std::move(output_data));
@@ -1825,55 +1661,35 @@ public:
 
         tensor_vector<T> output_data = create_tensor_vector<T>(output_size);
 
-        typedef typename std::conditional<std::is_same<T, float>::value, float, void>::type xnn_ptr_type;
-        enum xnn_status(*xnn_create_subtract_nd_xxx)(float, float, uint32_t, xnn_operator_t*) = nullptr;
-        enum xnn_status(*xnn_reshape_subtract_nd_xxx)(xnn_operator_t, size_t, const size_t*, size_t, const size_t*, pthreadpool_t) = nullptr;
-        enum xnn_status(*xnn_setup_subtract_nd_xxx)(xnn_operator_t, const xnn_ptr_type*, const xnn_ptr_type*, xnn_ptr_type*) = nullptr;
+        xnn_datatype datatype;
+        xnn_quantization_params input1_quantization{}, input2_quantization{}, output_quantization{};
 
         if constexpr (std::is_same<T, float>::value)
         {
-            xnn_create_subtract_nd_xxx = &xnn_create_subtract_nd_f32;
-            xnn_reshape_subtract_nd_xxx = &xnn_reshape_subtract_nd_f32;
-            xnn_setup_subtract_nd_xxx = &xnn_setup_subtract_nd_f32;
+            datatype = xnn_datatype_fp32;
         }
         else
         {
-            xnn_create_subtract_nd_xxx = &xnn_create_subtract_nd_f16;
-            xnn_reshape_subtract_nd_xxx = &xnn_reshape_subtract_nd_f16;
-            xnn_setup_subtract_nd_xxx = &xnn_setup_subtract_nd_f16;
+            datatype = xnn_datatype_fp16;
         }
 
-        xnn_operator_t subtract_op = nullptr;
-        xnn_status status = xnn_create_subtract_nd_xxx(
-            -std::numeric_limits<float>::infinity() /* output min */, std::numeric_limits<float>::infinity() /* output max */,
+        xnn_status status = xnn_run_binary_elementwise_nd(
+            xnn_binary_subtract /* type */,
+            datatype /* datatype */,
+            &input1_quantization /* input1_quantization */,
+            &input2_quantization /* input2_quantization */,
+            &output_quantization /* output_quantization */,
             0 /* flags */,
-            &subtract_op);
-        if (status != xnn_status_success)
-            throw std::runtime_error("failed to create subtract operation");
-
-        scope_guard __sg__([&subtract_op]() {
-            xnn_status status = xnn_delete_operator(subtract_op);
-            if (status != xnn_status_success)
-                throw std::runtime_error("failed to delete operator");
-            subtract_op = nullptr;
-        });
-
-        status = xnn_reshape_subtract_nd_xxx(
-            subtract_op,
-            first_shape.size(), first_shape.data(), second_shape.size(), second_shape.data(),
+            first_shape.size() /* num_input1_dims */,
+            first_shape.data() /* input1_shape */,
+            second_shape.size() /* num_input2_dims */,
+            second_shape.data() /* input2_shape */,
+            first_data.data() /* input1 */,
+            second_data.data() /* input2 */,
+            output_data.data() /* output */,
             threadpool /* threadpool */);
         if (status != xnn_status_success)
-            throw std::runtime_error("failed to reshape subtract operation");
-
-        status = xnn_setup_subtract_nd_xxx(
-            subtract_op,
-            first_data.data() /* a */, second_data.data() /* b */, output_data.data() /* output */);
-        if (status != xnn_status_success)
-            throw std::runtime_error("failed to setup subtract operation");
-
-        status = xnn_run_operator(subtract_op, threadpool /* thread pool */);
-        if (status != xnn_status_success)
-            throw std::runtime_error("failed to run subtract operator");
+            throw std::runtime_error("failed to run binary elementwise operation");
 
         return std::pair<std::vector<size_t>, tensor_vector<T>>(
             std::move(output_shape), std::move(output_data));
@@ -1915,55 +1731,35 @@ public:
 
         tensor_vector<T> output_data = create_tensor_vector<T>(output_size);
 
-        typedef typename std::conditional<std::is_same<T, float>::value, float, void>::type xnn_ptr_type;
-        enum xnn_status(*xnn_create_divide_nd_xxx)(float, float, uint32_t, xnn_operator_t*) = nullptr;
-        enum xnn_status(*xnn_reshape_divide_nd_xxx)(xnn_operator_t, size_t, const size_t*, size_t, const size_t*, pthreadpool_t) = nullptr;
-        enum xnn_status(*xnn_setup_divide_nd_xxx)(xnn_operator_t, const xnn_ptr_type*, const xnn_ptr_type*, xnn_ptr_type*) = nullptr;
+        xnn_datatype datatype;
+        xnn_quantization_params input1_quantization{}, input2_quantization{}, output_quantization{};
 
         if constexpr (std::is_same<T, float>::value)
         {
-            xnn_create_divide_nd_xxx = &xnn_create_divide_nd_f32;
-            xnn_reshape_divide_nd_xxx = &xnn_reshape_divide_nd_f32;
-            xnn_setup_divide_nd_xxx = &xnn_setup_divide_nd_f32;
+            datatype = xnn_datatype_fp32;
         }
         else
         {
-            xnn_create_divide_nd_xxx = &xnn_create_divide_nd_f16;
-            xnn_reshape_divide_nd_xxx = &xnn_reshape_divide_nd_f16;
-            xnn_setup_divide_nd_xxx = &xnn_setup_divide_nd_f16;
+            datatype = xnn_datatype_fp16;
         }
 
-        xnn_operator_t divide_op = nullptr;
-        xnn_status status = xnn_create_divide_nd_xxx(
-            -std::numeric_limits<float>::infinity() /* output min */, std::numeric_limits<float>::infinity() /* output max */,
+        xnn_status status = xnn_run_binary_elementwise_nd(
+            xnn_binary_divide /* type */,
+            datatype /* datatype */,
+            &input1_quantization /* input1_quantization */,
+            &input2_quantization /* input2_quantization */,
+            &output_quantization /* output_quantization */,
             0 /* flags */,
-            &divide_op);
-        if (status != xnn_status_success)
-            throw std::runtime_error("failed to create divide operation");
-
-        scope_guard __sg__([&divide_op]() {
-            xnn_status status = xnn_delete_operator(divide_op);
-            if (status != xnn_status_success)
-                throw std::runtime_error("failed to delete operator");
-            divide_op = nullptr;
-        });
-
-        status = xnn_reshape_divide_nd_xxx(
-            divide_op,
-            first_shape.size(), first_shape.data(), second_shape.size(), second_shape.data(),
+            first_shape.size() /* num_input1_dims */,
+            first_shape.data() /* input1_shape */,
+            second_shape.size() /* num_input2_dims */,
+            second_shape.data() /* input2_shape */,
+            first_data.data() /* input1 */,
+            second_data.data() /* input2 */,
+            output_data.data() /* output */,
             threadpool /* threadpool */);
         if (status != xnn_status_success)
-            throw std::runtime_error("failed to reshape divide operation");
-
-        status = xnn_setup_divide_nd_xxx(
-            divide_op,
-            first_data.data() /* a */, second_data.data() /* b */, output_data.data() /* output */);
-        if (status != xnn_status_success)
-            throw std::runtime_error("failed to setup divide operation");
-
-        status = xnn_run_operator(divide_op, threadpool /* thread pool */);
-        if (status != xnn_status_success)
-            throw std::runtime_error("failed to run divide operator");
+            throw std::runtime_error("failed to run binary elementwise operation");
 
         return std::pair<std::vector<size_t>, tensor_vector<T>>(
             std::move(output_shape), std::move(output_data));
