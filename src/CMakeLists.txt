@@ -22,17 +22,22 @@ if(NOT XNNPACK_SOURCE OR NOT XNNPACK_BINARY)
 		CMAKE_POLICY(SET CMP0135 NEW)
 		ENDIF()
 
+		set(XNNPACK_CMAKE_ARGS
+			-DCMAKE_BUILD_TYPE=Release
+			-DXNNPACK_BUILD_TESTS=OFF
+			-DXNNPACK_BUILD_BENCHMARKS=OFF
+			-DCMAKE_POSITION_INDEPENDENT_CODE=${OS_SHAREDLIB}
+			-DXNNPACK_LIBRARY_TYPE=static
+			-DCMAKE_TOOLCHAIN_FILE=${CMAKE_TOOLCHAIN_FILE}
+		)
+
 		include(ExternalProject)
 		ExternalProject_Add(xnnpack_build
 			URL https://github.com/google/XNNPACK/archive/f64bbdddff56cca640ade7a9770e70b471eb5630.zip
 			URL_HASH SHA256=745d8b73794cfe466064004f7ede01d9e9930774a392331d447727d11cd62e08
 			SOURCE_DIR "${XNNPACK_SOURCE}"
 			BINARY_DIR "${XNNPACK_BINARY}"
-			CMAKE_ARGS
-				-DCMAKE_BUILD_TYPE=Release
-				-DXNNPACK_BUILD_TESTS=OFF
-				-DXNNPACK_BUILD_BENCHMARKS=OFF
-				-DCMAKE_POSITION_INDEPENDENT_CODE=${OS_SHAREDLIB}
+			CMAKE_ARGS ${XNNPACK_CMAKE_ARGS}
 			INSTALL_COMMAND ""
 		)
 
@@ -98,6 +103,24 @@ if(UNIX) # includes APPLE and ANDROID (ie Termux)
 
 	if(MAX_SPEED)
 		target_compile_options(${ONNXSTREAM_PROJECT_NAME} PRIVATE -O3 -march=native)
+	endif()
+
+elseif(MINGW)
+
+	target_link_options(${ONNXSTREAM_PROJECT_NAME} PRIVATE -static)
+
+	target_include_directories(${ONNXSTREAM_PROJECT_NAME} PRIVATE "${XNNPACK_SOURCE}/include")
+	target_include_directories(${ONNXSTREAM_PROJECT_NAME} PRIVATE "${XNNPACK_BINARY}/pthreadpool-source/include")
+	target_include_directories(${ONNXSTREAM_PROJECT_NAME} PRIVATE "${XNNPACK_BINARY}/cpuinfo-source/include")
+	target_link_libraries(${ONNXSTREAM_PROJECT_NAME} PUBLIC "${XNNPACK_BINARY}/libXNNPACK.a")
+	target_link_libraries(${ONNXSTREAM_PROJECT_NAME} PUBLIC "${XNNPACK_BINARY}/libmicrokernels-prod.a")
+	target_link_libraries(${ONNXSTREAM_PROJECT_NAME} PUBLIC "${XNNPACK_BINARY}/libmicrokernels-all.a")
+	target_link_libraries(${ONNXSTREAM_PROJECT_NAME} PRIVATE "${XNNPACK_BINARY}/pthreadpool/libpthreadpool.a")
+	target_link_libraries(${ONNXSTREAM_PROJECT_NAME} PRIVATE "${XNNPACK_BINARY}/cpuinfo/libcpuinfo.a")
+
+	if(MAX_SPEED)
+		target_compile_options(${ONNXSTREAM_PROJECT_NAME} PRIVATE -O3 -march=native)
+		message(STATUS "=== WARNING === MinGW binary compiled with -march=native.")
 	endif()
 
 elseif(WIN32)
