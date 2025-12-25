@@ -1830,7 +1830,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                         for (; x_ptr < x_ptr_end; x_ptr++)
                         {
                             // First half-step
-                            *x2_ptr = std::exp(-s) / std::exp(-t) * *x_ptr - (std::exp(-h * 0.5f) - 1.f) * *d_ptr;
+                            *x2_ptr = std::exp(-s) / std::exp(-t) * *x_ptr - std::expm1(-h * 0.5f) * *d_ptr;
                             d_ptr++;
                             x2_ptr++;
                         }
@@ -1844,7 +1844,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                         for (; x_ptr < x_ptr_end; x_ptr++)
                         {
                             // Second half-step
-                            *x_ptr = (std::exp(-t_next) / std::exp(-t)) * *x_ptr - (std::exp(-h) - 1) * *d_ptr;
+                            *x_ptr = (std::exp(-t_next) / std::exp(-t)) * *x_ptr - std::expm1(-h) * *d_ptr;
                             d_ptr++;
                         }
                     }
@@ -1938,7 +1938,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                 if (!i || !si1) {
                     if (!i) old_denoised = ncnn::Mat(x_mat.w, x_mat.h, x_mat.c, x_mat.v.data());
                     float a = si1 / sigma[i];
-                    float b = std::exp(std::log(si1) - std::log(sigma[i])) - 1.f;
+                    float b = std::expm1(std::log(si1) - std::log(sigma[i]));
                     for (int c = 0; c < 4; c++)
                     {
                         float* x_ptr = x_mat.channel(c);
@@ -1956,7 +1956,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                     float t_next  = -std::log(si1);
                     float h       = t_next - t;
                     float a       = si1 / sigma[i];
-                    float b       = std::exp(-h) - 1.f;
+                    float b       = std::expm1(-h);
                     float h_last  = t + std::log(sigma[i - 1]);
                     float r       = h_last / h;
                     for (int c = 0; c < 4; c++)
@@ -2053,29 +2053,29 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                                 h_1       = std::log(sigma[i - 1]) - std::log(si0),
                                 h_2       = std::log(sigma[i - 2]) - std::log(sm1),
                                 h_eta = h * (eta + 1);
-                            *x_ptr = std::exp(-h_eta) * *x_ptr - (std::exp(-h_eta) - 1) * d;
+                            *x_ptr = std::exp(-h_eta) * *x_ptr - std::expm1(-h_eta) * d;
                             const float r = h_1 / h,
                                 r2 = h_2 / h,
                                 d1_0 = (d - *b1_ptr) / r,
                                 d1_1 = (*b1_ptr - *b2_ptr) / r2,
                                 d1 = d1_0 + (d1_0 - d1_1) * r / (r + r2),
                                 d2 = (d1_0 - d1_1) / (r + r2),
-                                phi_2 = (std::exp(-h_eta) - 1) / h_eta + 1,
+                                phi_2 = std::expm1(-h_eta) / h_eta + 1,
                                 phi_3 = phi_2 / h_eta - 0.5f;
                             *x_ptr += phi_2 * d1 - phi_3 * d2;
                         } else if (i) {
                             const float h = std::log(sigma[i])     - std::log(si1),
                                 h_1       = std::log(sigma[i - 1]) - std::log(si0),
                                 h_eta = h * (eta + 1);
-                            *x_ptr = std::exp(-h_eta) * *x_ptr - (std::exp(-h_eta) - 1) * d;
+                            *x_ptr = std::exp(-h_eta) * *x_ptr - std::expm1(-h_eta) * d;
                             const float r = h_1 / h,
-                                phi_2 = (std::exp(-h_eta) - 1) / h_eta + 1,
+                                phi_2 = std::expm1(-h_eta) / h_eta + 1,
                                 d1 = (d - *b1_ptr) / r;
                             *x_ptr += phi_2 * d1;
                         } else {
                             const float h = std::log(sigma[i]) - std::log(si1),
                                 h_eta = h * (eta + 1);
-                            *x_ptr = std::exp(-h_eta) * *x_ptr - (std::exp(-h_eta) - 1) * d;
+                            *x_ptr = std::exp(-h_eta) * *x_ptr - std::expm1(-h_eta) * d;
                         }
                         d_ptr++; b0_ptr++; b1_ptr++; b2_ptr++;
                     }
@@ -2155,7 +2155,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                 if (!i || !si1) {
                     if (!i) old_denoised = ncnn::Mat(x_mat.w, x_mat.h, x_mat.c, x_mat.v.data());
                     float a = si1 / sigma[i];
-                    float b = std::exp(std::log(si1) - std::log(sigma[i])) - 1.f;
+                    float b = std::expm1(std::log(si1) - std::log(sigma[i]));
                     for (int c = 0; c < 4; c++)
                     {
                         float* x_ptr = x_mat.channel(c);
@@ -2178,7 +2178,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                     float h_max   = std::max(h_last, h);
                     float r       = h_max / h_min;
                     float h_d    = (h_max + h_min) / 2.f;
-                    float b      = std::exp(-h_d) - 1.f;
+                    float b      = std::expm1(-h_d);
                     for (int c = 0; c < 4; c++)
                     {
                         float* x_ptr = x_mat.channel(c);
