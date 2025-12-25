@@ -1539,7 +1539,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
         case HEUN: { // 2 buffers
             for (int k = 0; k < 2; k++) sampler_history_buffer.push_back(ncnn::Mat(x_mat.w, x_mat.h, x_mat.c));
         } break;
-        case DPMPP2S: { // 1 buffer
+        case DPMPP2S: case DPMPP2S_A: { // 1 buffer
             sampler_history_buffer.push_back(ncnn::Mat(x_mat.w, x_mat.h, x_mat.c));
         } break;
         default: {}
@@ -1752,24 +1752,14 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
 #if       ORIGINAL_SAMPLER_ALGORITHMS
                 const float sigma_up = std::min(sigma[i + 1], std::sqrt(sigma[i + 1] * sigma[i + 1] * (sigma[i] * sigma[i] - sigma[i + 1] * sigma[i + 1]) / (sigma[i] * sigma[i])));
                 const float sigma_down = std::sqrt(sigma[i + 1] * sigma[i + 1] - sigma_up * sigma_up);
-
-                if (!i) // array x2 in Stable Diffusion.cpp
-                    old_denoised = ncnn::Mat(x_mat.w, x_mat.h, x_mat.c, x_mat.v.data());
-                if (!sigma_down) {
-                    // Euler step
-                    float dt = sigma_down - sigma[i];
+                if (!sigma_down) { // pass
                     for (int c = 0; c < 4; c++)
                     {
                         ONNXSTREAM_SD_INIT_X_PTR_INPUT_AND_D_PTR_DENOISED_POINTERS;
                         for (; x_ptr < x_ptr_end; x_ptr++)
-                        {
-                            float d = (*x_ptr - *d_ptr) / sigma[i];
-                            *x_ptr = *x_ptr + d * dt;
-                            d_ptr++;
-                        }
+                            *x_ptr = *d_ptr++;
                     }
-                } else {
-                    // DPM-Solver++(2S)
+                } else {   // DPM-Solver++(2S)
                     float t      = -std::log(sigma[i]);
                     float t_next = -std::log(sigma_down);
                     float h      = t_next - t;
@@ -1777,29 +1767,19 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                     for (int c = 0; c < 4; c++)
                     {
                         ONNXSTREAM_SD_INIT_X_PTR_INPUT_AND_D_PTR_DENOISED_POINTERS;
-                        float* x2_ptr = old_denoised.channel(c);
-                        for (; x_ptr < x_ptr_end; x_ptr++)
-                        {
-                            // First half-step
-                            *x2_ptr = std::exp(-s) / std::exp(-t) * *x_ptr - std::expm1(-h * 0.5f) * *d_ptr;
-                            d_ptr++;
-                            x2_ptr++;
-                        }
+                        float* b0_ptr = sampler_history_buffer[0].channel(c);
+                        for (; x_ptr < x_ptr_end; x_ptr++)   // First half-step
+                            *b0_ptr++ = std::exp(-s) / std::exp(-t) * *x_ptr - std::expm1(-h * 0.5f) * *d_ptr++;
                     }
-                    denoised = CFGDenoiser_CompVisDenoiser(net, log_sigmas, old_denoised, sigma[i + 1], c, uc, sdxl_params, model);
+                    denoised = CFGDenoiser_CompVisDenoiser(net, log_sigmas, sampler_history_buffer[0], sigma[i + 1], c, uc, sdxl_params, model);
                     for (int c = 0; c < 4; c++)
                     {
                         ONNXSTREAM_SD_INIT_X_PTR_INPUT_AND_D_PTR_DENOISED_POINTERS;
-                        for (; x_ptr < x_ptr_end; x_ptr++)
-                        {
-                            // Second half-step
-                            *x_ptr = (std::exp(-t_next) / std::exp(-t)) * *x_ptr - std::expm1(-h) * *d_ptr;
-                            d_ptr++;
-                        }
+                        for (; x_ptr < x_ptr_end; x_ptr++)   // Second half-step
+                            *x_ptr = (std::exp(-t_next) / std::exp(-t)) * *x_ptr - std::expm1(-h) * *d_ptr++;
                     }
                 }
-                if (sigma[i + 1] > 0) {
-                    // Noise
+                if (sigma[i + 1] > 0) {                      // Noise
                     std::srand(seed++);
                     ncnn::Mat randn = randn_4_w_h(rand() % 1000, g_main_args.m_latw, g_main_args.m_lath);
 
@@ -1808,67 +1788,50 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                         float* x_ptr = x_mat.channel(c); const float* x_ptr_end = x_ptr + latent_length;
                         float* r_ptr = randn.channel(c);
                         for (; x_ptr < x_ptr_end; x_ptr++)
-                        {
-                            *x_ptr += *r_ptr * sigma_up;
-                            r_ptr++;
-                        }
+                            *x_ptr += *r_ptr++ * sigma_up;
                     }
                 }
-
 #else  // ORIGINAL_SAMPLER_ALGORITHMS
                 const float sigma_up = std::min(sigma[i + 1], 
                     std::sqrt((sigma[i] + sigma[i + 1]) * (sigma[i] - sigma[i + 1])) * std::abs(sigma[i + 1] / sigma[i]));
                 const float sigma_down = std::sqrt((sigma[i + 1] + sigma_up) * (sigma[i + 1] - sigma_up));
-
-                if (!i) // array x2 in Stable Diffusion.cpp
-                    old_denoised = ncnn::Mat(x_mat.w, x_mat.h, x_mat.c, x_mat.v.data());
-                if (!sigma_down) {
-                    x_mat = ncnn::Mat(denoised.w, denoised.h, denoised.c, denoised.v.data());
-                } else {
-                    // DPM-Solver++(2S)
+                if (!sigma_down) { // pass
+                    x_mat = denoised;
+                } else {   // DPM-Solver++(2S)
                     float a = sigma_down / sigma[i];
                     float b = std::sqrt(a);
                     for (int c = 0; c < 4; c++)
                     {
                         ONNXSTREAM_SD_INIT_X_PTR_INPUT_AND_D_PTR_DENOISED_POINTERS;
-                        float* x2_ptr = old_denoised.channel(c);
+                        float* b0_ptr = sampler_history_buffer[0].channel(c);
                         for (; x_ptr < x_ptr_end; x_ptr++)
-                        {
-                            // First half-step
-                            *x2_ptr = *d_ptr + b * (*x_ptr - *d_ptr);
+                        {   // First half-step
+                            *b0_ptr++ = *d_ptr + b * (*x_ptr - *d_ptr);
                             d_ptr++;
-                            x2_ptr++;
                         }
                     }
-                    denoised = CFGDenoiser_CompVisDenoiser(net, log_sigmas, old_denoised, sigma[i + 1], c, uc, sdxl_params, model);
+                    denoised = CFGDenoiser_CompVisDenoiser(net, log_sigmas, sampler_history_buffer[0], sigma[i + 1], c, uc, sdxl_params, model);
                     for (int c = 0; c < 4; c++)
                     {
                         ONNXSTREAM_SD_INIT_X_PTR_INPUT_AND_D_PTR_DENOISED_POINTERS;
                         for (; x_ptr < x_ptr_end; x_ptr++)
-                        {
-                            // Second half-step
+                        {   // Second half-step
                             *x_ptr = *d_ptr + a * (*x_ptr - *d_ptr);
                             d_ptr++;
                         }
                     }
                 }
-                if (sigma[i + 1] > 0) {
-                    // Noise
+                if (sigma[i + 1] > 0) {   // Noise
                     std::srand(seed++);
                     ncnn::Mat randn = randn_4_w_h(rand() % 1000, g_main_args.m_latw, g_main_args.m_lath);
-
                     for (int c = 0; c < 4; c++)
                     {
                         float* x_ptr = x_mat.channel(c); const float* x_ptr_end = x_ptr + latent_length;
                         float* r_ptr = randn.channel(c);
                         for (; x_ptr < x_ptr_end; x_ptr++)
-                        {
-                            *x_ptr += *r_ptr * sigma_up;
-                            r_ptr++;
-                        }
+                            *x_ptr += *r_ptr++ * sigma_up;
                     }
                 }
-
 #endif // ORIGINAL_SAMPLER_ALGORITHMS
                 break;
             } // dpm++2s_a
