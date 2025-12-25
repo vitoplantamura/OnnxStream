@@ -1522,28 +1522,23 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
         };
 
         sampler_type sampler = g_main_args.m_sampler;
-        ncnn::Mat old_denoised; // for DPM++ (2M) and 2-step samplers
-        ncnn::Mat old_d;        // for Heun
 
         // reserving memory for history elements
-        std::vector<ncnn::Mat> sampler_history_buffer;
+        unsigned number_of_buffers;
         switch (sampler) {
-        case IPNDM: case IPNDM_V: case IPNDM_VO: case LMS: { // 4 elements
-            for (int k = 0; k < 4; k++) sampler_history_buffer.push_back(ncnn::Mat(x_mat.w, x_mat.h, x_mat.c));
-        } break;
-        case TAYLOR3: case DPMPP3MSDE: case DPMPP3MSDE_A: { // 1 buffer + 2 history elements, initialized to x
-            sampler_history_buffer.push_back(ncnn::Mat(x_mat.w, x_mat.h, x_mat.c));
-            sampler_history_buffer.push_back(ncnn::Mat(x_mat.w, x_mat.h, x_mat.c, x_mat.v.data()));
-            sampler_history_buffer.push_back(ncnn::Mat(x_mat.w, x_mat.h, x_mat.c, x_mat.v.data()));
-        } break;
-        case HEUN: { // 2 buffers
-            for (int k = 0; k < 2; k++) sampler_history_buffer.push_back(ncnn::Mat(x_mat.w, x_mat.h, x_mat.c));
-        } break;
-        case DPMPP2S: case DPMPP2S_A: case DPMPP2M: case DPMPP2MV2: case DPM2: { // 1 buffer / history point
-            sampler_history_buffer.push_back(ncnn::Mat(x_mat.w, x_mat.h, x_mat.c));
-        } break;
-        default: {}
+        case IPNDM: case IPNDM_V: case IPNDM_VO: case LMS:
+            number_of_buffers = 4; break;
+        case TAYLOR3: case DPMPP3MSDE: case DPMPP3MSDE_A:
+            number_of_buffers = 3; break;
+        case HEUN:
+            number_of_buffers = 2; break;
+        case DPMPP2S: case DPMPP2S_A: case DPMPP2M: case DPMPP2MV2: case DPM2:
+            number_of_buffers = 1; break;
+        default:
+            number_of_buffers = 0;
         }
+        std::vector<ncnn::Mat> sampler_history_buffer;
+        for (unsigned k = 0; k < number_of_buffers; k++) sampler_history_buffer.push_back(ncnn::Mat(x_mat.w, x_mat.h, x_mat.c));
 
         float sampler_history_dt; // for Taylor3
 
