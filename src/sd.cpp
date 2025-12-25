@@ -2917,15 +2917,15 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
             // integrator is adapted from https://github.com/Windsander/ADI-Stable-Diffusion
             {
 #if       ORIGINAL_SAMPLER_ALGORITHMS
-                auto linear_multistep_coeff = [=](const int order, const int m, const int j) -> const float {
+                auto linear_multistep_coeff = [=](const int order, const int m, const int j) -> float {
                     auto fn = [=](const float tau) -> const float {
                         float prod = 1.f;
                         for (int k = 0; k < order; k++)
                             if (j != k) prod *= (tau - sigma[m - k]) / (sigma[m - j] - sigma[m - k]);
                         return prod;
                     };
-                    constexpr int n = 15360; // 1 x 2 x 3 x 4 x 5 x 128
-                    auto simpson_integral = [=](const float a, const float b) -> const float {
+                    constexpr int n = 30720; // 1 x 2 x 3 x 4 x 5 x 256
+                    auto simpson_integral = [=](const float a, const float b) -> float {
                         // Simpson integral
                         const float h = (b - a) / n;
                         float sum = fn(a) + fn(b);
@@ -2937,7 +2937,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                         }
                         return sum * h / 3.0f;
                     };
-                    auto simpson38_integral = [=](const float a, const float b) -> const float {
+                    auto simpson38_integral = [=](const float a, const float b) -> float {
                         // Simpson 3/8 integral
                         const float h = (b - a) / n;
                         float sum = 0.f;
@@ -2949,7 +2949,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                         }
                         return sum / 8.0f * h * 3.0f;
                     };
-                    auto boole_integral = [=](const float a, const float b) -> const float {
+                    auto boole_integral = [=](const float a, const float b) -> float {
                         // Boole integral
                         const float h = (b - a) / n;
                         float sum = 0.f;
@@ -2963,7 +2963,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                         }
                         return sum / 22.5f * h;
                     };
-                    auto gauss_integral = [=](const float a, const float b) -> const float {
+                    auto gauss_integral = [=](const float a, const float b) -> float {
                         // Gaussian 5 point integral, seems to have bias because of rounding errors
                         const float p[5] = { +std::sqrt((70.f + std::sqrt(1120.f)) / 126.f), // +-high
                                              -std::sqrt((70.f + std::sqrt(1120.f)) / 126.f),
@@ -2987,7 +2987,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                         }
                         return sum * h;
                     };
-                    auto gauss3_integral = [=](const float a, const float b) -> const float {
+                    auto gauss3_integral = [=](const float a, const float b) -> float {
                         // Gaussian 3 point integral
                         const float p0 = -std::sqrt(3.f / 5.f), p1 =  std::sqrt(3.f / 5.f),
                                     w0 = 5.f / 9.f, w1 = 8.f / 9.f,
@@ -2999,7 +2999,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                         }
                         return sum * h;
                     };
-                    auto trapezoidal_integral = [=](const float a, const float b) -> const float {
+                    auto trapezoidal_integral = [=](const float a, const float b) -> float {
                         // Trapezoidal integral
                         const float h = (b - a) / n;
                         float sum = (fn(a) + fn(b)) * .5f;
@@ -3008,7 +3008,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                         }
                         return sum * h;
                     };
-                    auto midpoint_integral = [=](const float a, const float b) -> const float {
+                    auto midpoint_integral = [=](const float a, const float b) -> float {
                         // Rectangle (Riemann) midpoint integral
                         const float dx = (b - a) / n;
                         float sum = 0.f;
@@ -3030,9 +3030,9 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                     //return (b + s3) / 2; // needs 120k divisions
                 };
 #else  // ORIGINAL_SAMPLER_ALGORITHMS
-                auto linear_multistep_coeff = [=](const int order, const int m, const int j) -> const float {
-                    // using Riemann middle integral with 128k samples
-                    constexpr int n = 131072;
+                auto linear_multistep_coeff = [=](const int order, const int m, const int j) -> float {
+                    // using Riemann middle integral with 256k samples
+                    constexpr int n = 262144;
                     const float a = sigma[m], dx = (sigma_reshaper(sigma[m + 1], m) - a) / n, s = sigma[m - j];
                     float sum = 0.f;
                     for (int h = 0; h < n; h++) {
