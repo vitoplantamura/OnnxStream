@@ -1539,7 +1539,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
         case HEUN: { // 2 buffers
             for (int k = 0; k < 2; k++) sampler_history_buffer.push_back(ncnn::Mat(x_mat.w, x_mat.h, x_mat.c));
         } break;
-        case DPMPP2S: case DPMPP2S_A: case DPMPP2M: { // 1 buffer
+        case DPMPP2S: case DPMPP2S_A: case DPMPP2M: case DPMPP2MV2: { // 1 buffer / history point
             sampler_history_buffer.push_back(ncnn::Mat(x_mat.w, x_mat.h, x_mat.c));
         } break;
         default: {}
@@ -2045,17 +2045,16 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                 const float si1 = sigma_reshaper_sharp(sigma[i + 1], i);
 #if       ORIGINAL_SAMPLER_ALGORITHMS
                 if (!i || !si1) {
-                    if (!i) old_denoised = ncnn::Mat(x_mat.w, x_mat.h, x_mat.c, x_mat.v.data());
                     float a = si1 / sigma[i];
                     float b = std::expm1(std::log(si1) - std::log(sigma[i]));
                     for (int c = 0; c < 4; c++)
                     {
                         ONNXSTREAM_SD_INIT_X_PTR_INPUT_AND_D_PTR_DENOISED_POINTERS;
-                        float* o_ptr = old_denoised.channel(c);
+                        float* b0_ptr = sampler_history_buffer[0].channel(c);
                         for (; x_ptr < x_ptr_end; x_ptr++)
                         {
                             *x_ptr = a * *x_ptr - b * *d_ptr;
-                            *o_ptr++ = *d_ptr++;
+                            *b0_ptr++ = *d_ptr++;
                         }
                     }
                 } else {
@@ -2072,30 +2071,28 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                     for (int c = 0; c < 4; c++)
                     {
                         ONNXSTREAM_SD_INIT_X_PTR_INPUT_AND_D_PTR_DENOISED_POINTERS;
-                        float* o_ptr = old_denoised.channel(c);
+                        float* b0_ptr = sampler_history_buffer[0].channel(c);
                         for (; x_ptr < x_ptr_end; x_ptr++)
                         {
                             float d = (1.f + 1.f / (2.f * r)) * *d_ptr 
-                                          - (1.f / (2.f * r)) * *o_ptr;
+                                          - (1.f / (2.f * r)) * *b0_ptr;
                             *x_ptr = a * *x_ptr - b * d;
-                            *o_ptr++ = *d_ptr++;
+                            *b0_ptr++ = *d_ptr++;
                         }
                     }
                 }
 #else  // ORIGINAL_SAMPLER_ALGORITHMS
                 // simplified
-                if (!i || !si1) {
-                    if (!i) old_denoised = ncnn::Mat(x_mat.w, x_mat.h, x_mat.c, x_mat.v.data());
-                    // Euler step
+                if (!i || !si1) { // Euler step
                     const float sigma_mul = si1 / sigma[i];
                     for (int c = 0; c < 4; c++)
                     {
                         ONNXSTREAM_SD_INIT_X_PTR_INPUT_AND_D_PTR_DENOISED_POINTERS;
-                        float* o_ptr = old_denoised.channel(c);
+                        float* b0_ptr = sampler_history_buffer[0].channel(c);
                         for (; x_ptr < x_ptr_end; x_ptr++)
                         {
                             *x_ptr = (*x_ptr - *d_ptr) * sigma_mul + *d_ptr;
-                            *o_ptr++ = *d_ptr++;
+                            *b0_ptr++ = *d_ptr++;
                         }
                     }
                 } else {
@@ -2110,11 +2107,11 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                     for (int c = 0; c < 4; c++)
                     {
                         ONNXSTREAM_SD_INIT_X_PTR_INPUT_AND_D_PTR_DENOISED_POINTERS;
-                        float* o_ptr = old_denoised.channel(c);
+                        float* b0_ptr = sampler_history_buffer[0].channel(c);
                         for (; x_ptr < x_ptr_end; x_ptr++)
                         {
-                            *x_ptr = a * *x_ptr + *d_ptr * m + *o_ptr * r;
-                            *o_ptr++ = *d_ptr++;
+                            *x_ptr = a * *x_ptr + *d_ptr * m + *b0_ptr * r;
+                            *b0_ptr++ = *d_ptr++;
                         }
                     }
                 }
