@@ -1557,8 +1557,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                 if (i == 0) {
                     for (int c = 0; c < 4; c++)
                     {
-                        float* x_ptr = x_mat.channel(c);
-                        const float* x_ptr_end = x_ptr + latent_length;
+                        float* x_ptr = x_mat.channel(c); const float* x_ptr_end = x_ptr + latent_length;
                         for (; x_ptr < x_ptr_end; x_ptr++)
                         {
                             *x_ptr *= std::sqrt(sigma[i] * sigma[i] + 1) / sigma[i];
@@ -1570,8 +1569,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                         scale = std::pow(scale, 0.9925f - 2.5f / steps / steps); // to avoid oversharpening
                     for (int c = 0; c < 4; c++)
                     {
-                        float* x_ptr = x_mat.channel(c);
-                        const float* x_ptr_end = x_ptr + latent_length;
+                        float* x_ptr = x_mat.channel(c); const float* x_ptr_end = x_ptr + latent_length;
                         for (; x_ptr < x_ptr_end; x_ptr++)
                         {
                             *x_ptr *= scale;
@@ -1597,6 +1595,12 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
             ncnn::Mat denoised = CFGDenoiser_CompVisDenoiser(net, log_sigmas, x_mat, sigma[i], c, uc, sdxl_params, model);
 
 #define ORIGINAL_SAMPLER_ALGORITHMS 1
+
+#define ONNXSTREAM_SD_INIT_X_PTR_INPUT_AND_D_PTR_DENOISED_POINTERS \
+            float* x_ptr = x_mat.channel(c);                       \
+            const float* x_ptr_end = x_ptr + latent_length;        \
+            float* d_ptr = denoised.channel(c);
+
             switch (sampler) {
             case EULER: // Euler
             // adapted from https://github.com/leejet/stable-diffusion.cpp
@@ -1605,9 +1609,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
 #if       ORIGINAL_SAMPLER_ALGORITHMS
                 for (int c = 0; c < 4; c++)
                 {
-                    float* x_ptr = x_mat.channel(c);
-                    const float* x_ptr_end = x_ptr + latent_length;
-                    float* d_ptr = denoised.channel(c);
+                    ONNXSTREAM_SD_INIT_X_PTR_INPUT_AND_D_PTR_DENOISED_POINTERS;
                     for (; x_ptr < x_ptr_end; x_ptr++)
                     {
                         *x_ptr = *x_ptr + (*x_ptr - *d_ptr) / sigma[i] * (si1 - sigma[i]);
@@ -1619,9 +1621,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                 const float sigma_mul = si1 / sigma[i];
                 for (int c = 0; c < 4; c++)
                 {
-                    float* x_ptr = x_mat.channel(c);
-                    const float* x_ptr_end = x_ptr + latent_length;
-                    float* d_ptr = denoised.channel(c);
+                    ONNXSTREAM_SD_INIT_X_PTR_INPUT_AND_D_PTR_DENOISED_POINTERS;
                     for (; x_ptr < x_ptr_end; x_ptr++)
                     {
                         *x_ptr = (*x_ptr - *d_ptr) * sigma_mul + *d_ptr;
@@ -1646,9 +1646,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                     // Euler
                     for (int c = 0; c < 4; c++)
                     {
-                        float* x_ptr = x_mat.channel(c);
-                        const float* x_ptr_end = x_ptr + latent_length;
-                        float* d_ptr = denoised.channel(c);
+                        ONNXSTREAM_SD_INIT_X_PTR_INPUT_AND_D_PTR_DENOISED_POINTERS;
                         for (; x_ptr < x_ptr_end; x_ptr++)
                         {
                             *x_ptr = *x_ptr + (*x_ptr - *d_ptr) / sigma[i] * dt;
@@ -1658,10 +1656,8 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                 } else {
                     for (int c = 0; c < 4; c++)
                     {
-                        float* x_ptr = x_mat.channel(c);
-                        const float* x_ptr_end = x_ptr + latent_length;
+                        ONNXSTREAM_SD_INIT_X_PTR_INPUT_AND_D_PTR_DENOISED_POINTERS;
                         float* x2_ptr = old_denoised.channel(c);
-                        float* d_ptr = denoised.channel(c);
                         float* od_ptr = old_d.channel(c);
                         for (; x_ptr < x_ptr_end; x_ptr++)
                         {
@@ -1676,10 +1672,8 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                     denoised = CFGDenoiser_CompVisDenoiser(net, log_sigmas, old_denoised, si1, c, uc, sdxl_params, model);
                     for (int c = 0; c < 4; c++)
                     {
-                        float* x_ptr = x_mat.channel(c);
-                        const float* x_ptr_end = x_ptr + latent_length;
+                        ONNXSTREAM_SD_INIT_X_PTR_INPUT_AND_D_PTR_DENOISED_POINTERS;
                         float* x2_ptr = old_denoised.channel(c);
-                        float* d_ptr = denoised.channel(c);
                         float* od_ptr = old_d.channel(c);
                         for (; x_ptr < x_ptr_end; x_ptr++)
                         {
@@ -1698,9 +1692,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                     // Euler
                     for (int c = 0; c < 4; c++)
                     {
-                        float* x_ptr = x_mat.channel(c);
-                        const float* x_ptr_end = x_ptr + latent_length;
-                        float* d_ptr = denoised.channel(c);
+                        ONNXSTREAM_SD_INIT_X_PTR_INPUT_AND_D_PTR_DENOISED_POINTERS;
                         for (; x_ptr < x_ptr_end; x_ptr++)
                         {
                             *x_ptr = (*x_ptr - *d_ptr) * sigma_mul + *d_ptr;
@@ -1711,10 +1703,8 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                     const float sigma_mul = si1 / sigma[i];
                     for (int c = 0; c < 4; c++)
                     {
-                        float* x_ptr = x_mat.channel(c);
-                        const float* x_ptr_end = x_ptr + latent_length;
+                        ONNXSTREAM_SD_INIT_X_PTR_INPUT_AND_D_PTR_DENOISED_POINTERS;
                         float* x2_ptr = old_denoised.channel(c);
-                        float* d_ptr = denoised.channel(c);
                         float* od_ptr = old_d.channel(c);
                         for (; x_ptr < x_ptr_end; x_ptr++)
                         {
@@ -1731,10 +1721,8 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                     const float sigma_inv = sigma_d / si1;
                     for (int c = 0; c < 4; c++)
                     {
-                        float* x_ptr = x_mat.channel(c);
-                        const float* x_ptr_end = x_ptr + latent_length;
+                        ONNXSTREAM_SD_INIT_X_PTR_INPUT_AND_D_PTR_DENOISED_POINTERS;
                         float* x2_ptr = old_denoised.channel(c);
-                        float* d_ptr = denoised.channel(c);
                         float* od_ptr = old_d.channel(c);
                         for (; x_ptr < x_ptr_end; x_ptr++)
                         {
@@ -1762,10 +1750,8 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                     float b = std::sqrt(a);
                     for (int c = 0; c < 4; c++)
                     {
-                        float* x_ptr = x_mat.channel(c);
-                        const float* x_ptr_end = x_ptr + latent_length;
+                        ONNXSTREAM_SD_INIT_X_PTR_INPUT_AND_D_PTR_DENOISED_POINTERS;
                         float* x2_ptr = old_denoised.channel(c);
-                        float* d_ptr = denoised.channel(c);
                         for (; x_ptr < x_ptr_end; x_ptr++)
                         {
                             // First half-step
@@ -1777,9 +1763,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                     denoised = CFGDenoiser_CompVisDenoiser(net, log_sigmas, old_denoised, sigma[i + 1], c, uc, sdxl_params, model);
                     for (int c = 0; c < 4; c++)
                     {
-                        float* x_ptr = x_mat.channel(c);
-                        const float* x_ptr_end = x_ptr + latent_length;
-                        float* d_ptr = denoised.channel(c);
+                        ONNXSTREAM_SD_INIT_X_PTR_INPUT_AND_D_PTR_DENOISED_POINTERS;
                         for (; x_ptr < x_ptr_end; x_ptr++)
                         {
                             // Second half-step
@@ -1805,9 +1789,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                     float dt = sigma_down - sigma[i];
                     for (int c = 0; c < 4; c++)
                     {
-                        float* x_ptr = x_mat.channel(c);
-                        const float* x_ptr_end = x_ptr + latent_length;
-                        float* d_ptr = denoised.channel(c);
+                        ONNXSTREAM_SD_INIT_X_PTR_INPUT_AND_D_PTR_DENOISED_POINTERS;
                         for (; x_ptr < x_ptr_end; x_ptr++)
                         {
                             float d = (*x_ptr - *d_ptr) / sigma[i];
@@ -1823,10 +1805,8 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                     float s      = t + 0.5f * h;
                     for (int c = 0; c < 4; c++)
                     {
-                        float* x_ptr = x_mat.channel(c);
-                        const float* x_ptr_end = x_ptr + latent_length;
+                        ONNXSTREAM_SD_INIT_X_PTR_INPUT_AND_D_PTR_DENOISED_POINTERS;
                         float* x2_ptr = old_denoised.channel(c);
-                        float* d_ptr = denoised.channel(c);
                         for (; x_ptr < x_ptr_end; x_ptr++)
                         {
                             // First half-step
@@ -1838,9 +1818,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                     denoised = CFGDenoiser_CompVisDenoiser(net, log_sigmas, old_denoised, sigma[i + 1], c, uc, sdxl_params, model);
                     for (int c = 0; c < 4; c++)
                     {
-                        float* x_ptr = x_mat.channel(c);
-                        const float* x_ptr_end = x_ptr + latent_length;
-                        float* d_ptr = denoised.channel(c);
+                        ONNXSTREAM_SD_INIT_X_PTR_INPUT_AND_D_PTR_DENOISED_POINTERS;
                         for (; x_ptr < x_ptr_end; x_ptr++)
                         {
                             // Second half-step
@@ -1856,8 +1834,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
 
                     for (int c = 0; c < 4; c++)
                     {
-                        float* x_ptr = x_mat.channel(c);
-                        const float* x_ptr_end = x_ptr + latent_length;
+                        float* x_ptr = x_mat.channel(c); const float* x_ptr_end = x_ptr + latent_length;
                         float* r_ptr = randn.channel(c);
                         for (; x_ptr < x_ptr_end; x_ptr++)
                         {
@@ -1882,10 +1859,8 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                     float b = std::sqrt(a);
                     for (int c = 0; c < 4; c++)
                     {
-                        float* x_ptr = x_mat.channel(c);
-                        const float* x_ptr_end = x_ptr + latent_length;
+                        ONNXSTREAM_SD_INIT_X_PTR_INPUT_AND_D_PTR_DENOISED_POINTERS;
                         float* x2_ptr = old_denoised.channel(c);
-                        float* d_ptr = denoised.channel(c);
                         for (; x_ptr < x_ptr_end; x_ptr++)
                         {
                             // First half-step
@@ -1897,9 +1872,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                     denoised = CFGDenoiser_CompVisDenoiser(net, log_sigmas, old_denoised, sigma[i + 1], c, uc, sdxl_params, model);
                     for (int c = 0; c < 4; c++)
                     {
-                        float* x_ptr = x_mat.channel(c);
-                        const float* x_ptr_end = x_ptr + latent_length;
-                        float* d_ptr = denoised.channel(c);
+                        ONNXSTREAM_SD_INIT_X_PTR_INPUT_AND_D_PTR_DENOISED_POINTERS;
                         for (; x_ptr < x_ptr_end; x_ptr++)
                         {
                             // Second half-step
@@ -1915,8 +1888,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
 
                     for (int c = 0; c < 4; c++)
                     {
-                        float* x_ptr = x_mat.channel(c);
-                        const float* x_ptr_end = x_ptr + latent_length;
+                        float* x_ptr = x_mat.channel(c); const float* x_ptr_end = x_ptr + latent_length;
                         float* r_ptr = randn.channel(c);
                         for (; x_ptr < x_ptr_end; x_ptr++)
                         {
@@ -1941,9 +1913,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                     float b = std::expm1(std::log(si1) - std::log(sigma[i]));
                     for (int c = 0; c < 4; c++)
                     {
-                        float* x_ptr = x_mat.channel(c);
-                        const float* x_ptr_end = x_ptr + latent_length;
-                        float* d_ptr = denoised.channel(c);
+                        ONNXSTREAM_SD_INIT_X_PTR_INPUT_AND_D_PTR_DENOISED_POINTERS;
                         float* o_ptr = old_denoised.channel(c);
                         for (; x_ptr < x_ptr_end; x_ptr++)
                         {
@@ -1961,9 +1931,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                     float r       = h_last / h;
                     for (int c = 0; c < 4; c++)
                     {
-                        float* x_ptr = x_mat.channel(c);
-                        const float* x_ptr_end = x_ptr + latent_length;
-                        float* d_ptr = denoised.channel(c);
+                        ONNXSTREAM_SD_INIT_X_PTR_INPUT_AND_D_PTR_DENOISED_POINTERS;
                         float* o_ptr = old_denoised.channel(c);
                         for (; x_ptr < x_ptr_end; x_ptr++)
                         {
@@ -1982,9 +1950,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                     // Euler step
                     for (int c = 0; c < 4; c++)
                     {
-                        float* x_ptr = x_mat.channel(c);
-                        const float* x_ptr_end = x_ptr + latent_length;
-                        float* d_ptr = denoised.channel(c);
+                        ONNXSTREAM_SD_INIT_X_PTR_INPUT_AND_D_PTR_DENOISED_POINTERS;
                         float* o_ptr = old_denoised.channel(c);
                         for (; x_ptr < x_ptr_end; x_ptr++)
                         {
@@ -1999,9 +1965,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
 
                     for (int c = 0; c < 4; c++)
                     {
-                        float* x_ptr = x_mat.channel(c);
-                        const float* x_ptr_end = x_ptr + latent_length;
-                        float* d_ptr = denoised.channel(c);
+                        ONNXSTREAM_SD_INIT_X_PTR_INPUT_AND_D_PTR_DENOISED_POINTERS;
                         float* o_ptr = old_denoised.channel(c);
                         for (; x_ptr < x_ptr_end; x_ptr++)
                         {
@@ -2038,8 +2002,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
 
                 for (int c = 0; c < 4; c++)
                 {
-                    float* x_ptr = x_mat.channel(c); const float* x_ptr_end = x_ptr + latent_length;
-                    float* d_ptr = denoised.channel(c);
+                    ONNXSTREAM_SD_INIT_X_PTR_INPUT_AND_D_PTR_DENOISED_POINTERS;
                     float *b0_ptr = sampler_history_buffer[0].channel(c),
                           *b1_ptr = sampler_history_buffer[1].channel(c),
                           *b2_ptr = sampler_history_buffer[2].channel(c);
@@ -2113,8 +2076,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
 
                 for (int c = 0; c < 4; c++)
                 {
-                    float* x_ptr = x_mat.channel(c); const float* x_ptr_end = x_ptr + latent_length;
-                    float* d_ptr = denoised.channel(c);
+                    ONNXSTREAM_SD_INIT_X_PTR_INPUT_AND_D_PTR_DENOISED_POINTERS;
                     float *b0_ptr = sampler_history_buffer[0].channel(c),
                           *b1_ptr = sampler_history_buffer[1].channel(c),
                           *b2_ptr = sampler_history_buffer[2].channel(c);
@@ -2158,9 +2120,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                     float b = std::expm1(std::log(si1) - std::log(sigma[i]));
                     for (int c = 0; c < 4; c++)
                     {
-                        float* x_ptr = x_mat.channel(c);
-                        const float* x_ptr_end = x_ptr + latent_length;
-                        float* d_ptr = denoised.channel(c);
+                        ONNXSTREAM_SD_INIT_X_PTR_INPUT_AND_D_PTR_DENOISED_POINTERS;
                         float* o_ptr = old_denoised.channel(c);
                         for (; x_ptr < x_ptr_end; x_ptr++)
                         {
@@ -2181,9 +2141,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                     float b      = std::expm1(-h_d);
                     for (int c = 0; c < 4; c++)
                     {
-                        float* x_ptr = x_mat.channel(c);
-                        const float* x_ptr_end = x_ptr + latent_length;
-                        float* d_ptr = denoised.channel(c);
+                        ONNXSTREAM_SD_INIT_X_PTR_INPUT_AND_D_PTR_DENOISED_POINTERS;
                         float* o_ptr = old_denoised.channel(c);
                         for (; x_ptr < x_ptr_end; x_ptr++)
                         {
@@ -2202,9 +2160,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                     const float sigma_mul = si1 / sigma[i];
                     for (int c = 0; c < 4; c++)
                     {
-                        float* x_ptr = x_mat.channel(c);
-                        const float* x_ptr_end = x_ptr + latent_length;
-                        float* d_ptr = denoised.channel(c);
+                        ONNXSTREAM_SD_INIT_X_PTR_INPUT_AND_D_PTR_DENOISED_POINTERS;
                         float* o_ptr = old_denoised.channel(c);
                         for (; x_ptr < x_ptr_end; x_ptr++)
                         {
@@ -2223,9 +2179,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                     m -= r;
                     for (int c = 0; c < 4; c++)
                     {
-                        float* x_ptr = x_mat.channel(c);
-                        const float* x_ptr_end = x_ptr + latent_length;
-                        float* d_ptr = denoised.channel(c);
+                        ONNXSTREAM_SD_INIT_X_PTR_INPUT_AND_D_PTR_DENOISED_POINTERS;
                         float* o_ptr = old_denoised.channel(c);
                         for (; x_ptr < x_ptr_end; x_ptr++)
                         {
@@ -2250,9 +2204,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                     float dt = si1 - sigma[i];
                     for (int c = 0; c < 4; c++)
                     {
-                        float* x_ptr = x_mat.channel(c);
-                        const float* x_ptr_end = x_ptr + latent_length;
-                        float* d_ptr = denoised.channel(c);
+                        ONNXSTREAM_SD_INIT_X_PTR_INPUT_AND_D_PTR_DENOISED_POINTERS;
                         for (; x_ptr < x_ptr_end; x_ptr++)
                         {
                             float d = (*x_ptr - *d_ptr) / sigma[i];
@@ -2267,10 +2219,8 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                     float dt_2      = si1 - sigma[i];
                     for (int c = 0; c < 4; c++)
                     {
-                        float* x_ptr = x_mat.channel(c);
-                        const float* x_ptr_end = x_ptr + latent_length;
+                        ONNXSTREAM_SD_INIT_X_PTR_INPUT_AND_D_PTR_DENOISED_POINTERS;
                         float* x2_ptr = old_denoised.channel(c);
-                        float* d_ptr = denoised.channel(c);
                         for (; x_ptr < x_ptr_end; x_ptr++)
                         {
                             float d = (*x_ptr - *d_ptr) / sigma[i];
@@ -2282,10 +2232,8 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                     denoised = CFGDenoiser_CompVisDenoiser(net, log_sigmas, old_denoised, sigma_mid, c, uc, sdxl_params, model);
                     for (int c = 0; c < 4; c++)
                     {
-                        float* x_ptr = x_mat.channel(c);
-                        const float* x_ptr_end = x_ptr + latent_length;
+                        ONNXSTREAM_SD_INIT_X_PTR_INPUT_AND_D_PTR_DENOISED_POINTERS;
                         float* x2_ptr = old_denoised.channel(c);
-                        float* d_ptr = denoised.channel(c);
                         for (; x_ptr < x_ptr_end; x_ptr++)
                         {
                             float d2 = (*x2_ptr - *d_ptr) / sigma_mid;
@@ -2301,9 +2249,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                     float dt = si1 / sigma[i] - 1.f;
                     for (int c = 0; c < 4; c++)
                     {
-                        float* x_ptr = x_mat.channel(c);
-                        const float* x_ptr_end = x_ptr + latent_length;
-                        float* d_ptr = denoised.channel(c);
+                        ONNXSTREAM_SD_INIT_X_PTR_INPUT_AND_D_PTR_DENOISED_POINTERS;
                         for (; x_ptr < x_ptr_end; x_ptr++)
                         {
                             *x_ptr += (*x_ptr - *d_ptr) * dt;
@@ -2316,10 +2262,8 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                     float dt = sigma_mid / sigma[i] - 1.f;
                     for (int c = 0; c < 4; c++)
                     {
-                        float* x_ptr = x_mat.channel(c);
-                        const float* x_ptr_end = x_ptr + latent_length;
+                        ONNXSTREAM_SD_INIT_X_PTR_INPUT_AND_D_PTR_DENOISED_POINTERS;
                         float* x2_ptr = old_denoised.channel(c);
-                        float* d_ptr = denoised.channel(c);
                         for (; x_ptr < x_ptr_end; x_ptr++)
                         {
                             *x2_ptr = *x_ptr + (*x_ptr - *d_ptr) * dt;
@@ -2331,10 +2275,8 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                     dt = (si1 - sigma[i]) / sigma_mid;
                     for (int c = 0; c < 4; c++)
                     {
-                        float* x_ptr = x_mat.channel(c);
-                        const float* x_ptr_end = x_ptr + latent_length;
+                        ONNXSTREAM_SD_INIT_X_PTR_INPUT_AND_D_PTR_DENOISED_POINTERS;
                         float* x2_ptr = old_denoised.channel(c);
-                        float* d_ptr = denoised.channel(c);
                         for (; x_ptr < x_ptr_end; x_ptr++)
                         {
                             *x_ptr += (*x2_ptr - *d_ptr) * dt;
@@ -2358,9 +2300,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
 
                 for (int c = 0; c < 4; c++)
                 {
-                    float* x_ptr = x_mat.channel(c);
-                    const float* x_ptr_end = x_ptr + latent_length;
-                    float* d_ptr = denoised.channel(c);
+                    ONNXSTREAM_SD_INIT_X_PTR_INPUT_AND_D_PTR_DENOISED_POINTERS;
                     float *b0_ptr = sampler_history_buffer[0].channel(c),
                           *b1_ptr = sampler_history_buffer[1].channel(c),
                           *b2_ptr = sampler_history_buffer[2].channel(c),
@@ -2398,9 +2338,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
 
                 for (int c = 0; c < 4; c++)
                 {
-                    float* x_ptr = x_mat.channel(c);
-                    const float* x_ptr_end = x_ptr + latent_length;
-                    float* d_ptr = denoised.channel(c);
+                    ONNXSTREAM_SD_INIT_X_PTR_INPUT_AND_D_PTR_DENOISED_POINTERS;
                     float *b0_ptr = sampler_history_buffer[0].channel(c),
                           *b1_ptr = sampler_history_buffer[1].channel(c),
                           *b2_ptr = sampler_history_buffer[2].channel(c),
@@ -2440,9 +2378,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
 #if       ORIGINAL_SAMPLER_ALGORITHMS
                 for (int c = 0; c < 4; c++)
                 {
-                    float* x_ptr = x_mat.channel(c);
-                    const float* x_ptr_end = x_ptr + latent_length;
-                    float* d_ptr = denoised.channel(c);
+                    ONNXSTREAM_SD_INIT_X_PTR_INPUT_AND_D_PTR_DENOISED_POINTERS;
                     float *b0_ptr = sampler_history_buffer[0].channel(c),
                           *b1_ptr = sampler_history_buffer[1].channel(c),
                           *b2_ptr = sampler_history_buffer[2].channel(c),
@@ -2567,9 +2503,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
 
                 for (int c = 0; c < 4; c++)
                 {
-                    float* x_ptr = x_mat.channel(c);
-                    const float* x_ptr_end = x_ptr + latent_length;
-                    float* d_ptr = denoised.channel(c);
+                    ONNXSTREAM_SD_INIT_X_PTR_INPUT_AND_D_PTR_DENOISED_POINTERS;
                     float *b0_ptr = sampler_history_buffer[0].channel(c),
                           *b1_ptr = sampler_history_buffer[1].channel(c),
                           *b2_ptr = sampler_history_buffer[2].channel(c),
@@ -2624,9 +2558,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
 
                 for (int c = 0; c < 4; c++)
                 {
-                    float* x_ptr = x_mat.channel(c);
-                    const float* x_ptr_end = x_ptr + latent_length;
-                    float* d_ptr = denoised.channel(c);
+                    ONNXSTREAM_SD_INIT_X_PTR_INPUT_AND_D_PTR_DENOISED_POINTERS;
                     float *b0_ptr = sampler_history_buffer[0].channel(c),
                           *b1_ptr = sampler_history_buffer[1].channel(c),
                           *b2_ptr = sampler_history_buffer[2].channel(c);
@@ -2675,9 +2607,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
 
                 for (int c = 0; c < 4; c++)
                 {
-                    float* x_ptr = x_mat.channel(c);
-                    const float* x_ptr_end = x_ptr + latent_length;
-                    float* d_ptr = denoised.channel(c);
+                    ONNXSTREAM_SD_INIT_X_PTR_INPUT_AND_D_PTR_DENOISED_POINTERS;
                     float *b0_ptr = sampler_history_buffer[0].channel(c),
                           *b1_ptr = sampler_history_buffer[1].channel(c),
                           *b2_ptr = sampler_history_buffer[2].channel(c);
@@ -2727,9 +2657,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                 if (variance <= 0) {
                 for (int c = 0; c < 4; c++)
                 {
-                    float* x_ptr = x_mat.channel(c);
-                    const float* x_ptr_end = x_ptr + latent_length;
-                    float* d_ptr = denoised.channel(c);
+                    ONNXSTREAM_SD_INIT_X_PTR_INPUT_AND_D_PTR_DENOISED_POINTERS;
                     for (; x_ptr < x_ptr_end; x_ptr++)
                     {
                         *x_ptr = *x_ptr * a + *d_ptr++ * b;
@@ -2740,9 +2668,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                 ncnn::Mat randn = randn_4_w_h(rand() % 1000, g_main_args.m_latw, g_main_args.m_lath);
                 for (int c = 0; c < 4; c++)
                 {
-                    float* x_ptr = x_mat.channel(c);
-                    const float* x_ptr_end = x_ptr + latent_length;
-                    float* d_ptr = denoised.channel(c);
+                    ONNXSTREAM_SD_INIT_X_PTR_INPUT_AND_D_PTR_DENOISED_POINTERS;
                     float* r_ptr = randn.channel(c);
                     for (; x_ptr < x_ptr_end; x_ptr++)
                     {
@@ -2768,9 +2694,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                       b = std::sqrt(alpha_prod_t_prev) - a;
                 for (int c = 0; c < 4; c++)
                 {
-                    float* x_ptr = x_mat.channel(c);
-                    const float* x_ptr_end = x_ptr + latent_length;
-                    float* d_ptr = denoised.channel(c);
+                    ONNXSTREAM_SD_INIT_X_PTR_INPUT_AND_D_PTR_DENOISED_POINTERS;
                     for (; x_ptr < x_ptr_end; x_ptr++)
                     {
                         *x_ptr = *x_ptr * a + *d_ptr++ * b;
@@ -2797,9 +2721,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
 #if       ORIGINAL_SAMPLER_ALGORITHMS
                 for (int c = 0; c < 4; c++)
                 {
-                    float* x_ptr = x_mat.channel(c);
-                    const float* x_ptr_end = x_ptr + latent_length;
-                    float* d_ptr = denoised.channel(c);
+                    ONNXSTREAM_SD_INIT_X_PTR_INPUT_AND_D_PTR_DENOISED_POINTERS;
                     for (; x_ptr < x_ptr_end; x_ptr++)
                     {
                         const auto model_output = (autozero + *x_ptr - *d_ptr++) / sigma[i],
@@ -2818,9 +2740,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                     b = std::sqrt(alpha_prod_t_prev) - a;
                 for (int c = 0; c < 4; c++)
                 {
-                    float* x_ptr = x_mat.channel(c);
-                    const float* x_ptr_end = x_ptr + latent_length;
-                    float* d_ptr = denoised.channel(c);
+                    ONNXSTREAM_SD_INIT_X_PTR_INPUT_AND_D_PTR_DENOISED_POINTERS;
                     for (; x_ptr < x_ptr_end; x_ptr++)
                     {
                         *x_ptr = *x_ptr * a + *d_ptr++ * b;
@@ -2832,9 +2752,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                     ncnn::Mat randn = randn_4_w_h(rand() % 1000, g_main_args.m_latw, g_main_args.m_lath);
                     for (int c = 0; c < 4; c++)
                     {
-                        float* x_ptr = x_mat.channel(c);
-                        const float* x_ptr_end = x_ptr + latent_length;
-                        float* d_ptr = denoised.channel(c);
+                        ONNXSTREAM_SD_INIT_X_PTR_INPUT_AND_D_PTR_DENOISED_POINTERS;
                         float* r_ptr = randn.channel(c);
                         for (; x_ptr < x_ptr_end; x_ptr++)
                             *x_ptr += *r_ptr++ * std_dev_t;
@@ -2869,9 +2787,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                       beta_s  = 1 - alpha_s;
                 for (int c = 0; c < 4; c++)
                 {
-                    float* x_ptr = x_mat.channel(c);
-                    const float* x_ptr_end = x_ptr + latent_length;
-                    float* d_ptr = denoised.channel(c);
+                    ONNXSTREAM_SD_INIT_X_PTR_INPUT_AND_D_PTR_DENOISED_POINTERS;
                     for (; x_ptr < x_ptr_end; x_ptr++)
                     {
                         const auto model_output = (*x_ptr - *d_ptr++) / si;
@@ -2884,9 +2800,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                       bm = std::sqrt(alpha_s) - am; // (1 - si2 / si) * sqrt(alpha_s)
                 for (int c = 0; c < 4; c++)
                 {
-                    float* x_ptr = x_mat.channel(c);
-                    const float* x_ptr_end = x_ptr + latent_length;
-                    float* d_ptr = denoised.channel(c);
+                    ONNXSTREAM_SD_INIT_X_PTR_INPUT_AND_D_PTR_DENOISED_POINTERS;
                     for (; x_ptr < x_ptr_end; x_ptr++)
                     {
                         *x_ptr = *x_ptr * am + *d_ptr++ * bm;
@@ -2902,8 +2816,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                     autozero = si * 0, b = std::sqrt(std::max(autozero, 1 - alpha_n / alpha_s));
                     for (int c = 0; c < 4; c++)
                     {
-                        float* x_ptr = x_mat.channel(c);
-                        const float* x_ptr_end = x_ptr + latent_length;
+                        float* x_ptr = x_mat.channel(c); const float* x_ptr_end = x_ptr + latent_length;
                         float* r_ptr = randn.channel(c);
                         for (; x_ptr < x_ptr_end; x_ptr++)
                             *x_ptr = a * *x_ptr + b * *r_ptr++;
@@ -3061,9 +2974,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
 
                 for (int c = 0; c < 4; c++)
                 {
-                    float* x_ptr = x_mat.channel(c);
-                    const float* x_ptr_end = x_ptr + latent_length;
-                    float* d_ptr = denoised.channel(c);
+                    ONNXSTREAM_SD_INIT_X_PTR_INPUT_AND_D_PTR_DENOISED_POINTERS;
                     float *b0_ptr = sampler_history_buffer[0].channel(c),
                           *b1_ptr = sampler_history_buffer[1].channel(c),
                           *b2_ptr = sampler_history_buffer[2].channel(c),
@@ -3106,9 +3017,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                     ncnn::Mat randn = randn_4_w_h(rand() % 1000, g_main_args.m_latw, g_main_args.m_lath);
                     for (int c = 0; c < 4; c++)
                     {
-                        float* x_ptr = x_mat.channel(c);
-                        const float* x_ptr_end = x_ptr + latent_length;
-                        float* d_ptr = denoised.channel(c);
+                        ONNXSTREAM_SD_INIT_X_PTR_INPUT_AND_D_PTR_DENOISED_POINTERS;
                         float* r_ptr = randn.channel(c);
                         for (; x_ptr < x_ptr_end; x_ptr++)
                         {
@@ -3142,9 +3051,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
 #endif // !ORIGINAL_SAMPLER_ALGORITHMS
                 for (int c = 0; c < 4; c++)
                 {
-                    float* x_ptr = x_mat.channel(c);
-                    const float* x_ptr_end = x_ptr + latent_length;
-                    float* d_ptr = denoised.channel(c);
+                    ONNXSTREAM_SD_INIT_X_PTR_INPUT_AND_D_PTR_DENOISED_POINTERS;
                     float* r_ptr = randn.channel(c);
                     for (; x_ptr < x_ptr_end; x_ptr++)
                     {
