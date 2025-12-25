@@ -2927,39 +2927,49 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
 
             default: { // Euler Ancestral
 #if       ORIGINAL_SAMPLER_ALGORITHMS
-                const float sigma_up = std::min(sigma[i + 1], std::sqrt(sigma[i + 1] * sigma[i + 1] * (sigma[i] * sigma[i] - sigma[i + 1] * sigma[i + 1]) / (sigma[i] * sigma[i])));
-                const float sigma_down = std::sqrt(sigma[i + 1] * sigma[i + 1] - sigma_up * sigma_up);
+            // original copy
+            float sigma_up = std::min(sigma[i + 1], std::sqrt(sigma[i + 1] * sigma[i + 1] * (sigma[i] * sigma[i] - sigma[i + 1] * sigma[i + 1]) / (sigma[i] * sigma[i])));
+            float sigma_down = std::sqrt(sigma[i + 1] * sigma[i + 1] - sigma_up * sigma_up);
+            std::srand(seed++);
+            ncnn::Mat randn = randn_4_w_h(rand() % 1000, g_main_args.m_latw, g_main_args.m_lath);
+
+            for (int c = 0; c < 4; c++)
+            {
+                float* x_ptr = x_mat.channel(c);
+                float* d_ptr = denoised.channel(c);
+                float* r_ptr = randn.channel(c);
+
+                for (int hw = 0; hw < g_main_args.m_latw * g_main_args.m_lath; hw++)
+                {
+                    *x_ptr = *x_ptr + ((*x_ptr - *d_ptr) / sigma[i]) * (sigma_down - sigma[i]) + *r_ptr * sigma_up;
+                    x_ptr++;
+                    d_ptr++;
+                    r_ptr++;
+                }
+            }
 #else  // ORIGINAL_SAMPLER_ALGORITHMS
-                // double precision, simplified
                 const double double_sigma_up = std::min((double)sigma[i + 1], 
                     std::abs(sigma[i + 1] * 
                              std::sqrt(((double)sigma[i] * sigma[i] - (double)sigma[i + 1] * sigma[i + 1])) / 
                              sigma[i]));
                 const float sigma_down = std::sqrt((double)sigma[i + 1] * sigma[i + 1] - double_sigma_up * double_sigma_up);
                 const float sigma_up = double_sigma_up;
-#endif // ORIGINAL_SAMPLER_ALGORITHMS
                 std::srand(seed++);
                 ncnn::Mat randn = randn_4_w_h(rand() % 1000, g_main_args.m_latw, g_main_args.m_lath);
 
-#if       !ORIGINAL_SAMPLER_ALGORITHMS
                 const float sigma_mul = sigma_down / sigma[i];
-#endif // !ORIGINAL_SAMPLER_ALGORITHMS
                 for (int c = 0; c < 4; c++)
                 {
                     ONNXSTREAM_SD_INIT_X_PTR_INPUT_AND_D_PTR_DENOISED_POINTERS;
                     float* r_ptr = randn.channel(c);
                     for (; x_ptr < x_ptr_end; x_ptr++)
                     {
-#if       ORIGINAL_SAMPLER_ALGORITHMS
-                        *x_ptr = *x_ptr + ((*x_ptr - *d_ptr) / sigma[i]) * (sigma_down - sigma[i]) + *r_ptr * sigma_up;
-#else  // ORIGINAL_SAMPLER_ALGORITHMS
-                        // simplified
                         *x_ptr = (*x_ptr - *d_ptr) * sigma_mul + *d_ptr + *r_ptr * sigma_up;
-#endif // ORIGINAL_SAMPLER_ALGORITHMS
                         d_ptr++;
                         r_ptr++;
                     }
                 }
+#endif // ORIGINAL_SAMPLER_ALGORITHMS
                 //break; // if will not be default
             } // euler_a
             } // g_main_args.sampler
