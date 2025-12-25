@@ -2906,7 +2906,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
             {
                 float sigma_next = sigma[i + 1];
                 if (sigma_next <= 0) {
-                    x_mat = ncnn::Mat(denoised.w, denoised.h, denoised.c, denoised.v.data());
+                    x_mat = denoised;
                 } else {
                     std::srand(seed++);
                     ncnn::Mat randn = randn_4_w_h(rand() % 1000, g_main_args.m_latw, g_main_args.m_lath);
