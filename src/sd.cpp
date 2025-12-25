@@ -1539,7 +1539,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
         case HEUN: { // 2 buffers
             for (int k = 0; k < 2; k++) sampler_history_buffer.push_back(ncnn::Mat(x_mat.w, x_mat.h, x_mat.c));
         } break;
-        case DPMPP2S: case DPMPP2S_A: case DPMPP2M: case DPMPP2MV2: { // 1 buffer / history point
+        case DPMPP2S: case DPMPP2S_A: case DPMPP2M: case DPMPP2MV2: case DPM2: { // 1 buffer / history point
             sampler_history_buffer.push_back(ncnn::Mat(x_mat.w, x_mat.h, x_mat.c));
         } break;
         default: {}
@@ -2123,93 +2123,61 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
             // adapted from https://github.com/leejet/stable-diffusion.cpp
             {
                 const float si1 = sigma_reshaper(sigma[i + 1], i);
-                if (!i) // array x2 in Stable Diffusion.cpp
-                    old_denoised = ncnn::Mat(x_mat.w, x_mat.h, x_mat.c, x_mat.v.data());
 #if       ORIGINAL_SAMPLER_ALGORITHMS
-                if (!si1) {
-                    // Euler step
-                    float dt = si1 - sigma[i];
+                if (!si1) { // pass
                     for (int c = 0; c < 4; c++)
                     {
                         ONNXSTREAM_SD_INIT_X_PTR_INPUT_AND_D_PTR_DENOISED_POINTERS;
                         for (; x_ptr < x_ptr_end; x_ptr++)
-                        {
-                            float d = (*x_ptr - *d_ptr) / sigma[i];
-                            *x_ptr = *x_ptr + d * dt;
-                            d_ptr++;
-                        }
+                            *x_ptr = *d_ptr++;
                     }
-                } else {
-                    // DPM-Solver-2
+                } else { // DPM-Solver-2
                     float sigma_mid = std::exp(0.5f * (std::log(sigma[i]) + std::log(si1)));
                     float dt_1      = sigma_mid - sigma[i];
                     float dt_2      = si1 - sigma[i];
                     for (int c = 0; c < 4; c++)
                     {
                         ONNXSTREAM_SD_INIT_X_PTR_INPUT_AND_D_PTR_DENOISED_POINTERS;
-                        float* x2_ptr = old_denoised.channel(c);
+                        float* b0_ptr = sampler_history_buffer[0].channel(c);
                         for (; x_ptr < x_ptr_end; x_ptr++)
                         {
-                            float d = (*x_ptr - *d_ptr) / sigma[i];
-                            *x2_ptr = *x_ptr + d * dt_1;
-                            d_ptr++;
-                            x2_ptr++;
+                            float d = (*x_ptr - *d_ptr++) / sigma[i];
+                            *b0_ptr++ = *x_ptr + d * dt_1;
                         }
                     }
-                    denoised = CFGDenoiser_CompVisDenoiser(net, log_sigmas, old_denoised, sigma_mid, c, uc, sdxl_params, model);
+                    denoised = CFGDenoiser_CompVisDenoiser(net, log_sigmas, sampler_history_buffer[0], sigma_mid, c, uc, sdxl_params, model);
                     for (int c = 0; c < 4; c++)
                     {
                         ONNXSTREAM_SD_INIT_X_PTR_INPUT_AND_D_PTR_DENOISED_POINTERS;
-                        float* x2_ptr = old_denoised.channel(c);
+                        float* b0_ptr = sampler_history_buffer[0].channel(c);
                         for (; x_ptr < x_ptr_end; x_ptr++)
                         {
-                            float d2 = (*x2_ptr - *d_ptr) / sigma_mid;
-                            *x_ptr = *x_ptr + d2 * dt_2;
-                            d_ptr++;
-                            x2_ptr++;
+                            float d2 = (*b0_ptr++ - *d_ptr++) / sigma_mid;
+                            *x_ptr += d2 * dt_2;
                         }
                     }
                 }
 #else  // ORIGINAL_SAMPLER_ALGORITHMS
-                if (!si1) {
-                    // Euler step
-                    float dt = si1 / sigma[i] - 1.f;
-                    for (int c = 0; c < 4; c++)
-                    {
-                        ONNXSTREAM_SD_INIT_X_PTR_INPUT_AND_D_PTR_DENOISED_POINTERS;
-                        for (; x_ptr < x_ptr_end; x_ptr++)
-                        {
-                            *x_ptr += (*x_ptr - *d_ptr) * dt;
-                            d_ptr++;
-                        }
-                    }
-                } else {
-                    // DPM-Solver-2
+                if (!si1) { // pass
+                    x_mat = denoised;
+                } else { // DPM-Solver-2
                     float sigma_mid = std::sqrt(sigma[i] * si1);
                     float dt = sigma_mid / sigma[i] - 1.f;
                     for (int c = 0; c < 4; c++)
                     {
                         ONNXSTREAM_SD_INIT_X_PTR_INPUT_AND_D_PTR_DENOISED_POINTERS;
-                        float* x2_ptr = old_denoised.channel(c);
+                        float* b0_ptr = sampler_history_buffer[0].channel(c);
                         for (; x_ptr < x_ptr_end; x_ptr++)
-                        {
-                            *x2_ptr = *x_ptr + (*x_ptr - *d_ptr) * dt;
-                            d_ptr++;
-                            x2_ptr++;
-                        }
+                            *b0_ptr++ = *x_ptr + (*x_ptr - *d_ptr++) * dt;
                     }
-                    denoised = CFGDenoiser_CompVisDenoiser(net, log_sigmas, old_denoised, sigma_mid, c, uc, sdxl_params, model);
+                    denoised = CFGDenoiser_CompVisDenoiser(net, log_sigmas, sampler_history_buffer[0], sigma_mid, c, uc, sdxl_params, model);
                     dt = (si1 - sigma[i]) / sigma_mid;
                     for (int c = 0; c < 4; c++)
                     {
                         ONNXSTREAM_SD_INIT_X_PTR_INPUT_AND_D_PTR_DENOISED_POINTERS;
-                        float* x2_ptr = old_denoised.channel(c);
+                        float* b0_ptr = sampler_history_buffer[0].channel(c);
                         for (; x_ptr < x_ptr_end; x_ptr++)
-                        {
-                            *x_ptr += (*x2_ptr - *d_ptr) * dt;
-                            d_ptr++;
-                            x2_ptr++;
-                        }
+                            *x_ptr += (*b0_ptr++ - *d_ptr++) * dt;
                     }
                 }
 #endif // ORIGINAL_SAMPLER_ALGORITHMS
