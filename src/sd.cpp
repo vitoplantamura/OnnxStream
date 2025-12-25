@@ -1622,13 +1622,9 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
                 {
                     ONNXSTREAM_SD_INIT_X_PTR_INPUT_AND_D_PTR_DENOISED_POINTERS;
                     for (; x_ptr < x_ptr_end; x_ptr++)
-                    {
-                        *x_ptr = *x_ptr + (*x_ptr - *d_ptr) / sigma[i] * (si1 - sigma[i]);
-                        d_ptr++;
-                    }
+                        *x_ptr += (*x_ptr - *d_ptr++) / sigma[i] * (si1 - sigma[i]);
                 }
 #else  // ORIGINAL_SAMPLER_ALGORITHMS
-                // simplified
                 const float sigma_mul = si1 / sigma[i];
                 for (int c = 0; c < 4; c++)
                 {
