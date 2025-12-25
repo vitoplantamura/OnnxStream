@@ -1539,7 +1539,7 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
         case HEUN: { // 2 buffers
             for (int k = 0; k < 2; k++) sampler_history_buffer.push_back(ncnn::Mat(x_mat.w, x_mat.h, x_mat.c));
         } break;
-        case DPM2: { // 1 buffer
+        case DPMPP2S: { // 1 buffer
             sampler_history_buffer.push_back(ncnn::Mat(x_mat.w, x_mat.h, x_mat.c));
         } break;
         default: {}
@@ -1717,32 +1717,27 @@ inline static ncnn::Mat diffusion_solver(int seed, int step, const ncnn::Mat& c,
             // adapted from https://github.com/leejet/stable-diffusion.cpp
             {
                 const float si1 = sigma_reshaper(sigma[i + 1], i);
-                if (!i) // intermediat half-step x
-                    old_denoised = ncnn::Mat(x_mat.w, x_mat.h, x_mat.c, x_mat.v.data());
-                if (!si1) {
-                    x_mat = ncnn::Mat(denoised.w, denoised.h, denoised.c, denoised.v.data());
+                if (!si1) { // no noise -> pass
+                    x_mat = denoised;
                 } else {
-                    float a = si1 / sigma[i];
-                    float b = std::sqrt(a);
+                    const float a = si1 / sigma[i];
+                    const float b = std::sqrt(a);
                     for (int c = 0; c < 4; c++)
                     {
                         ONNXSTREAM_SD_INIT_X_PTR_INPUT_AND_D_PTR_DENOISED_POINTERS;
-                        float* x2_ptr = old_denoised.channel(c);
+                        float* b0_ptr = sampler_history_buffer[0].channel(c);
                         for (; x_ptr < x_ptr_end; x_ptr++)
-                        {
-                            // First half-step
-                            *x2_ptr = *d_ptr + b * (*x_ptr - *d_ptr);
+                        {   // First half-step
+                            *b0_ptr++ = *d_ptr + b * (*x_ptr - *d_ptr);
                             d_ptr++;
-                            x2_ptr++;
                         }
                     }
-                    denoised = CFGDenoiser_CompVisDenoiser(net, log_sigmas, old_denoised, sigma[i + 1], c, uc, sdxl_params, model);
+                    denoised = CFGDenoiser_CompVisDenoiser(net, log_sigmas, sampler_history_buffer[0], sigma[i + 1], c, uc, sdxl_params, model);
                     for (int c = 0; c < 4; c++)
                     {
                         ONNXSTREAM_SD_INIT_X_PTR_INPUT_AND_D_PTR_DENOISED_POINTERS;
                         for (; x_ptr < x_ptr_end; x_ptr++)
-                        {
-                            // Second half-step
+                        {   // Second half-step
                             *x_ptr = *d_ptr + a * (*x_ptr - *d_ptr);
                             d_ptr++;
                         }
