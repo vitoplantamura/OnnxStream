@@ -7,23 +7,15 @@
 #
 
 ARG UBUNTU_VERSION=22.04
-FROM ubuntu:$UBUNTU_VERSION as build
-RUN apt-get update && apt-get install -y build-essential git cmake
-WORKDIR /
-RUN git clone https://github.com/google/XNNPACK.git \
-    && cd XNNPACK \
-    && git checkout 1c8ee1b68f3a3e0847ec3c53c186c5909fa3fbd3 \
-    && mkdir build \
-    && cd build \
-    && cmake -DXNNPACK_BUILD_TESTS=OFF -DXNNPACK_BUILD_BENCHMARKS=OFF .. \
-    && cmake --build . --config Release
+FROM ubuntu:$UBUNTU_VERSION AS build
+RUN apt-get update && apt-get install -y build-essential git cmake python3
 WORKDIR OnnxStream
 COPY src .
 RUN mkdir build \
     && cd build \
-    && cmake -DMAX_SPEED=ON -DOS_LLM=OFF -DOS_CUDA=OFF -DXNNPACK_DIR=/XNNPACK .. \
+    && cmake .. \
     && cmake --build . --config Release
-FROM ubuntu:$UBUNTU_VERSION as runtime
+FROM ubuntu:$UBUNTU_VERSION AS runtime
 RUN apt-get update && apt-get install -y curl
 COPY --from=build /OnnxStream/build/sd /sd
 ENTRYPOINT [ "/sd" ]

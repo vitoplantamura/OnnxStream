@@ -1,5 +1,6 @@
 ﻿#### News 📣
 
+- September 28, 2025: Added **[Python](https://github.com/vitoplantamura/OnnxStream/blob/master/src/bindings.py) and [C#](https://github.com/vitoplantamura/OnnxStream/blob/master/src/bindings.cs) bindings** for the library!
 - April 15, 2025: Added WebAssembly demo of **OpenAI's Whisper** [here](https://github.com/vitoplantamura/OnnxStream/tree/master/examples/Whisper_wasm) (running in the browser).
 - September 19, 2024: Added WebAssembly support for the library! Demo of the **YOLOv8** object detection model [here](https://yolo.vitoplantamura.com/) (running in the browser).
 - January 14, 2024: Added LLM chat application (**TinyLlama 1.1B and Mistral 7B**) with initial GPU support! More info [here](https://github.com/vitoplantamura/OnnxStream/blob/master/assets/LLM.md).
@@ -113,7 +114,7 @@ A comparison between SDXL 1.0 and SDXL Turbo run in OnnxStream with respect to t
 - Static quantization (W8A8 unsigned, asymmetric, percentile)
 - Easy calibration of a quantized model
 - FP16 support (with or without FP16 arithmetic)
-- 40 ONNX operators implemented (the most common)
+- 41 ONNX operators implemented (the most common)
 - Operations executed sequentially but ~~all~~ most operators are multithreaded
 - Single implementation file + header file
 - XNNPACK calls wrapped in the `XnnPack` class (for future replacement)
@@ -221,6 +222,7 @@ Some things must be considered when exporting a Pytorch `nn.Module` (in our case
 
 # How to Build the Stable Diffusion example on Linux/Mac/Windows/Termux/FreeBSD
 
+- **Linux (+Termux) only**: you need to install these packages: `build-essential git cmake python3` (for Ubuntu and Termux, the names may be different on other distributions).
 - **Windows only**: start the following command prompt: `Visual Studio Tools` > `x64 Native Tools Command Prompt`.
 - **Mac only**: make sure to install cmake: `brew install cmake`.
 
@@ -280,35 +282,18 @@ index 01e4b9806..4dfff8f6f 100644
 ```
 </details>
 
-First you need to build [XNNPACK](https://github.com/google/XNNPACK).
-
-Since the function prototypes of XnnPack can change at any time, I've included a `git checkout` ​​that ensures correct compilation of OnnxStream with a compatible version of XnnPack at the time of writing:
-
-```
-git clone https://github.com/google/XNNPACK.git
-cd XNNPACK
-git checkout 1c8ee1b68f3a3e0847ec3c53c186c5909fa3fbd3
-mkdir build
-cd build
-cmake -DXNNPACK_BUILD_TESTS=OFF -DXNNPACK_BUILD_BENCHMARKS=OFF ..
-cmake --build . --config Release
-```
-
-Then you can build the Stable Diffusion example.
-
-`<DIRECTORY_WHERE_XNNPACK_WAS_CLONED>` is for example `/home/vito/Desktop/XNNPACK` or `C:\Projects\SD\XNNPACK` (on Windows):
+This will build the Stable Diffusion example ([XNNPACK](https://github.com/google/XNNPACK) will be downloaded automatically):
 
 ```
 git clone https://github.com/vitoplantamura/OnnxStream.git
-cd OnnxStream
-cd src
+cd OnnxStream/src
 mkdir build
 cd build
-cmake -DMAX_SPEED=ON -DOS_LLM=OFF -DOS_CUDA=OFF -DXNNPACK_DIR=<DIRECTORY_WHERE_XNNPACK_WAS_CLONED> ..
+cmake ..
 cmake --build . --config Release
 ```
 
-**Important:** the MAX_SPEED option allows to increase performance by about 10% in Windows, but by more than 50% on the Raspberry Pi. This option consumes much more memory at build time and the produced executable may not work (as was the case with Termux in my tests). So in case of problems, the first attempt to make is to set MAX_SPEED to OFF.
+**Important:** the MAX_SPEED option (which is ON by default but can be turned off with `-DMAX_SPEED=OFF` added to the first invocation of cmake, before the ..) allows to increase performance by about 10% in Windows, but by more than 50% on the Raspberry Pi. This option consumes much more memory at build time and the produced executable may not work (as was the case with Termux in my tests). So in case of problems, the first attempt to make is to set MAX_SPEED to OFF.
 
 Now you can run the Stable Diffusion example.
 
@@ -349,7 +334,8 @@ These are the command line options of the Stable Diffusion example:
 --decode-latents    Skips the diffusion, and decodes the specified latents file.
 --prompt            Sets the positive prompt.
 --neg-prompt        Sets the negative prompt.
---steps             Sets the number of diffusion steps.
+--num               Sets the number of images to generate. Default is 1.
+--steps             Sets the number of diffusion steps. Default is 10.
 --seed              Sets the seed.
 --save-latents      After the diffusion, saves the latents in the specified file.
 --decoder-calibrate (ONLY SD 1.5) Calibrates the quantized version of the VAE decoder.

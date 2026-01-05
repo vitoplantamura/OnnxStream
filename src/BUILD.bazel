@@ -30,7 +30,7 @@ BASE_LINKOPTS = [
 
 cc_binary(
     name = "onnxstream-wasm.js",
-    # srcs = ["wasm.cpp"], # + KERNELS_WITH_KEEPALIVE,
+    # srcs = ["exports.cpp"], # + KERNELS_WITH_KEEPALIVE,
     # additional_linker_inputs = [
     #    "pre.js",
     #    "post.js",
@@ -47,7 +47,7 @@ cc_binary(
 
 cc_binary(
     name = "onnxstream-wasm-simd.js",
-    # srcs = ["wasm.cpp"], # + KERNELS_WITH_KEEPALIVE,
+    # srcs = ["exports.cpp"], # + KERNELS_WITH_KEEPALIVE,
     # additional_linker_inputs = [
     #    "pre.js",
     #    "post.js",
@@ -67,7 +67,7 @@ cc_binary(
 
 cc_binary(
     name = "onnxstream-wasm-threaded-simd.js",
-    # srcs = ["wasm.cpp"], # + KERNELS_WITH_KEEPALIVE,
+    # srcs = ["exports.cpp"], # + KERNELS_WITH_KEEPALIVE,
     # additional_linker_inputs = [
     #    "pre.js",
     #    "post.js",
@@ -117,7 +117,7 @@ wasm_cc_binary(
 
 cc_library(
     name = "onnxstream",
-    srcs = ["wasm.cpp", "onnxstream.cpp"],
+    srcs = ["exports.cpp", "onnxstream.cpp"],
     hdrs = ["onnxstream.h"],
     copts = [
         "-fexceptions",
