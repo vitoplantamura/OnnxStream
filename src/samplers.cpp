@@ -50,7 +50,7 @@
                             *b1_ptr++ = d;
                         }
                     }
-                    denoised = CFGDenoiser_CompVisDenoiser(net, log_sigmas, sampler_history_buffer[0], si1, c, uc, sdxl_params, model);
+                    denoised = co_await CFGDenoiser_CompVisDenoiser(net, log_sigmas, sampler_history_buffer[0], si1, c, uc, sdxl_params, coro_state);
                     for (int c = 0; c < 4; c++)
                     {
                         ONNXSTREAM_SD_INIT_X_PTR_INPUT_AND_D_PTR_DENOISED_POINTERS;
@@ -81,7 +81,7 @@
                             *b1_ptr++ = d;
                         }
                     }
-                    denoised = CFGDenoiser_CompVisDenoiser(net, log_sigmas, sampler_history_buffer[0], si1, c, uc, sdxl_params, model);
+                    denoised = co_await CFGDenoiser_CompVisDenoiser(net, log_sigmas, sampler_history_buffer[0], si1, c, uc, sdxl_params, coro_state);
                     const float sigma_d = (si1 - sigma[i]) / 2.f;
                     const float sigma_inv = sigma_d / si1;
                     for (int c = 0; c < 4; c++)
@@ -117,7 +117,7 @@
                             d_ptr++;
                         }
                     }
-                    denoised = CFGDenoiser_CompVisDenoiser(net, log_sigmas, sampler_history_buffer[0], sigma[i + 1], c, uc, sdxl_params, model);
+                    denoised = co_await CFGDenoiser_CompVisDenoiser(net, log_sigmas, sampler_history_buffer[0], sigma[i + 1], c, uc, sdxl_params, coro_state);
                     for (int c = 0; c < 4; c++)
                     {
                         ONNXSTREAM_SD_INIT_X_PTR_INPUT_AND_D_PTR_DENOISED_POINTERS;
@@ -156,7 +156,7 @@
                         for (; x_ptr < x_ptr_end; x_ptr++)   // First half-step
                             *b0_ptr++ = std::exp(-s) / std::exp(-t) * *x_ptr - std::expm1(-h * 0.5f) * *d_ptr++;
                     }
-                    denoised = CFGDenoiser_CompVisDenoiser(net, log_sigmas, sampler_history_buffer[0], sigma[i + 1], c, uc, sdxl_params, model);
+                    denoised = co_await CFGDenoiser_CompVisDenoiser(net, log_sigmas, sampler_history_buffer[0], sigma[i + 1], c, uc, sdxl_params, coro_state);
                     for (int c = 0; c < 4; c++)
                     {
                         ONNXSTREAM_SD_INIT_X_PTR_INPUT_AND_D_PTR_DENOISED_POINTERS;
@@ -195,7 +195,7 @@
                             d_ptr++;
                         }
                     }
-                    denoised = CFGDenoiser_CompVisDenoiser(net, log_sigmas, sampler_history_buffer[0], sigma[i + 1], c, uc, sdxl_params, model);
+                    denoised = co_await CFGDenoiser_CompVisDenoiser(net, log_sigmas, sampler_history_buffer[0], sigma[i + 1], c, uc, sdxl_params, coro_state);
                     for (int c = 0; c < 4; c++)
                     {
                         ONNXSTREAM_SD_INIT_X_PTR_INPUT_AND_D_PTR_DENOISED_POINTERS;
@@ -531,7 +531,7 @@
                             *b0_ptr++ = *x_ptr + d * dt_1;
                         }
                     }
-                    denoised = CFGDenoiser_CompVisDenoiser(net, log_sigmas, sampler_history_buffer[0], sigma_mid, c, uc, sdxl_params, model);
+                    denoised = co_await CFGDenoiser_CompVisDenoiser(net, log_sigmas, sampler_history_buffer[0], sigma_mid, c, uc, sdxl_params, coro_state);
                     for (int c = 0; c < 4; c++)
                     {
                         ONNXSTREAM_SD_INIT_X_PTR_INPUT_AND_D_PTR_DENOISED_POINTERS;
@@ -556,7 +556,7 @@
                         for (; x_ptr < x_ptr_end; x_ptr++)
                             *b0_ptr++ = *x_ptr + (*x_ptr - *d_ptr++) * dt;
                     }
-                    denoised = CFGDenoiser_CompVisDenoiser(net, log_sigmas, sampler_history_buffer[0], sigma_mid, c, uc, sdxl_params, model);
+                    denoised = co_await CFGDenoiser_CompVisDenoiser(net, log_sigmas, sampler_history_buffer[0], sigma_mid, c, uc, sdxl_params, coro_state);
                     dt = (si1 - sigma[i]) / sigma_mid;
                     for (int c = 0; c < 4; c++)
                     {
