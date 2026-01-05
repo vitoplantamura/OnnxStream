@@ -1784,11 +1784,6 @@ static SDCoroTask<ncnn::Mat> diffusion_solver(int seed, int step, ncnn::Mat c, n
             }
 
             ncnn::Mat denoised = co_await CFGDenoiser_CompVisDenoiser(net, log_sigmas, x_mat, sigma[i], c, uc, sdxl_params, coro_state);
-            if (coro_state.batch_index == 0)
-            {
-                t2 = ncnn::get_current_time();
-                SHOW_LONG_TIME_MS(t2 - t1)
-            }
 
 #define ORIGINAL_SAMPLER_ALGORITHMS 1
 
@@ -1852,6 +1847,9 @@ static SDCoroTask<ncnn::Mat> diffusion_solver(int seed, int step, ncnn::Mat c, n
 
             if (coro_state.batch_index == 0)
             {
+                t2 = ncnn::get_current_time();
+                SHOW_LONG_TIME_MS(t2 - t1)
+
                 if(g_main_args.m_preview_im) {       // directly decode latent in low resolution
                     std::cout << "---> preview:\t\t";
                     double t1 = ncnn::get_current_time();
