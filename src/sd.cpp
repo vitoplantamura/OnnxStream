@@ -1864,8 +1864,8 @@ static SDCoroTask<ncnn::Mat> diffusion_solver(int seed, int step, ncnn::Mat c, n
                     double t2 = ncnn::get_current_time();
                     SHOW_LONG_TIME_MS( t2 - t1 )
                 }
-                if(g_main_args.m_decode_im                            // pass through decoder
-                   && i < static_cast<int>(sigma.size()) - 2) {       // if step is not last
+                if(g_main_args.m_decode_im   // pass through decoder
+                   && i < steps - 1) {       // if step is not last
                     std::cout << "---> decode:\t\t";
                     double t1 = ncnn::get_current_time();
                     ncnn::Mat sample = ncnn::Mat(x_mat.w, x_mat.h, x_mat.c, x_mat.v.data());
