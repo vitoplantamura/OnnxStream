@@ -70,6 +70,7 @@
 using namespace onnxstream;
 #endif
 
+// sampler_type is needed by MainArgs and can not be moved to samplers.h
 enum sampler_type {
     EULER_A,
     EULER,
@@ -1393,6 +1394,9 @@ public:
     tensor_vector<float> m_pooled_prompt_embeds_neg;
 };
 
+static SDCoroTask<ncnn::Mat> CFGDenoiser_CompVisDenoiser(ncnn::Net& net, float const* log_sigmas, ncnn::Mat& input, float sigma, const ncnn::Mat& cond, const ncnn::Mat& uncond, SDXLParams* sdxl_params, SDCoroState& coro_state);
+#include "samplers.h" // needs ncnn::Mat, SDCoroTask, SDCoroState, SDXLParams definitions
+
 static SDCoroTask<ncnn::Mat> CFGDenoiser_CompVisDenoiser(ncnn::Net& net, float const* log_sigmas, ncnn::Mat& input, float sigma, const ncnn::Mat& cond, const ncnn::Mat& uncond, SDXLParams* sdxl_params, SDCoroState& coro_state)
 {
     // get_scalings
@@ -1680,54 +1684,14 @@ static SDCoroTask<ncnn::Mat> diffusion_solver(int seed, int step, ncnn::Mat c, n
 #endif
 
         const int steps = static_cast<int>(sigma.size()) - 1;
-
-        // a workaround instead of configurable noise scheduler,
-        // for Turbo model + non-ancestral samplers, use the result instead of sigma [i + 1]
-        auto sigma_reshaper = [=](const float si1, const int i) -> const float {
-            // only correct for turbo model
-            if (!g_main_args.m_turbo) 
-                return si1;
-
-            constexpr float p = 0.0f; // -n - smoother images, +n - sharper
-            const float sigma_curve = ( std::pow((steps - i) / (float)steps, std::pow(2.f, -p - .5f) / steps) // straight, lower values at last steps
-                                      + std::pow((i + 1)     / (float)steps, std::pow(2.f, -p - .5f) / steps) // reversed, lower values at first steps
-                                      ) /2;
-            return si1 * (sigma_curve ? std::max(0.0001f, sigma_curve) : 0.f);
-        };
-
-        // correcting sigmas less for many steps, or images become too blurry
-        auto sigma_reshaper_sharp = [=](const float si1, const int i) -> const float {
-            const float pre_res = sigma_reshaper(si1, i);
-            const float smoothness = 3 / (steps - 2.5f);
-            return si1 + ((pre_res == si1) ? 0 : smoothness / std::abs(smoothness) * std::pow(std::abs(smoothness), 1.f / 3) * (pre_res - si1));
-        };
-
+        const unsigned latent_length = g_main_args.m_latw * g_main_args.m_lath;
         sampler_type sampler = g_main_args.m_sampler;
-
-        // reserving memory for history elements
-        unsigned number_of_buffers;
-        switch (sampler) {
-        case IPNDM: case IPNDM_V: case IPNDM_VO: case LMS:
-            number_of_buffers = 4; break;
-        case TAYLOR3: case DPMPP3MSDE: case DPMPP3MSDE_A:
-            number_of_buffers = 3; break;
-        case HEUN:
-            number_of_buffers = 2; break;
-        case DPMPP2S: case DPMPP2S_A: case DPMPP2M: case DPMPP2MV2: case DPM2:
-            number_of_buffers = 1; break;
-        default:
-            number_of_buffers = 0;
-        }
-        std::vector<ncnn::Mat> sampler_history_buffer;
-        for (unsigned k = 0; k < number_of_buffers; k++) sampler_history_buffer.push_back(ncnn::Mat(x_mat.w, x_mat.h, x_mat.c));
-
+        float eta = 0.0f;         // for DDPM / DDIM / TCD / DPM++3M SDE: randomness
         float sampler_history_dt; // for Taylor3
+        float lms_coeff[4];       // for LMS
+        std::vector<ncnn::Mat> sampler_history_buffer;
+        create_buffers(sampler, sampler_history_buffer, x_mat);
 
-        float lms_coeff[4]; // for LMS
-
-        float eta = .0f; // for DDPM / DDIM / TCD / DPM++3M SDE: randomness
-
-        const unsigned int /*long*/ latent_length = g_main_args.m_latw * g_main_args.m_lath;
         for (int i = 0; i < steps; i++)
         {
             double t1, t2;
@@ -1737,37 +1701,9 @@ static SDCoroTask<ncnn::Mat> diffusion_solver(int seed, int step, ncnn::Mat c, n
                 t1 = ncnn::get_current_time();
             }
 
-            // initial corrections before denoising
+            prescale_sample(x_mat, sampler, latent_length, steps, i, sigma, g_main_args.m_turbo);
+
             switch (sampler) {
-            case DDIM:
-            case DDIM_A:
-            case TCD:
-            case TCD_A:
-                // DDIM and TCD samplers implementation in SD.cpp needs latents prescaling
-                // https://github.com/leejet/stable-diffusion.cpp/blob/10c6501bd05a697e014f1bee3a84e5664290c489/denoiser.hpp#L1071L1085
-                if (i == 0) {
-                    for (int c = 0; c < 4; c++)
-                    {
-                        float* x_ptr = x_mat.channel(c); const float* x_ptr_end = x_ptr + latent_length;
-                        for (; x_ptr < x_ptr_end; x_ptr++)
-                        {
-                            *x_ptr *= std::sqrt(sigma[i] * sigma[i] + 1) / sigma[i];
-                        }
-                    }
-                } else {
-                    float scale = std::sqrt(sigma[i] * sigma[i] + 1);
-                    if (g_main_args.m_turbo)                      // soften correction for Turbo model
-                        scale = std::pow(scale, 0.9925f - 2.5f / steps / steps); // to avoid oversharpening
-                    for (int c = 0; c < 4; c++)
-                    {
-                        float* x_ptr = x_mat.channel(c); const float* x_ptr_end = x_ptr + latent_length;
-                        for (; x_ptr < x_ptr_end; x_ptr++)
-                        {
-                            *x_ptr *= scale;
-                        }
-                    }
-                }
-                break;
             case DPM2:
             case DPMPP2M:
             case DPMPP2MV2:
@@ -1780,70 +1716,15 @@ static SDCoroTask<ncnn::Mat> diffusion_solver(int seed, int step, ncnn::Mat c, n
                 // at last step for SDXL (Turbo)
                 if (g_main_args.m_xl && (i == steps - 1)) sampler = EULER;
                 break;
-            default: {}
+            default: ;
             }
 
             ncnn::Mat denoised = co_await CFGDenoiser_CompVisDenoiser(net, log_sigmas, x_mat, sigma[i], c, uc, sdxl_params, coro_state);
 
-#define ORIGINAL_SAMPLER_ALGORITHMS 1
-
-#define ONNXSTREAM_SD_INIT_X_PTR_INPUT_AND_D_PTR_DENOISED_POINTERS \
-            float* x_ptr = x_mat.channel(c);                       \
-            const float* x_ptr_end = x_ptr + latent_length;        \
-            float* d_ptr = denoised.channel(c);
-
-            switch (sampler) {
-
-#include "samplers.cpp"
-
-            default: { // Euler Ancestral
-#if       ORIGINAL_SAMPLER_ALGORITHMS
-            // original copy
-            float sigma_up = std::min(sigma[i + 1], std::sqrt(sigma[i + 1] * sigma[i + 1] * (sigma[i] * sigma[i] - sigma[i + 1] * sigma[i + 1]) / (sigma[i] * sigma[i])));
-            float sigma_down = std::sqrt(sigma[i + 1] * sigma[i + 1] - sigma_up * sigma_up);
-            std::srand(seed++);
-            ncnn::Mat randn = randn_4_w_h(rand() % 1000, g_main_args.m_latw, g_main_args.m_lath);
-
-            for (int c = 0; c < 4; c++)
-            {
-                float* x_ptr = x_mat.channel(c);
-                float* d_ptr = denoised.channel(c);
-                float* r_ptr = randn.channel(c);
-
-                for (int hw = 0; hw < g_main_args.m_latw * g_main_args.m_lath; hw++)
-                {
-                    *x_ptr = *x_ptr + ((*x_ptr - *d_ptr) / sigma[i]) * (sigma_down - sigma[i]) + *r_ptr * sigma_up;
-                    x_ptr++;
-                    d_ptr++;
-                    r_ptr++;
-                }
-            }
-#else  // ORIGINAL_SAMPLER_ALGORITHMS
-                const double double_sigma_up = std::min((double)sigma[i + 1], 
-                    std::abs(sigma[i + 1] * 
-                             std::sqrt(((double)sigma[i] * sigma[i] - (double)sigma[i + 1] * sigma[i + 1])) / 
-                             sigma[i]));
-                const float sigma_down = std::sqrt((double)sigma[i + 1] * sigma[i + 1] - double_sigma_up * double_sigma_up);
-                const float sigma_up = double_sigma_up;
-                std::srand(seed++);
-                ncnn::Mat randn = randn_4_w_h(rand() % 1000, g_main_args.m_latw, g_main_args.m_lath);
-
-                const float sigma_mul = sigma_down / sigma[i];
-                for (int c = 0; c < 4; c++)
-                {
-                    ONNXSTREAM_SD_INIT_X_PTR_INPUT_AND_D_PTR_DENOISED_POINTERS;
-                    float* r_ptr = randn.channel(c);
-                    for (; x_ptr < x_ptr_end; x_ptr++)
-                    {
-                        *x_ptr = (*x_ptr - *d_ptr) * sigma_mul + *d_ptr + *r_ptr * sigma_up;
-                        d_ptr++;
-                        r_ptr++;
-                    }
-                }
-#endif // ORIGINAL_SAMPLER_ALGORITHMS
-                //break; // if will not be default
-            } // euler_a
-            } // g_main_args.sampler
+            co_await process_sample(net, seed, c, uc, sdxl_params, coro_state, log_sigmas,
+                                    x_mat, denoised, sampler_history_buffer, sampler_history_dt,
+                                    g_main_args.m_xl, g_main_args.m_turbo, latent_length,
+                                    steps, i, eta, sampler, sigma, lms_coeff);
 
             if (coro_state.batch_index == 0)
             {
