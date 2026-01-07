@@ -1,5 +1,7 @@
 cmake_minimum_required(VERSION 3.10.0)
 
+enable_language(C CXX)
+
 option(MAX_SPEED "Enable aggressive speed optimizations" ON)
 option(OS_LLM "Select the LLM example instead of the SD example" OFF)
 option(OS_CUDA "Enable GPU acceleration with CUDA" OFF)
@@ -30,6 +32,12 @@ if(NOT XNNPACK_SOURCE OR NOT XNNPACK_BINARY)
 			-DXNNPACK_LIBRARY_TYPE=static
 			-DCMAKE_TOOLCHAIN_FILE=${CMAKE_TOOLCHAIN_FILE}
 		)
+
+		if((CMAKE_C_COMPILER_ID STREQUAL "GNU" AND CMAKE_C_COMPILER_VERSION VERSION_GREATER_EQUAL "14") OR
+		   (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL "14"))
+			list(APPEND XNNPACK_CMAKE_ARGS "-DCMAKE_C_FLAGS=-Wno-error=incompatible-pointer-types")
+			list(APPEND XNNPACK_CMAKE_ARGS "-DCMAKE_CXX_FLAGS=-Wno-error=incompatible-pointer-types")
+		endif()
 
 		include(ExternalProject)
 		ExternalProject_Add(xnnpack_build
@@ -80,7 +88,9 @@ if(UNIX) # includes APPLE and ANDROID (ie Termux)
 	target_link_libraries(${ONNXSTREAM_PROJECT_NAME} PRIVATE "${XNNPACK_BINARY}/libXNNPACK.a")
 	target_link_libraries(${ONNXSTREAM_PROJECT_NAME} PRIVATE "${XNNPACK_BINARY}/libmicrokernels-prod.a")
 	target_link_libraries(${ONNXSTREAM_PROJECT_NAME} PRIVATE "${XNNPACK_BINARY}/libmicrokernels-all.a")
-	if(EXISTS "${XNNPACK_BINARY}/kleidiai/libkleidiai.a")
+	if(NOT (CMAKE_C_COMPILER_ID STREQUAL "Clang" AND CMAKE_C_COMPILER_VERSION VERSION_LESS "11") AND
+	   (CMAKE_OSX_ARCHITECTURES STREQUAL "arm64" OR CMAKE_SYSTEM_PROCESSOR STREQUAL "aarch64" OR CMAKE_SYSTEM_PROCESSOR STREQUAL "arm64") AND
+	   NOT CMAKE_C_COMPILER_ID STREQUAL "MSVC") # https://github.com/google/XNNPACK/blob/f64bbdddff56cca640ade7a9770e70b471eb5630/CMakeLists.txt#L221
 		target_link_libraries(${ONNXSTREAM_PROJECT_NAME} PRIVATE "${XNNPACK_BINARY}/kleidiai/libkleidiai.a")
 	endif()
 	target_link_libraries(${ONNXSTREAM_PROJECT_NAME} PRIVATE "${XNNPACK_BINARY}/pthreadpool/libpthreadpool.a")
