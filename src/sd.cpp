@@ -1683,7 +1683,6 @@ static SDCoroTask<ncnn::Mat> diffusion_solver(int seed, int step, ncnn::Mat c, n
         }
 #endif
 
-        const int steps = static_cast<int>(sigma.size()) - 1;
         const unsigned latent_length = g_main_args.m_latw * g_main_args.m_lath;
         sampler_type sampler = g_main_args.m_sampler;
         float eta = 0.0f;         // for DDPM / DDIM / TCD / DPM++3M SDE: randomness
@@ -1692,7 +1691,7 @@ static SDCoroTask<ncnn::Mat> diffusion_solver(int seed, int step, ncnn::Mat c, n
         std::vector<ncnn::Mat> sampler_history_buffer;
         create_buffers(sampler, sampler_history_buffer, x_mat);
 
-        for (int i = 0; i < steps; i++)
+        for (int i = 0; i < step; i++)
         {
             double t1, t2;
             if (coro_state.batch_index == 0)
@@ -1701,7 +1700,7 @@ static SDCoroTask<ncnn::Mat> diffusion_solver(int seed, int step, ncnn::Mat c, n
                 t1 = ncnn::get_current_time();
             }
 
-            prescale_sample(x_mat, sampler, latent_length, steps, i, sigma, g_main_args.m_turbo);
+            prescale_sample(x_mat, sampler, latent_length, step, i, sigma, g_main_args.m_turbo);
 
             switch (sampler) {
             case DPM2:
@@ -1714,7 +1713,7 @@ static SDCoroTask<ncnn::Mat> diffusion_solver(int seed, int step, ncnn::Mat c, n
                 // https://github.com/huggingface/diffusers/pull/5541
                 // DPM++ samplers have underflows and should be replaced with Euler
                 // at last step for SDXL (Turbo)
-                if (g_main_args.m_xl && (i == steps - 1)) sampler = EULER;
+                if (g_main_args.m_xl && (i == step - 1)) sampler = EULER;
                 break;
             default: ;
             }
@@ -1724,7 +1723,7 @@ static SDCoroTask<ncnn::Mat> diffusion_solver(int seed, int step, ncnn::Mat c, n
             co_await process_sample( net, seed, c, uc, sdxl_params, coro_state, log_sigmas,
                                      x_mat, denoised, sampler_history_buffer,
                                      sampler_history_dt, eta, lms_coeff, sigma, latent_length,
-                                     steps, i, g_main_args.m_xl, g_main_args.m_turbo, sampler );
+                                     step, i, g_main_args.m_xl, g_main_args.m_turbo, sampler );
 
             if (coro_state.batch_index == 0)
             {
@@ -1744,7 +1743,7 @@ static SDCoroTask<ncnn::Mat> diffusion_solver(int seed, int step, ncnn::Mat c, n
                     SHOW_LONG_TIME_MS( t2 - t1 )
                 }
                 if(g_main_args.m_decode_im   // pass through decoder
-                   && i < steps - 1) {       // if step is not last
+                   && i < step - 1) {       // if step is not last
                     std::cout << "---> decode:\t\t";
                     double t1 = ncnn::get_current_time();
                     ncnn::Mat sample = ncnn::Mat(x_mat.w, x_mat.h, x_mat.c, x_mat.v.data());
