@@ -1394,9 +1394,6 @@ public:
     tensor_vector<float> m_pooled_prompt_embeds_neg;
 };
 
-static SDCoroTask<ncnn::Mat> CFGDenoiser_CompVisDenoiser(ncnn::Net& net, float const* log_sigmas, ncnn::Mat& input, float sigma, const ncnn::Mat& cond, const ncnn::Mat& uncond, SDXLParams* sdxl_params, SDCoroState& coro_state);
-#include "samplers.h" // needs ncnn::Mat, SDCoroTask, SDCoroState, SDXLParams definitions
-
 static SDCoroTask<ncnn::Mat> CFGDenoiser_CompVisDenoiser(ncnn::Net& net, float const* log_sigmas, ncnn::Mat& input, float sigma, const ncnn::Mat& cond, const ncnn::Mat& uncond, SDXLParams* sdxl_params, SDCoroState& coro_state)
 {
     // get_scalings
@@ -1561,6 +1558,9 @@ static SDCoroTask<ncnn::Mat> CFGDenoiser_CompVisDenoiser(ncnn::Net& net, float c
     co_return denoised_uncond;
 }
 
+#include "samplers.h" // needs ncnn::Mat, SDCoroTask, SDCoroState, SDXLParams, sampler_type,
+                      // CFGDenoiser_CompVisDenoiser, randn_4_w_h definitions
+
 SDCoroTask<int> sdxl_decoder(ncnn::Mat& sample, std::string output_path, bool tiled, std::string output_appendix, SDCoroState& coro_state);
 
 void sdxl_decoder(ncnn::Mat& sample, std::string output_path, bool tiled, std::string output_appendix)
@@ -1721,10 +1721,10 @@ static SDCoroTask<ncnn::Mat> diffusion_solver(int seed, int step, ncnn::Mat c, n
 
             ncnn::Mat denoised = co_await CFGDenoiser_CompVisDenoiser(net, log_sigmas, x_mat, sigma[i], c, uc, sdxl_params, coro_state);
 
-            co_await process_sample(net, seed, c, uc, sdxl_params, coro_state, log_sigmas,
-                                    x_mat, denoised, sampler_history_buffer, sampler_history_dt,
-                                    g_main_args.m_xl, g_main_args.m_turbo, latent_length,
-                                    steps, i, eta, sampler, sigma, lms_coeff);
+            co_await process_sample( net, seed, c, uc, sdxl_params, coro_state, log_sigmas,
+                                     x_mat, denoised, sampler_history_buffer,
+                                     sampler_history_dt, eta, lms_coeff, sigma, latent_length,
+                                     steps, i, g_main_args.m_xl, g_main_args.m_turbo, sampler );
 
             if (coro_state.batch_index == 0)
             {
