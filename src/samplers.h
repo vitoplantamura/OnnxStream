@@ -1,5 +1,6 @@
 
-// must be included after ncnn::Mat, SDCoroTask, SDCoroState, SDXLParams definitions
+// must be included after ncnn::Mat, SDCoroTask, SDCoroState, SDXLParams, sampler_type,
+// CFGDenoiser_CompVisDenoiser and randn_4_w_h definitions
 
 inline
 void create_buffers(const sampler_type sampler,
@@ -79,18 +80,17 @@ SDCoroTask<int> process_sample( ncnn::Net& net,
                                 const float* log_sigmas,
                                 ncnn::Mat& x_mat,
                                 ncnn::Mat& denoised,
-                                std::vector<ncnn::Mat>& sampler_history_buffer, // [0...4], buffers
-                                float& sampler_history_dt, // for Taylor3
+                                std::vector<ncnn::Mat>& sampler_history_buffer, // [0...4]
+                                float& sampler_history_dt,                      // for Taylor3
+                                float& eta, // for DDPM / DDIM / TCD / DPM++3M SDE: randomness
+                                float (&lms_coeff)[4],                          // for LMS
+                                const std::vector<float>& sigma,                // [steps + 1]
+                                const unsigned latent_length,                   // m_latw * m_lath
+                                const int steps,
+                                const int i,                                    // current step
                                 const bool m_xl,
                                 const bool m_turbo,
-                                const unsigned latent_length, // m_latw * m_lath
-                                const int steps,
-                                const int i, // step
-                                float& eta, // for DDPM / DDIM / TCD / DPM++3M SDE: randomness
-                                const sampler_type sampler,
-                                const std::vector<float>& sigma, // [steps + 1]
-                                float (&lms_coeff)[4] // for lms
-                              )
+                                const sampler_type sampler )
 {
     // a workaround instead of configurable noise scheduler,
     // for Turbo model + non-ancestral samplers, use the result instead of sigma [i + 1]
