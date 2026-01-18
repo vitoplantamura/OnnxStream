@@ -80,6 +80,10 @@ if(XNNPACK_BUILD_DEPENDENCY)
 	add_dependencies(${ONNXSTREAM_PROJECT_NAME} ${XNNPACK_BUILD_DEPENDENCY})
 endif()
 
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+	target_compile_options(${ONNXSTREAM_PROJECT_NAME} PRIVATE -fcoroutines) # for older GCCs: https://github.com/dylski/PaperPiAI/issues/23
+endif()
+
 if(UNIX) # includes APPLE and ANDROID (ie Termux)
 
 	target_include_directories(${ONNXSTREAM_PROJECT_NAME} PRIVATE "${XNNPACK_SOURCE}/include")
