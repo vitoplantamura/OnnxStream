@@ -354,7 +354,11 @@ These are the command line options of the Stable Diffusion example:
 --sampler           Select sampling method.
 ```
 
-Options you're probably interested in: `--xl`, `--turbo`, `--prompt`, `--steps`, `--rpi`.
+Options you're probably interested in: `--xl`, `--turbo`, `--prompt`, `--steps`, `--rpi`,
+<details><summary>'--sampler' (expand to view examples)</summary>
+<img src='assets/kitten_grid_1.jpg'/><img src='assets/kitten_grid_2.jpg'/>
+Noisy samplers need more steps.
+</details>
 
 # How to Convert and Run a Custom Stable Diffusion 1.5 Model with OnnxStream (by @GaelicThunder)
 
