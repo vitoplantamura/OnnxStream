@@ -41,8 +41,8 @@ if(NOT XNNPACK_SOURCE OR NOT XNNPACK_BINARY)
 
 		include(ExternalProject)
 		ExternalProject_Add(xnnpack_build
-			URL https://github.com/google/XNNPACK/archive/f64bbdddff56cca640ade7a9770e70b471eb5630.zip
-			URL_HASH SHA256=745d8b73794cfe466064004f7ede01d9e9930774a392331d447727d11cd62e08
+			URL https://github.com/google/XNNPACK/archive/5671db0572e2d5240f2f08f9085174014742ac2d.zip
+			URL_HASH SHA256=5d5b835d93c77020b5dc3922d6b25ad375eb8d5a0583771b658d6584e5e175ae
 			SOURCE_DIR "${XNNPACK_SOURCE}"
 			BINARY_DIR "${XNNPACK_BINARY}"
 			CMAKE_ARGS ${XNNPACK_CMAKE_ARGS}
@@ -94,7 +94,7 @@ if(UNIX) # includes APPLE and ANDROID (ie Termux)
 	target_link_libraries(${ONNXSTREAM_PROJECT_NAME} PRIVATE "${XNNPACK_BINARY}/libmicrokernels-all.a")
 	if(NOT (CMAKE_C_COMPILER_ID STREQUAL "Clang" AND CMAKE_C_COMPILER_VERSION VERSION_LESS "11") AND
 	   (CMAKE_OSX_ARCHITECTURES STREQUAL "arm64" OR CMAKE_SYSTEM_PROCESSOR STREQUAL "aarch64" OR CMAKE_SYSTEM_PROCESSOR STREQUAL "arm64") AND
-	   NOT CMAKE_C_COMPILER_ID STREQUAL "MSVC") # https://github.com/google/XNNPACK/blob/f64bbdddff56cca640ade7a9770e70b471eb5630/CMakeLists.txt#L221
+	   NOT CMAKE_C_COMPILER_ID STREQUAL "MSVC") # https://github.com/google/XNNPACK/blob/5671db0572e2d5240f2f08f9085174014742ac2d/CMakeLists.txt#L289
 		target_link_libraries(${ONNXSTREAM_PROJECT_NAME} PRIVATE "${XNNPACK_BINARY}/kleidiai/libkleidiai.a")
 	endif()
 	target_link_libraries(${ONNXSTREAM_PROJECT_NAME} PRIVATE "${XNNPACK_BINARY}/pthreadpool/libpthreadpool.a")

@@ -33,7 +33,7 @@ load("@bazel_tools//tools/build_defs/repo:git.bzl", "git_repository")
 # xnnpack used for fast vectorized wasm operations
 git_repository(
     name = "xnnpack",
-    commit = "f64bbdddff56cca640ade7a9770e70b471eb5630",
+    commit = "5671db0572e2d5240f2f08f9085174014742ac2d",
     remote = "https://github.com/google/XNNPACK.git",
     # shallow_since = "1643627844 -0800",
 )

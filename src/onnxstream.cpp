@@ -471,6 +471,189 @@ public:
 
 #endif
 
+class XnnPackOldApi
+{
+public:
+
+    static inline enum xnn_status xnn_run_convert_nc_f16_f32(
+        size_t channels,
+        size_t input_stride,
+        size_t output_stride,
+        size_t batch_size,
+        const void* input,
+        float* output,
+        uint32_t flags,
+        pthreadpool_t threadpool)
+    {
+        return xnn_run_unary_elementwise_nc(xnn_unary_convert, xnn_datatype_fp16,
+                                            xnn_datatype_fp32, NULL, NULL, NULL,
+                                            flags, batch_size, channels, input_stride,
+                                            output_stride, threadpool, input, output);
+    }
+
+    static inline enum xnn_status xnn_run_convert_nc_f32_f16(
+        size_t channels,
+        size_t input_stride,
+        size_t output_stride,
+        size_t batch_size,
+        const float* input,
+        void* output,
+        uint32_t flags,
+        pthreadpool_t threadpool)
+    {
+        return xnn_run_unary_elementwise_nc(xnn_unary_convert, xnn_datatype_fp32,
+                                            xnn_datatype_fp16, NULL, NULL, NULL,
+                                            flags, batch_size, channels, input_stride,
+                                            output_stride, threadpool, input, output);
+    }
+
+    static inline enum xnn_status xnn_run_convert_nc_qu8_f32(
+        size_t channels,
+        size_t input_stride,
+        size_t output_stride,
+        size_t batch_size,
+        const uint8_t* input,
+        float* output,
+        float input_scale,
+        uint8_t input_zero_point,
+        uint32_t flags,
+        pthreadpool_t threadpool)
+    {
+        xnn_quantization_params input_quantization = {input_zero_point, input_scale};
+        xnn_quantization_params output_quantization = {0, 1.0f};
+
+        return xnn_run_unary_elementwise_nc(xnn_unary_convert,
+                                            xnn_datatype_quint8,
+                                            xnn_datatype_fp32,
+                                            NULL /*params*/,
+                                            &input_quantization,
+                                            &output_quantization,
+                                            flags,
+                                            batch_size,
+                                            channels, input_stride,
+                                            output_stride,
+                                            threadpool,
+                                            input,
+                                            output);
+    }
+
+    static inline enum xnn_status xnn_run_convert_nc_f32_qu8(
+        size_t channels,
+        size_t input_stride,
+        size_t output_stride,
+        size_t batch_size,
+        const float* input,
+        uint8_t* output,
+        float output_scale,
+        uint8_t output_zero_point,
+        uint32_t flags,
+        pthreadpool_t threadpool)
+    {
+        xnn_quantization_params input_quantization = {0, 1.0f};
+        xnn_quantization_params output_quantization = {output_zero_point, output_scale};
+
+        return xnn_run_unary_elementwise_nc(xnn_unary_convert,
+                                            xnn_datatype_fp32,
+                                            xnn_datatype_quint8,
+                                            NULL /*params*/,
+                                            &input_quantization,
+                                            &output_quantization,
+                                            flags,
+                                            batch_size,
+                                            channels, input_stride,
+                                            output_stride,
+                                            threadpool,
+                                            input,
+                                            output);
+    }
+
+    static inline enum xnn_status xnn_create_sigmoid_nc_f16(
+        uint32_t flags,
+        xnn_operator_t* sigmoid_op_out)
+    {
+        return xnn_create_unary_elementwise_nc(
+            xnn_unary_sigmoid /*op_type*/,
+            xnn_datatype_fp16 /*input_datatype*/,
+            xnn_datatype_fp16 /*output_datatype*/,
+            NULL /*params*/,
+            NULL /*input_quantization*/,
+            NULL /*output_quantization*/,
+            flags /*flags*/,
+            sigmoid_op_out /*op_out*/);
+    }
+
+    static inline enum xnn_status xnn_reshape_sigmoid_nc_f16(
+        xnn_operator_t sigmoid_op,
+        size_t batch_size,
+        size_t channels,
+        size_t input_stride,
+        size_t output_stride,
+        pthreadpool_t threadpool)
+    {
+        return xnn_reshape_unary_elementwise_nc(
+            sigmoid_op,
+            batch_size,
+            channels,
+            input_stride,
+            output_stride,
+            threadpool);
+    }
+
+    static inline enum xnn_status xnn_setup_sigmoid_nc_f16(
+        xnn_operator_t sigmoid_op,
+        const void* input,
+        void* output)
+    {
+        return xnn_setup_unary_elementwise_nc(
+            sigmoid_op,
+            input,
+            output);
+    }
+
+    static inline enum xnn_status xnn_create_sigmoid_nc_f32(
+        uint32_t flags,
+        xnn_operator_t* sigmoid_op_out)
+    {
+        return xnn_create_unary_elementwise_nc(
+            xnn_unary_sigmoid /*op_type*/,
+            xnn_datatype_fp32 /*input_datatype*/,
+            xnn_datatype_fp32 /*output_datatype*/,
+            NULL /*params*/,
+            NULL /*input_quantization*/,
+            NULL /*output_quantization*/,
+            flags /*flags*/,
+            sigmoid_op_out /*op_out*/);
+    }
+
+    static inline enum xnn_status xnn_reshape_sigmoid_nc_f32(
+        xnn_operator_t sigmoid_op,
+        size_t batch_size,
+        size_t channels,
+        size_t input_stride,
+        size_t output_stride,
+        pthreadpool_t threadpool)
+    {
+        return xnn_reshape_unary_elementwise_nc(
+            sigmoid_op,
+            batch_size,
+            channels,
+            input_stride,
+            output_stride,
+            threadpool);
+    }
+
+    static inline enum xnn_status xnn_setup_sigmoid_nc_f32(
+        xnn_operator_t sigmoid_op,
+        const float* input,
+        float* output)
+    {
+        return xnn_setup_unary_elementwise_nc(
+            sigmoid_op,
+            input,
+            output);
+    }
+};
+
 class XnnPack
 {
 public:
@@ -594,11 +777,11 @@ public:
 
         if constexpr (std::is_same<T, float>::value)
         {
-            xnn_run_convert_nc_fxx_fxx = &xnn_run_convert_nc_f16_f32;
+            xnn_run_convert_nc_fxx_fxx = &XnnPackOldApi::xnn_run_convert_nc_f16_f32;
         }
         else
         {
-            xnn_run_convert_nc_fxx_fxx = &xnn_run_convert_nc_f32_f16;
+            xnn_run_convert_nc_fxx_fxx = &XnnPackOldApi::xnn_run_convert_nc_f32_f16;
         }
 
         xnn_status status = xnn_run_convert_nc_fxx_fxx(
@@ -626,11 +809,11 @@ public:
 
         if constexpr (std::is_same<T, float>::value)
         {
-            xnn_run_convert_nc_xx_xx = &xnn_run_convert_nc_qu8_f32;
+            xnn_run_convert_nc_xx_xx = &XnnPackOldApi::xnn_run_convert_nc_qu8_f32;
         }
         else
         {
-            xnn_run_convert_nc_xx_xx = &xnn_run_convert_nc_f32_qu8;
+            xnn_run_convert_nc_xx_xx = &XnnPackOldApi::xnn_run_convert_nc_f32_qu8;
         }
 
         xnn_status status = xnn_run_convert_nc_xx_xx(
@@ -1050,15 +1233,15 @@ public:
 
         if constexpr (std::is_same<T, float>::value)
         {
-            xnn_create_sigmoid_nc_xxx = &xnn_create_sigmoid_nc_f32;
-            xnn_reshape_sigmoid_nc_xxx = &xnn_reshape_sigmoid_nc_f32;
-            xnn_setup_sigmoid_nc_xxx = &xnn_setup_sigmoid_nc_f32;
+            xnn_create_sigmoid_nc_xxx = &XnnPackOldApi::xnn_create_sigmoid_nc_f32;
+            xnn_reshape_sigmoid_nc_xxx = &XnnPackOldApi::xnn_reshape_sigmoid_nc_f32;
+            xnn_setup_sigmoid_nc_xxx = &XnnPackOldApi::xnn_setup_sigmoid_nc_f32;
         }
         else
         {
-            xnn_create_sigmoid_nc_xxx = &xnn_create_sigmoid_nc_f16;
-            xnn_reshape_sigmoid_nc_xxx = &xnn_reshape_sigmoid_nc_f16;
-            xnn_setup_sigmoid_nc_xxx = &xnn_setup_sigmoid_nc_f16;
+            xnn_create_sigmoid_nc_xxx = &XnnPackOldApi::xnn_create_sigmoid_nc_f16;
+            xnn_reshape_sigmoid_nc_xxx = &XnnPackOldApi::xnn_reshape_sigmoid_nc_f16;
+            xnn_setup_sigmoid_nc_xxx = &XnnPackOldApi::xnn_setup_sigmoid_nc_f16;
         }
 
         xnn_operator_t sigmoid_op = nullptr;
