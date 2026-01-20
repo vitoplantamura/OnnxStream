@@ -70,6 +70,58 @@
 using namespace onnxstream;
 #endif
 
+// sampler_type is needed by MainArgs and can not be moved to samplers.h
+enum sampler_type {
+    EULER_A,
+    EULER,
+    HEUN,
+    DPM2,
+    DPMPP2M,
+    DPMPP2MV2,
+    DPMPP2S,
+    DPMPP2S_A,
+    DPMPP3MSDE,
+    DPMPP3MSDE_A,
+    IPNDM,
+    IPNDM_V,
+    IPNDM_VO,
+    TAYLOR3,
+    DDPM,
+    DDPM_A,
+    DDIM,
+    DDIM_A,
+    TCD,
+    TCD_A,
+    LMS,
+    LCM,
+    NUM_OF_SAMPLERS // always last
+};
+
+const std::string sampler_name[NUM_OF_SAMPLERS] = {
+    "euler_a",
+    "euler",
+    "heun",
+    "dpm2",
+    "dpm++2m",
+    "dpm++2mv2",
+    "dpm++2s",
+    "dpm++2s_a",
+    "dpm++3msde",
+    "dpm++3msde_a",
+    "ipndm",
+    "ipndm_v",
+    "ipndm_vo",
+    "taylor3",
+    "ddpm",
+    "ddpm_a",
+    "ddim",
+    "ddim_a",
+    "tcd",
+    "tcd_a",
+    "lms",
+    "lcm",
+};
+
 struct MainArgs
 {
     std::string m_path_with_slash = "./";
@@ -101,6 +153,9 @@ struct MainArgs
     std::string m_curl_parallel = "16";
     std::string m_res = "";
     std::string m_threads = "";
+
+    std::string m_sampler_name = sampler_name[EULER_A];
+    sampler_type m_sampler = EULER_A;
 
     // calculated:
     unsigned int m_latw = 512 / 8, m_lath = 512 / 8;
@@ -398,7 +453,8 @@ inline static void save_image(std::uint8_t* img, unsigned w, unsigned h, int alp
                                 + ", Model: \"" + g_main_args.m_path_safe + "\" "
                                                 + (g_main_args.m_turbo ? "(SDXL-Turbo)" :
                                                    g_main_args.m_xl ? "(SDXL)" : "(SD 1.5)")
-                                + ", Sampler: Euler Ancestral, Version: OnnxStream";
+                                + ", Sampler: " + g_main_args.m_sampler_name
+                                + ", Version: OnnxStream";
 
 #ifdef USE_LIBJPEGTURBO
     // extention is in filename and is jpeg
@@ -1502,6 +1558,9 @@ static SDCoroTask<ncnn::Mat> CFGDenoiser_CompVisDenoiser(ncnn::Net& net, float c
     co_return denoised_uncond;
 }
 
+#include "samplers.h" // needs ncnn::Mat, SDCoroTask, SDCoroState, SDXLParams, sampler_type,
+                      // CFGDenoiser_CompVisDenoiser, randn_4_w_h definitions
+
 SDCoroTask<int> sdxl_decoder(ncnn::Mat& sample, std::string output_path, bool tiled, std::string output_appendix, SDCoroState& coro_state);
 
 void sdxl_decoder(ncnn::Mat& sample, std::string output_path, bool tiled, std::string output_appendix)
@@ -1624,7 +1683,15 @@ static SDCoroTask<ncnn::Mat> diffusion_solver(int seed, int step, ncnn::Mat c, n
         }
 #endif
 
-        for (int i = 0; i < static_cast<int>(sigma.size()) - 1; i++)
+        const unsigned latent_length = g_main_args.m_latw * g_main_args.m_lath;
+        sampler_type sampler = g_main_args.m_sampler;
+        float eta = 0.0f;         // for DDPM / DDIM / TCD / DPM++3M SDE: randomness
+        float sampler_history_dt; // for Taylor3
+        float lms_coeff[4];       // for LMS
+        std::vector<ncnn::Mat> sampler_history_buffer;
+        create_buffers(sampler, sampler_history_buffer, x_mat);
+
+        for (int i = 0; i < step; i++)
         {
             double t1, t2;
             if (coro_state.batch_index == 0)
@@ -1632,34 +1699,37 @@ static SDCoroTask<ncnn::Mat> diffusion_solver(int seed, int step, ncnn::Mat c, n
                 std::cout << "step:" << i << "\t\t";
                 t1 = ncnn::get_current_time();
             }
+
+            prescale_sample(x_mat, sampler, latent_length, step, i, sigma, g_main_args.m_turbo);
+
+            switch (sampler) {
+            case DPM2:
+            case DPMPP2M:
+            case DPMPP2MV2:
+            case DPMPP2S:
+            case DPMPP2S_A:
+            case DPMPP3MSDE:
+            case DPMPP3MSDE_A:
+                // https://github.com/huggingface/diffusers/pull/5541
+                // DPM++ samplers have underflows and should be replaced with Euler
+                // at last step for SDXL (Turbo)
+                if (g_main_args.m_xl && (i == step - 1)) sampler = EULER;
+                break;
+            default: ;
+            }
+
             ncnn::Mat denoised = co_await CFGDenoiser_CompVisDenoiser(net, log_sigmas, x_mat, sigma[i], c, uc, sdxl_params, coro_state);
+
+            co_await process_sample( net, seed, c, uc, sdxl_params, coro_state, log_sigmas,
+                                     x_mat, denoised, sampler_history_buffer,
+                                     sampler_history_dt, eta, lms_coeff, sigma, latent_length,
+                                     step, i, g_main_args.m_xl, g_main_args.m_turbo, sampler );
+
             if (coro_state.batch_index == 0)
             {
                 t2 = ncnn::get_current_time();
                 SHOW_LONG_TIME_MS(t2 - t1)
-            }
-            float sigma_up = std::min(sigma[i + 1], std::sqrt(sigma[i + 1] * sigma[i + 1] * (sigma[i] * sigma[i] - sigma[i + 1] * sigma[i + 1]) / (sigma[i] * sigma[i])));
-            float sigma_down = std::sqrt(sigma[i + 1] * sigma[i + 1] - sigma_up * sigma_up);
-            std::srand(seed++);
-            ncnn::Mat randn = randn_4_w_h(rand() % 1000, g_main_args.m_latw, g_main_args.m_lath);
 
-            for (int c = 0; c < 4; c++)
-            {
-                float* x_ptr = x_mat.channel(c);
-                float* d_ptr = denoised.channel(c);
-                float* r_ptr = randn.channel(c);
-
-                for (int hw = 0; hw < g_main_args.m_latw * g_main_args.m_lath; hw++)
-                {
-                    *x_ptr = *x_ptr + ((*x_ptr - *d_ptr) / sigma[i]) * (sigma_down - sigma[i]) + *r_ptr * sigma_up;
-                    x_ptr++;
-                    d_ptr++;
-                    r_ptr++;
-                }
-            }
-
-            if (coro_state.batch_index == 0)
-            {
                 if(g_main_args.m_preview_im) {       // directly decode latent in low resolution
                     std::cout << "---> preview:\t\t";
                     double t1 = ncnn::get_current_time();
@@ -1672,8 +1742,8 @@ static SDCoroTask<ncnn::Mat> diffusion_solver(int seed, int step, ncnn::Mat c, n
                     double t2 = ncnn::get_current_time();
                     SHOW_LONG_TIME_MS( t2 - t1 )
                 }
-                if(g_main_args.m_decode_im                            // pass through decoder
-                   && i < static_cast<int>(sigma.size()) - 2) {       // if step is not last
+                if(g_main_args.m_decode_im   // pass through decoder
+                   && i < step - 1) {       // if step is not last
                     std::cout << "---> decode:\t\t";
                     double t1 = ncnn::get_current_time();
                     ncnn::Mat sample = ncnn::Mat(x_mat.w, x_mat.h, x_mat.c, x_mat.v.data());
@@ -2228,6 +2298,7 @@ inline void stable_diffusion(std::string positive_prompt = std::string{}, const 
     if (g_main_args.m_use_sd15_tiled_decoder)
         std::cout << "SD1.5 tiled decoder is available, using it" << std::endl;
     std::cout << "steps: " << step << std::endl;
+    std::cout << "sampler: " << sampler_name[g_main_args.m_sampler] << std::endl;
     std::cout << "seed: " << seed << std::endl;
     if (g_main_args.m_embed_params)
         std::cout << "generation parameters of model \"" << g_main_args.m_path_safe << "\" will be saved in images" << std::endl;
@@ -2455,6 +2526,7 @@ void stable_diffusion_xl(std::string positive_prompt, const std::string& output_
         std::cout << "negative_prompt: " << negative_prompt << std::endl;
     std::cout << "output_path: " << output_path << std::endl;
     std::cout << "steps: " << steps << std::endl;
+    std::cout << "sampler: " << sampler_name[g_main_args.m_sampler] << std::endl;
     std::cout << "seed: " << seed << std::endl;
     if (g_main_args.m_embed_params)
         std::cout << "generation parameters of model \"" << g_main_args.m_path_safe << "\" will be saved in images" << std::endl;
@@ -2789,6 +2861,10 @@ int main(int argc, char** argv)
         {
             str = &g_main_args.m_res;
         }
+        else if (arg == "--sampler")
+        {
+            str = &g_main_args.m_sampler_name;
+        }
         else
         {
             printf("Invalid command line argument: \"%s\".\n\n", arg.c_str());
@@ -2818,6 +2894,9 @@ int main(int argc, char** argv)
             printf("--rpi-lowmem        Configures the models to run on a Raspberry Pi Zero 2.\n");
             printf("--threads           Sets the number of threads, values =< 0 mean max-N.\n");
             printf("--embed-parameters  Store parameters of generation (e. g. model path) in image comments. Be sure to not place models in private directories, their names will be stored in images.\n");
+            printf("--sampler           Sampler, one of [ ");
+                for (unsigned int s = 0; s < NUM_OF_SAMPLERS - 1; s++) { printf("%s / ", sampler_name[s].c_str()); }
+                printf("%s ], default is %s.\n", sampler_name[NUM_OF_SAMPLERS - 1].c_str(), sampler_name[EULER_A].c_str());
 
             return -1;
         }
@@ -2877,6 +2956,22 @@ int main(int argc, char** argv)
         }
         if (!n_threads)
             printf("Number of CPUs not detected, using default number of threads.\n");
+    }
+
+    {
+        bool valid = false;
+        for (unsigned s = 0; s < NUM_OF_SAMPLERS; s++)
+            if(g_main_args.m_sampler_name == sampler_name[s]) {
+                g_main_args.m_sampler = (sampler_type)s;
+                valid = true;
+                break;
+            }
+        if (!valid) {
+            printf("Unknown sampler name \"%s\", valid are: ", g_main_args.m_sampler_name.c_str());
+            for (unsigned int s = 0; s < NUM_OF_SAMPLERS - 1; s++) { printf("%s, ", sampler_name[s].c_str()); }
+            printf("%s.\n", sampler_name[NUM_OF_SAMPLERS - 1].c_str());
+            return -1;
+        }
     }
 
     if (!g_main_args.m_res.size())

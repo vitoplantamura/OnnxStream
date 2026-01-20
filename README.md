@@ -351,9 +351,14 @@ These are the command line options of the Stable Diffusion example:
 --preview-steps-x8  Magnify previews to full resolution.
 --decode-steps      Decode and save every diffusion step in full resolution.
 --embed-parameters  Store parameters of generation (e. g. model path) in image comments.
+--sampler           Select sampling method.
 ```
 
-Options you're probably interested in: `--xl`, `--turbo`, `--prompt`, `--steps`, `--rpi`.
+Options you're probably interested in: `--xl`, `--turbo`, `--prompt`, `--steps`, `--rpi`,
+<details><summary>'--sampler' (expand to view examples)</summary>
+<img src='assets/kitten_grid_1.jpg'/><img src='assets/kitten_grid_2.jpg'/>
+Noisy samplers need more steps.
+</details>
 
 # How to Convert and Run a Custom Stable Diffusion 1.5 Model with OnnxStream (by @GaelicThunder)
 
