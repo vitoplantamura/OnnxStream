@@ -135,6 +135,7 @@ struct MainArgs
     std::string m_seed = std::to_string(std::time(0) % 1024 * 1024);
     std::string m_save_latents = "";
     std::string m_path_safe = ""; // if empty, comment is not stored
+    char* m_env_hftoken = std::getenv("HF_TOKEN");
     bool m_decoder_calibrate = false;
     bool m_rpi = false;
     char m_auto_rpi = 'a'; // autodetect fp16 by default
@@ -3133,7 +3134,11 @@ int main(int argc, char** argv)
 #else
                 std::string null_device = "/dev/null";
 #endif
-                std::string command = "curl --location --fail --silent --show-error --parallel ";
+                std::string command = "curl ";
+                if (g_main_args.m_env_hftoken != nullptr) {
+                    command += " -H \"Authorization: Bearer " + std::string(g_main_args.m_env_hftoken) + "\" ";
+                }
+                command += "--location --fail --silent --show-error --parallel ";
 
                 for (const auto& url : urls)
                     command += " -o \"" + url.second + "\" \"" + url.first + "\" ";
